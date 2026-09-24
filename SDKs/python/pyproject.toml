@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sonexis"
+version = "0.2.0"
+description = "Async Python client for the local Sonexis audio Runtime"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "GPL-2.0-or-later"}
+authors = [{name = "Sonexis contributors"}]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: MacOS",
+  "Typing :: Typed",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sonexis = ["py.typed"]
