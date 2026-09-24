@@ -31,6 +31,7 @@ public struct RuntimeSourceDTO: Codable, Equatable, Sendable {
     public let id: String
     public let kind: RuntimeSourceKindDTO
     public let processID: Int32?
+    public let processIDs: [Int32]?
     public let bundleIdentifier: String?
     public let name: String
     public let isActive: Bool
@@ -38,11 +39,13 @@ public struct RuntimeSourceDTO: Codable, Equatable, Sendable {
     public let nativeFormat: RuntimePCMFormatDTO?
 
     public init(id: String, kind: RuntimeSourceKindDTO = .application, processID: Int32? = nil,
+                processIDs: [Int32] = [],
                 bundleIdentifier: String? = nil, name: String, isActive: Bool,
                 isProducingAudio: Bool? = nil, nativeFormat: RuntimePCMFormatDTO? = nil) {
         self.id = id
         self.kind = kind
         self.processID = processID
+        self.processIDs = processIDs.isEmpty ? processID.map { [$0] } : processIDs.sorted()
         self.bundleIdentifier = bundleIdentifier
         self.name = name
         self.isActive = isActive
@@ -110,7 +113,7 @@ public struct RuntimeCommand: Codable, Equatable, Sendable {
     }
 }
 
-public struct RuntimeErrorDTO: Codable, Equatable, Error, Sendable {
+public struct RuntimeErrorDTO: Codable, Equatable, LocalizedError, Sendable {
     public let code: String
     public let message: String
 
@@ -118,6 +121,8 @@ public struct RuntimeErrorDTO: Codable, Equatable, Error, Sendable {
         self.code = code
         self.message = message
     }
+
+    public var errorDescription: String? { "\(code): \(message)" }
 }
 
 public struct RuntimeResponse: Codable, Equatable, Sendable {

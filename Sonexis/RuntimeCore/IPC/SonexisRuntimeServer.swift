@@ -37,8 +37,10 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     private let acceptQueue = DispatchQueue(label: "com.sonexis.runtime.control.accept")
     private let clientQueue = DispatchQueue(label: "com.sonexis.runtime.control.clients", attributes: .concurrent)
     private let stateLock = NSLock()
+    private let maximumControlClients = 32
     private var clients: [String: UnixSocketConnection] = [:]
     private var listener: UnixSocketListener?
+    private var generation: UInt64 = 0
 
     public init(socketDirectory: URL = RuntimeSocketPaths.userDefault.directory,
                 backend: RuntimeCaptureBackend) {
@@ -51,12 +53,19 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         stateLock.lock()
         guard listener == nil else { stateLock.unlock(); return }
         let newListener = UnixSocketListener(path: paths.controlSocketPath, queue: acceptQueue)
+        generation &+= 1
+        let listenerGeneration = generation
         listener = newListener
-        stateLock.unlock()
         do {
-            try newListener.start { [weak self] connection in self?.accept(connection) }
+            try newListener.start { [weak self, weak newListener] connection in
+                guard let self, let newListener else { connection.close(); return }
+                self.accept(connection, listener: newListener, generation: listenerGeneration)
+            }
+            stateLock.unlock()
         } catch {
-            stateLock.lock(); listener = nil; stateLock.unlock()
+            listener = nil
+            generation &+= 1
+            stateLock.unlock()
             throw error
         }
     }
@@ -65,6 +74,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         stateLock.lock()
         let oldListener = listener
         listener = nil
+        generation &+= 1
         let activeClients = Array(clients.values)
         clients.removeAll()
         stateLock.unlock()
@@ -73,9 +83,41 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         coordinator.stopAll()
     }
 
-    private func accept(_ connection: UnixSocketConnection) {
+    private func accept(_ connection: UnixSocketConnection,
+                        listener acceptedListener: UnixSocketListener,
+                        generation acceptedGeneration: UInt64) {
         let ownerID = UUID().uuidString.lowercased()
-        stateLock.lock(); clients[ownerID] = connection; stateLock.unlock()
+        stateLock.lock()
+        guard listener === acceptedListener, generation == acceptedGeneration else {
+            stateLock.unlock()
+            connection.close()
+            return
+        }
+        let possibleEvictions = clients.count >= maximumControlClients ? Array(clients.keys) : []
+        stateLock.unlock()
+
+        let idleOwner = possibleEvictions.first {
+            !coordinator.hasActiveSessions(ownerID: $0)
+        }
+
+        stateLock.lock()
+        guard listener === acceptedListener, generation == acceptedGeneration else {
+            stateLock.unlock()
+            connection.close()
+            return
+        }
+        var evicted: UnixSocketConnection?
+        if clients.count >= maximumControlClients, let idleOwner {
+            evicted = clients.removeValue(forKey: idleOwner)
+        }
+        guard clients.count < maximumControlClients else {
+            stateLock.unlock()
+            connection.close()
+            return
+        }
+        clients[ownerID] = connection
+        stateLock.unlock()
+        evicted?.close()
         clientQueue.async { [weak self] in self?.serve(connection: connection, ownerID: ownerID) }
     }
 
@@ -89,7 +131,15 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         while true {
             do {
                 let bytes = try connection.read()
-                for line in try parser.append(bytes) {
+                let lines: [Data]
+                do {
+                    lines = try parser.append(bytes)
+                } catch let error as RuntimeErrorDTO {
+                    try? connection.write(RuntimeProtocolCodec.encodeLine(
+                        RuntimeResponse(requestID: "unknown", error: error)))
+                    return
+                }
+                for line in lines {
                     let response: RuntimeResponse
                     do {
                         let command = try RuntimeProtocolCodec.decodeLine(RuntimeCommand.self, from: line)
@@ -140,7 +190,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             return RuntimeResponse(requestID: command.requestID, error: error)
         } catch {
             return RuntimeResponse(requestID: command.requestID,
-                error: RuntimeErrorDTO(code: "runtime_error", message: error.localizedDescription))
+                error: RuntimeErrorDTO(code: "runtime_error", message: String(describing: error)))
         }
     }
 }

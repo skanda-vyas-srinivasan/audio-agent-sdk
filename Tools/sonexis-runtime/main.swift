@@ -24,6 +24,7 @@ private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sen
                 id: source.id,
                 kind: .application,
                 processID: source.processIdentifiers.first,
+                processIDs: source.processIdentifiers,
                 bundleIdentifier: source.bundleIdentifier,
                 name: source.name,
                 isActive: source.state == .active,
@@ -55,14 +56,24 @@ private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sen
         guard source.state == .active else {
             throw RuntimeErrorDTO(code: "source_unavailable", message: "Audio source is not active: \(sourceID)")
         }
-        let session = try manager.startCapture(source: source) { frame in
-            onFrame(RuntimeBackendAudioFrame(
-                payload: frame.pcm,
-                sequence: frame.sequence,
-                timestampNanoseconds: frame.timestampNanoseconds,
-                frameCount: frame.frameCount,
-                format: .runtimeDefault
-            ))
+        let session: AudioCaptureSession
+        do {
+            session = try manager.startCapture(source: source) { frame in
+                onFrame(RuntimeBackendAudioFrame(
+                    payload: frame.pcm,
+                    sequence: frame.sequence,
+                    timestampNanoseconds: frame.timestampNanoseconds,
+                    frameCount: frame.frameCount,
+                    format: .runtimeDefault
+                ))
+            }
+        } catch AudioCaptureError.sourceUnavailable {
+            throw RuntimeErrorDTO(code: "source_unavailable", message: "Audio source disappeared before capture began")
+        } catch {
+            throw RuntimeErrorDTO(
+                code: "capture_initialization_failed",
+                message: String(describing: error)
+            )
         }
         session.onStateChange { state, error in
             switch state {
@@ -114,6 +125,6 @@ do {
     terminate.resume()
     dispatchMain()
 } catch {
-    fputs("sonexis-runtime: \(error)\n", stderr)
+    fputs("sonexis-runtime: \(error.localizedDescription)\n", stderr)
     exit(EXIT_FAILURE)
 }

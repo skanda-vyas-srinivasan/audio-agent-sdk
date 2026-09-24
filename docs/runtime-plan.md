@@ -43,13 +43,13 @@ The reusable core is Foundation/AppKit/CoreAudio/AVFoundation code with no Swift
 
 `AudioCaptureSession` owns exactly one tap, aggregate device, IOProc, ring consumer, converter, and frame callback. Lifecycle work is serialized. Stop is idempotent and shutdown order is: prevent new work, stop IOProc, destroy IOProc, destroy aggregate, destroy tap, stop the consumer, then release buffers. The IOProc retains no session-owned object beyond this ordering.
 
-The Runtime listens only on per-user Unix-domain sockets. Control messages are bounded newline-delimited JSON. Audio uses a separate socket and a fixed binary header plus PCM payload. A random one-use stream token binds a data connection to a session. Each session has bounded pending output and reports capture/client drops rather than blocking capture.
+The Runtime listens only on per-user Unix-domain sockets. Control messages are bounded newline-delimited JSON. Audio uses a separate per-session socket and a fixed binary header plus PCM payload. Each session has bounded pending output and reports capture/client drops rather than blocking capture.
 
 ## Protocol outline
 
-Control requests carry protocol version, request ID, command type, and payload. Version 1 supports `hello`, `list_sources`, `start_capture`, `session_status`, and `stop_capture`. Responses either carry a typed result or a stable error code and readable message.
+Control requests carry protocol version, request ID, command type, and command-specific identifiers. Version 1 supports `ping`, `list_sources`, `start_capture`, `session_status`, and `stop_capture`. Responses either carry a typed result or a stable error code and readable message.
 
-Runtime output is fixed initially at signed 16-bit little-endian PCM, mono, 16 kHz. Binary frames carry magic/version, flags, sequence, monotonic timestamp, frame count, payload size, and dropped-frame count. End-of-stream is explicit.
+Runtime output is fixed initially at signed 16-bit little-endian PCM, mono, 16 kHz. Binary frames carry magic/version, a reserved flags field, sequence, monotonic stream-relative timestamp, frame count, payload size, sample rate, channels, and bit depth. Socket EOF terminates the stream in version 1.
 
 ## Migration plan
 
@@ -72,4 +72,3 @@ Runtime output is fixed initially at signed 16-bit little-endian PCM, mono, 16 k
 - Route changes require rebuilding capture against the new default-device UID while preserving external session identity.
 - Bare command-line executables have a separate Screen & System Audio Recording permission identity; live TCC behavior requires signed manual validation.
 - Callback timestamps are not currently propagated. Version 1 uses monotonic delivery/sample timing and marks discontinuities; preserving HAL host time is a follow-up if the initial tap seam cannot carry it safely.
-

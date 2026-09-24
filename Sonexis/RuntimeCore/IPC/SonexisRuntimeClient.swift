@@ -3,6 +3,7 @@ import Foundation
 public final class SonexisRuntimeClient: @unchecked Sendable {
     public let controlSocketPath: String
     private let requestLock = NSLock()
+    private let connectionLock = NSLock()
     private var controlConnection: UnixSocketConnection?
     private var responseParser = RuntimeNDJSONParser()
     private var pendingResponses: [Data] = []
@@ -14,19 +15,23 @@ public final class SonexisRuntimeClient: @unchecked Sendable {
     deinit { disconnect() }
 
     public func connect() throws {
-        requestLock.lock(); defer { requestLock.unlock() }
+        connectionLock.lock(); defer { connectionLock.unlock() }
         guard controlConnection == nil else { return }
         controlConnection = try UnixSocketSystem.connect(path: controlSocketPath)
     }
 
     public func disconnect() {
-        requestLock.lock()
+        connectionLock.lock()
         let connection = controlConnection
         controlConnection = nil
+        connectionLock.unlock()
+        // Closing first wakes a request blocked in recv without waiting for the
+        // request serialization lock.
+        connection?.close()
+        requestLock.lock()
         responseParser = RuntimeNDJSONParser()
         pendingResponses.removeAll()
         requestLock.unlock()
-        connection?.close()
     }
 
     public func listSources() throws -> [RuntimeSourceDTO] {
@@ -77,7 +82,10 @@ public final class SonexisRuntimeClient: @unchecked Sendable {
 
     private func request(_ command: RuntimeCommand) throws -> RuntimeResponse {
         requestLock.lock(); defer { requestLock.unlock() }
-        guard let connection = controlConnection else {
+        connectionLock.lock()
+        let connection = controlConnection
+        connectionLock.unlock()
+        guard let connection else {
             throw RuntimeErrorDTO(code: "not_connected", message: "Connect to Sonexis Runtime first")
         }
         try connection.write(RuntimeProtocolCodec.encodeLine(command))

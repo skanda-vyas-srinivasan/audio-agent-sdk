@@ -10,7 +10,7 @@ public enum UnixSocketError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .pathTooLong: return "Unix socket path is too long"
-        case .pathOccupied(let path): return "Refusing to replace a non-socket file at \(path)"
+        case .pathOccupied(let path): return "Unix socket path is already in use: \(path)"
         case .systemCall(let name, let code): return "\(name) failed: \(String(cString: strerror(code)))"
         case .disconnected: return "Unix socket disconnected"
         }
@@ -18,8 +18,10 @@ public enum UnixSocketError: LocalizedError, Sendable {
 }
 
 public final class UnixSocketConnection: @unchecked Sendable {
-    private let stateLock = NSLock()
+    private let state = NSCondition()
     private var descriptor: Int32
+    private var activeOperations = 0
+    private var isClosing = false
 
     init(descriptor: Int32) {
         self.descriptor = descriptor
@@ -30,20 +32,21 @@ public final class UnixSocketConnection: @unchecked Sendable {
     deinit { close() }
 
     public func close() {
-        stateLock.lock()
+        state.lock()
+        guard !isClosing, descriptor >= 0 else { state.unlock(); return }
+        isClosing = true
         let fd = descriptor
+        _ = Darwin.shutdown(fd, SHUT_RDWR)
+        while activeOperations > 0 { state.wait() }
         descriptor = -1
-        stateLock.unlock()
-        if fd >= 0 {
-            _ = Darwin.shutdown(fd, SHUT_RDWR)
-            _ = Darwin.close(fd)
-        }
+        state.unlock()
+        _ = Darwin.close(fd)
     }
 
     public func read(maximumBytes: Int = 16 * 1024) throws -> Data {
         guard maximumBytes > 0 else { return Data() }
-        let fd = currentDescriptor()
-        guard fd >= 0 else { throw UnixSocketError.disconnected }
+        let fd = try beginOperation()
+        defer { endOperation() }
         var storage = [UInt8](repeating: 0, count: maximumBytes)
         while true {
             let count = Darwin.recv(fd, &storage, storage.count, 0)
@@ -64,8 +67,8 @@ public final class UnixSocketConnection: @unchecked Sendable {
     }
 
     public func write(_ data: Data) throws {
-        let fd = currentDescriptor()
-        guard fd >= 0 else { throw UnixSocketError.disconnected }
+        let fd = try beginOperation()
+        defer { endOperation() }
         try data.withUnsafeBytes { rawBuffer in
             guard let base = rawBuffer.baseAddress else { return }
             var sent = 0
@@ -78,9 +81,18 @@ public final class UnixSocketConnection: @unchecked Sendable {
         }
     }
 
-    private func currentDescriptor() -> Int32 {
-        stateLock.lock(); defer { stateLock.unlock() }
+    private func beginOperation() throws -> Int32 {
+        state.lock(); defer { state.unlock() }
+        guard descriptor >= 0, !isClosing else { throw UnixSocketError.disconnected }
+        activeOperations += 1
         return descriptor
+    }
+
+    private func endOperation() {
+        state.lock()
+        activeOperations -= 1
+        if activeOperations == 0 { state.broadcast() }
+        state.unlock()
     }
 }
 
@@ -91,6 +103,7 @@ public final class UnixSocketListener: @unchecked Sendable {
     private let stateLock = NSLock()
     private var descriptor: Int32 = -1
     private var source: DispatchSourceRead?
+    private var ownsSocketPath = false
 
     public init(path: String, queue: DispatchQueue, acceptedConnectionsNonBlocking: Bool = false) {
         self.path = path
@@ -102,12 +115,15 @@ public final class UnixSocketListener: @unchecked Sendable {
 
     public func start(onAccept: @escaping @Sendable (UnixSocketConnection) -> Void) throws {
         let fd = try UnixSocketSystem.makeSocket()
+        var didBind = false
         do {
             try UnixSocketSystem.prepareSocketPath(path)
             try UnixSocketSystem.bind(fd, path: path)
+            didBind = true
             guard Darwin.listen(fd, 16) == 0 else { throw UnixSocketError.systemCall("listen", errno) }
         } catch {
             _ = Darwin.close(fd)
+            if didBind { try? FileManager.default.removeItem(atPath: path) }
             throw error
         }
 
@@ -117,6 +133,7 @@ public final class UnixSocketListener: @unchecked Sendable {
             throw RuntimeErrorDTO(code: "already_running", message: "Socket listener is already running")
         }
         descriptor = fd
+        ownsSocketPath = true
         let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         source = readSource
         stateLock.unlock()
@@ -147,11 +164,14 @@ public final class UnixSocketListener: @unchecked Sendable {
     public func stop() {
         stateLock.lock()
         let oldSource = source
+        let shouldRemovePath = ownsSocketPath
         source = nil
         descriptor = -1
+        ownsSocketPath = false
         stateLock.unlock()
         oldSource?.cancel()
-        if let status = try? FileManager.default.attributesOfItem(atPath: path)[.type] as? FileAttributeType,
+        if shouldRemovePath,
+           let status = try? FileManager.default.attributesOfItem(atPath: path)[.type] as? FileAttributeType,
            status == .typeSocket { try? FileManager.default.removeItem(atPath: path) }
     }
 }
@@ -195,6 +215,15 @@ public enum UnixSocketSystem {
         var status = stat()
         if lstat(path, &status) == 0 {
             guard status.st_mode & S_IFMT == S_IFSOCK else { throw UnixSocketError.pathOccupied(path) }
+            guard status.st_uid == getuid() else { throw UnixSocketError.pathOccupied(path) }
+            do {
+                let existing = try connect(path: path)
+                existing.close()
+                throw UnixSocketError.pathOccupied(path)
+            } catch UnixSocketError.systemCall("connect", let code)
+                where code == ECONNREFUSED || code == ENOENT {
+                // The owning process is gone; remove only this stale socket.
+            }
             guard unlink(path) == 0 else { throw UnixSocketError.systemCall("unlink", errno) }
         } else if errno != ENOENT {
             throw UnixSocketError.systemCall("lstat", errno)

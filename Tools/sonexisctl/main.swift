@@ -30,9 +30,15 @@ private struct Arguments {
             case "--debug":
                 debug = true
             default:
+                if values[index].hasPrefix("-") {
+                    throw RuntimeErrorDTO(code: "usage", message: "Unknown option: \(values[index])")
+                }
                 positional.append(values[index])
             }
             index += 1
+        }
+        guard positional.count <= 1 else {
+            throw RuntimeErrorDTO(code: "usage", message: Self.usage)
         }
         value = positional.first
         self.output = output
@@ -49,13 +55,17 @@ private func printSession(_ session: RuntimeSessionDTO) {
 
 do {
     let arguments = try Arguments(Array(CommandLine.arguments.dropFirst()))
+    if ["help", "--help", "-h"].contains(arguments.command) {
+        print(Arguments.usage)
+        exit(EXIT_SUCCESS)
+    }
     let client = SonexisRuntimeClient(controlSocketPath: arguments.socketPath)
     try client.connect()
 
     switch arguments.command {
     case "sources":
         let sources = try client.listSources()
-        print(String(format: "%-42s  %-8s  %s", "ID", "STATUS", "APP"))
+        print("\("ID".padding(toLength: 42, withPad: " ", startingAt: 0))  \("STATUS".padding(toLength: 8, withPad: " ", startingAt: 0))  APP")
         for source in sources {
             print("\(source.id.padding(toLength: 42, withPad: " ", startingAt: 0))  \((source.isActive ? "active" : "inactive").padding(toLength: 8, withPad: " ", startingAt: 0))  \(source.name)")
         }
@@ -100,12 +110,10 @@ do {
     case "status":
         guard let id = arguments.value else { throw RuntimeErrorDTO(code: "usage", message: Arguments.usage) }
         printSession(try client.sessionStatus(sessionID: id))
-    case "help", "--help", "-h":
-        print(Arguments.usage)
     default:
         throw RuntimeErrorDTO(code: "usage", message: Arguments.usage)
     }
 } catch {
-    fputs("sonexisctl: \(error)\n", stderr)
+    fputs("sonexisctl: \(error.localizedDescription)\n", stderr)
     exit(EXIT_FAILURE)
 }

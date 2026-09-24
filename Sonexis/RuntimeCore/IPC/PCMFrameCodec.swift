@@ -73,7 +73,8 @@ public enum RuntimePCMFrameCodec {
         guard magic == RuntimePCMFrameHeader.magic, version == RuntimePCMFrameHeader.version,
               headerSize == RuntimePCMFrameHeader.encodedSize,
               payloadSize <= RuntimePCMFrameHeader.maximumPayloadBytes,
-              sampleRate > 0, frameCount > 0, channels > 0, bits > 0 else {
+              sampleRate > 0, frameCount > 0, channels > 0, bits == 16,
+              UInt64(payloadSize) == UInt64(frameCount) * UInt64(channels) * UInt64(bits / 8) else {
             throw RuntimeErrorDTO(code: "invalid_pcm_header", message: "PCM frame header contains unsupported or invalid values")
         }
         return RuntimePCMFrameHeader(payloadByteCount: payloadSize, sequence: sequence,

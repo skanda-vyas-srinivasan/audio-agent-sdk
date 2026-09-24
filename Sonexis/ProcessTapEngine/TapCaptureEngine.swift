@@ -36,6 +36,7 @@ final class TapCaptureEngine {
     private var tapID: AudioObjectID = kAudioObjectUnknown
     private var aggregateDeviceID: AudioDeviceID = kAudioObjectUnknown
     private var ioProcID: AudioDeviceIOProcID?
+    private var callbackRetainActive = false
     private var ringBuffer: RealtimeRingBuffer?
 
     private(set) var sourceDevice: AudioDeviceSummary?
@@ -155,25 +156,33 @@ final class TapCaptureEngine {
     }
 
     func createIOProc(ringBuffer: RealtimeRingBuffer) throws {
-        let clientData = Unmanaged.passUnretained(self).toOpaque()
+        // The HAL owns one retain until IOProc destruction succeeds. If Core
+        // Audio refuses teardown, leaking this small capture owner is safer than
+        // allowing a late realtime callback to dereference freed Swift objects.
+        let retainedSelf = Unmanaged.passRetained(self)
+        let clientData = retainedSelf.toOpaque()
 
         var createdIOProcID: AudioDeviceIOProcID?
-        try checkOSStatus(
-            AudioDeviceCreateIOProcID(
-                aggregateDeviceID,
-                tapInputIOProc,
-                clientData,
-                &createdIOProcID
-            ),
-            operation: "Create tap aggregate IOProc"
+        let status = AudioDeviceCreateIOProcID(
+            aggregateDeviceID,
+            tapInputIOProc,
+            clientData,
+            &createdIOProcID
         )
+        guard status == noErr else {
+            retainedSelf.release()
+            try checkOSStatus(status, operation: "Create tap aggregate IOProc")
+            return
+        }
 
         guard let createdIOProcID else {
+            retainedSelf.release()
             throw SonexisError(message: "Create tap aggregate IOProc returned nil IOProcID")
         }
 
         self.ringBuffer = ringBuffer
         ioProcID = createdIOProcID
+        callbackRetainActive = true
     }
 
     func start() throws {
@@ -196,15 +205,22 @@ final class TapCaptureEngine {
         }
     }
 
-    func destroyIOProc(log: Bool) {
+    @discardableResult
+    func destroyIOProc(log: Bool) -> Bool {
         if aggregateDeviceID != kAudioObjectUnknown, let ioProcID {
             let status = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
             if log { printCleanupResult("destroyed tap aggregate IOProc ID", status: status) }
+            guard status == noErr else { return false }
             self.ioProcID = nil
             ringBuffer = nil
+            if callbackRetainActive {
+                callbackRetainActive = false
+                Unmanaged.passUnretained(self).release()
+            }
         } else if log {
             print("Cleanup: no tap aggregate IOProc ID to destroy.")
         }
+        return true
     }
 
     func destroyAggregateDevice(log: Bool) {
@@ -229,13 +245,15 @@ final class TapCaptureEngine {
         }
     }
 
-    func teardown(log: Bool) {
+    @discardableResult
+    func teardown(log: Bool) -> Bool {
         stop(log: log)
-        destroyIOProc(log: log)
+        guard destroyIOProc(log: log) else { return false }
         destroyAggregateDevice(log: log)
         destroyTap(log: log)
         sourceDevice = nil
         tapFormat = nil
+        return true
     }
 
     fileprivate func captureCallback(inputData: UnsafePointer<AudioBufferList>) {

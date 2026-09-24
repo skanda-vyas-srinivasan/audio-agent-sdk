@@ -82,19 +82,22 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
         queue.sync { records[sessionID] = record }
 
         do {
-            let backendSession = try backend.startCapture(sourceID: sourceID, onFrame: { [weak self] frame in
-                self?.forward(frame, sessionID: sessionID)
+            let backendSession = try backend.startCapture(sourceID: sourceID, onFrame: { frame in
+                plane.offer(frame)
             }, onEnded: { [weak self] error in
                 self?.captureEnded(sessionID: sessionID, error: error)
             })
-            queue.sync {
+            return queue.sync {
                 // Backend startup may synchronously report termination.
-                guard record.state == .starting else { backendSession.stop(); return }
+                guard record.state == .starting else {
+                    backendSession.stop()
+                    return snapshot(record)
+                }
                 record.format = backendSession.outputFormat
                 record.backendSession = backendSession
                 record.state = .capturing
+                return snapshot(record)
             }
-            return snapshot(record)
         } catch {
             _ = queue.sync { records.removeValue(forKey: sessionID) }
             plane.stop()
@@ -108,7 +111,9 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
                 throw RuntimeErrorDTO(code: "session_not_found", message: "No capture session named \(sessionID)")
             }
             stop(record, state: .stopped, error: nil)
-            return snapshot(record)
+            let terminal = snapshot(record)
+            pruneTerminalRecords()
+            return terminal
         }
     }
 
@@ -123,8 +128,18 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
 
     public func stopSessions(ownerID: String) {
         queue.sync {
-            records.values.filter { $0.ownerID == ownerID && ($0.state == .starting || $0.state == .capturing) }
+            let owned = records.values.filter { $0.ownerID == ownerID }
+            owned.filter { $0.state == .starting || $0.state == .capturing }
                 .forEach { stop($0, state: .stopped, error: nil) }
+            owned.forEach { records.removeValue(forKey: $0.id) }
+        }
+    }
+
+    public func hasActiveSessions(ownerID: String) -> Bool {
+        queue.sync {
+            records.values.contains {
+                $0.ownerID == ownerID && ($0.state == .starting || $0.state == .capturing)
+            }
         }
     }
 
@@ -132,13 +147,7 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
         queue.sync {
             records.values.filter { $0.state == .starting || $0.state == .capturing }
                 .forEach { stop($0, state: .stopped, error: nil) }
-        }
-    }
-
-    private func forward(_ frame: RuntimeBackendAudioFrame, sessionID: String) {
-        queue.async { [weak self] in
-            guard let self, let record = self.records[sessionID], record.state == .capturing else { return }
-            record.dataPlane.offer(frame)
+            records.removeAll()
         }
     }
 
@@ -146,6 +155,7 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self, let record = self.records[sessionID], record.state == .starting || record.state == .capturing else { return }
             self.stop(record, state: error == nil ? .stopped : .failed, error: error)
+            self.pruneTerminalRecords()
         }
     }
 
@@ -166,5 +176,14 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
             format: record.format, dataSocketPath: record.dataPlane.path,
             startedAtNanoseconds: record.startedAt, framesForwarded: metrics.framesForwarded,
             droppedFrames: metrics.droppedFrames)
+    }
+
+    private func pruneTerminalRecords(limit: Int = 128) {
+        let terminal = records.values
+            .filter { $0.state == .stopped || $0.state == .failed }
+            .sorted { $0.startedAt < $1.startedAt }
+        for record in terminal.prefix(max(0, terminal.count - limit)) {
+            records.removeValue(forKey: record.id)
+        }
     }
 }

@@ -43,6 +43,9 @@ final class AudioCaptureSession: @unchecked Sendable {
     let outputFormat = RuntimePCMFormat.pcm16Mono16kHz
 
     private let queue: DispatchQueue
+    private let deliveryQueue: DispatchQueue
+    private let deliveryQueueKey = DispatchSpecificKey<UInt8>()
+    private let deliveryCapacity = DispatchSemaphore(value: 32)
     private let queueKey = DispatchSpecificKey<UInt8>()
     private let target: AudioCaptureTarget
     private var tapEngine: TapCaptureEngine?
@@ -58,11 +61,13 @@ final class AudioCaptureSession: @unchecked Sendable {
     private var onTermination: (@Sendable (UUID) -> Void)?
     private var sequence: UInt64 = 0
     private var normalizedFramesDelivered: UInt64 = 0
+    private var normalizedFramesProduced: UInt64 = 0
     private var bytesDelivered: UInt64 = 0
     private var conversionBatches: UInt64 = 0
     private var conversionNanoseconds: UInt64 = 0
     private var completedNativeFrames: UInt64 = 0
     private var completedDroppedFrames: UInt64 = 0
+    private var deliveryDroppedFrames: UInt64 = 0
 
     init(
         id: UUID = UUID(),
@@ -79,7 +84,9 @@ final class AudioCaptureSession: @unchecked Sendable {
         self.frameHandler = frameHandler
         self.onTermination = onTermination
         self.queue = DispatchQueue(label: "Sonexis.RuntimeCapture.\(id.uuidString)", qos: .userInitiated)
+        self.deliveryQueue = DispatchQueue(label: "Sonexis.RuntimeCaptureDelivery.\(id.uuidString)", qos: .userInitiated)
         queue.setSpecific(key: queueKey, value: 1)
+        deliveryQueue.setSpecific(key: deliveryQueueKey, value: 1)
     }
 
     deinit {
@@ -116,6 +123,7 @@ final class AudioCaptureSession: @unchecked Sendable {
                 normalizedFramesDelivered: normalizedFramesDelivered,
                 bytesDelivered: bytesDelivered,
                 ringDroppedFrames: completedDroppedFrames + (ringBuffer?.droppedFrames ?? 0),
+                deliveryDroppedFrames: deliveryDroppedFrames,
                 conversionBatches: conversionBatches,
                 conversionNanoseconds: conversionNanoseconds,
                 ringBacklogFrames: ringBuffer?.fillFrames ?? 0
@@ -134,6 +142,12 @@ final class AudioCaptureSession: @unchecked Sendable {
             frameHandler = nil
             stateHandler = nil
             notifyTermination()
+        }
+        // An external stop does not return while a previously accepted consumer
+        // callback is still running. Reentrant stop from that callback skips the
+        // barrier; queued deliveries observe the cleared handler and are dropped.
+        if DispatchQueue.getSpecific(key: deliveryQueueKey) == nil {
+            deliveryQueue.sync {}
         }
     }
 
@@ -243,16 +257,20 @@ final class AudioCaptureSession: @unchecked Sendable {
                 let outputFrames = UInt32(pcm.count / outputFormat.bytesPerFrame)
                 let frame = AudioFrame(
                     sequence: sequence,
-                    timestampNanoseconds: normalizedFramesDelivered * 1_000_000_000
+                    timestampNanoseconds: normalizedFramesProduced * 1_000_000_000
                         / UInt64(outputFormat.sampleRate),
                     frameCount: outputFrames,
                     format: outputFormat,
                     pcm: pcm
                 )
                 sequence &+= 1
-                normalizedFramesDelivered &+= UInt64(outputFrames)
-                bytesDelivered &+= UInt64(pcm.count)
-                frameHandler?(frame)
+                normalizedFramesProduced &+= UInt64(outputFrames)
+                if enqueueForDelivery(frame) {
+                    normalizedFramesDelivered &+= UInt64(outputFrames)
+                    bytesDelivered &+= UInt64(pcm.count)
+                } else {
+                    deliveryDroppedFrames &+= UInt64(outputFrames)
+                }
                 guard currentState == .running || currentState == .starting else { return }
             } catch {
                 fail(error)
@@ -338,6 +356,20 @@ final class AudioCaptureSession: @unchecked Sendable {
     private func transition(to state: AudioCaptureSessionState, error: Error? = nil) {
         currentState = state
         stateHandler?(state, error)
+    }
+
+    private func enqueueForDelivery(_ frame: AudioFrame) -> Bool {
+        guard deliveryCapacity.wait(timeout: .now()) == .success else { return false }
+        deliveryQueue.async { [weak self] in
+            defer { self?.deliveryCapacity.signal() }
+            guard let self else { return }
+            let handler = self.performSync { () -> FrameHandler? in
+                guard self.currentState == .running || self.currentState == .starting else { return nil }
+                return self.frameHandler
+            }
+            handler?(frame)
+        }
+        return true
     }
 
     private func notifyTermination() {

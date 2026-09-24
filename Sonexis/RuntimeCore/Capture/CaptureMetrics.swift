@@ -5,6 +5,7 @@ struct CaptureMetrics: Codable, Equatable, Sendable {
     let normalizedFramesDelivered: UInt64
     let bytesDelivered: UInt64
     let ringDroppedFrames: UInt64
+    let deliveryDroppedFrames: UInt64
     let conversionBatches: UInt64
     let conversionNanoseconds: UInt64
     let ringBacklogFrames: UInt32
@@ -14,4 +15,3 @@ struct CaptureMetrics: Codable, Equatable, Sendable {
         return Double(conversionNanoseconds) / Double(conversionBatches) / 1_000.0
     }
 }
-

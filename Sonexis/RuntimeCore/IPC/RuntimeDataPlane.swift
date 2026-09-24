@@ -11,6 +11,7 @@ public final class RuntimeDataPlane: @unchecked Sendable {
     private let queue: DispatchQueue
     private let listener: UnixSocketListener
     private let capacity = DispatchSemaphore(value: 64)
+    private let metricsLock = NSLock()
     private var clients: [UUID: UnixSocketConnection] = [:]
     private var running = false
     private var forwarded: UInt64 = 0
@@ -37,14 +38,17 @@ public final class RuntimeDataPlane: @unchecked Sendable {
     /// allowing an arbitrarily slow client to consume unbounded memory.
     public func offer(_ frame: RuntimeBackendAudioFrame) {
         guard capacity.wait(timeout: .now()) == .success else {
-            queue.async { [weak self] in self?.dropped &+= 1 }
+            recordDropped(frame.frameCount)
             return
         }
         queue.async { [weak self] in
             defer { self?.capacity.signal() }
             guard let self, self.running else { return }
             do {
-                guard frame.payload.count <= Int(UInt32.max) else { self.dropped &+= 1; return }
+                guard frame.payload.count <= Int(UInt32.max) else {
+                    self.recordDropped(frame.frameCount)
+                    return
+                }
                 let header = RuntimePCMFrameHeader(payloadByteCount: UInt32(frame.payload.count),
                     sequence: frame.sequence, timestampNanoseconds: frame.timestampNanoseconds,
                     sampleRate: frame.format.sampleRate, frameCount: frame.frameCount,
@@ -55,9 +59,15 @@ public final class RuntimeDataPlane: @unchecked Sendable {
                     do { try client.write(encoded) } catch { dead.append(id); client.close() }
                 }
                 dead.forEach { self.clients.removeValue(forKey: $0) }
-                if self.clients.isEmpty { self.dropped &+= 1 } else { self.forwarded &+= 1 }
+                if self.clients.isEmpty {
+                    self.recordDropped(frame.frameCount)
+                } else {
+                    self.metricsLock.lock()
+                    self.forwarded &+= UInt64(frame.frameCount)
+                    self.metricsLock.unlock()
+                }
             } catch {
-                self.dropped &+= 1
+                self.recordDropped(frame.frameCount)
             }
         }
     }
@@ -73,6 +83,20 @@ public final class RuntimeDataPlane: @unchecked Sendable {
     }
 
     public func metrics() -> RuntimeDataPlaneMetrics {
-        queue.sync { RuntimeDataPlaneMetrics(framesForwarded: forwarded, droppedFrames: dropped, connectedClients: clients.count) }
+        metricsLock.lock()
+        let counters = (forwarded, dropped)
+        metricsLock.unlock()
+        let clientCount = queue.sync { clients.count }
+        return RuntimeDataPlaneMetrics(
+            framesForwarded: counters.0,
+            droppedFrames: counters.1,
+            connectedClients: clientCount
+        )
+    }
+
+    private func recordDropped(_ frames: UInt32) {
+        metricsLock.lock()
+        dropped &+= UInt64(frames)
+        metricsLock.unlock()
     }
 }

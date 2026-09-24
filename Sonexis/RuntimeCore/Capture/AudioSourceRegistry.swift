@@ -21,7 +21,9 @@ enum AudioSourceRegistryError: Error, CustomStringConvertible {
 /// which running application processes currently have an audio process object.
 final class AudioSourceRegistry {
     func availableSources() throws -> [AudioSource] {
-        let audioPIDs = try currentAudioProcessIDs()
+        // Application enumeration remains useful when HAL discovery is
+        // temporarily unavailable (including before capture permission settles).
+        let audioPIDs = try? currentAudioProcessIDs()
         let nativeFormat = try? defaultOutputFormat()
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let ownBundleID = Bundle.main.bundleIdentifier
@@ -38,7 +40,11 @@ final class AudioSourceRegistry {
         return applicationsByBundleID.map { bundleID, applications in
             let sortedApplications = applications.sorted { $0.processIdentifier < $1.processIdentifier }
             let processIDs = sortedApplications.map(\.processIdentifier)
-            let isProducingAudio = processIDs.contains { audioPIDs.contains($0) }
+            // HAL process-list membership is only an activity heuristic; nil
+            // means the registry could not determine it.
+            let isProducingAudio = audioPIDs.map { audioPIDs in
+                processIDs.contains { audioPIDs.contains($0) }
+            }
             let representative = sortedApplications[0]
             return AudioSource(
                 id: AudioSource.applicationID(bundleIdentifier: bundleID),

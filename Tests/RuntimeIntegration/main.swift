@@ -68,6 +68,41 @@ do {
     let sources = try client.listSources()
     expect(sources.map(\.id) == ["app.test.audio"], "source enumeration failed")
 
+    do {
+        let duplicate = SonexisRuntimeServer(socketDirectory: directory, backend: FakeBackend())
+        try duplicate.start()
+        duplicate.stop()
+        fatalError("a second runtime replaced the live control socket")
+    } catch UnixSocketError.pathOccupied {
+        // Expected: a stale socket may be replaced, a live runtime may not.
+    }
+
+    let malformed = try UnixSocketSystem.connect(path: server.paths.controlSocketPath)
+    try malformed.write(Data(repeating: 0x61,
+        count: RuntimeProtocolCodec.maximumControlMessageBytes + 1))
+    let malformedResponse = try RuntimeProtocolCodec.decodeLine(
+        RuntimeResponse.self,
+        from: malformed.read()
+    )
+    expect(malformedResponse.error?.code == "message_too_large",
+           "oversized control input did not return a typed error")
+    malformed.close()
+
+    if let cliPath = ProcessInfo.processInfo.environment["SONEXISCTL_BINARY"] {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: cliPath)
+        process.arguments = ["sources", "--socket", server.paths.controlSocketPath]
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        expect(process.terminationStatus == 0, "sonexisctl sources failed: \(text)")
+        expect(text.contains("app.test.audio") && text.contains("Synthetic Audio"),
+               "sonexisctl did not render sources: \(text)")
+    }
+
     for _ in 0..<3 {
         let session = try client.startCapture(sourceID: sources[0].id)
         expect(session.state == .capturing, "session did not enter capturing")
@@ -88,6 +123,39 @@ do {
         expect(stoppedAgain.state == .stopped,
                "second stop was not idempotent")
     }
+
+    let firstTerminal = try client.startCapture(sourceID: sources[0].id)
+    _ = try client.stopCapture(sessionID: firstTerminal.id)
+    for _ in 0..<130 {
+        let churn = try client.startCapture(sourceID: sources[0].id)
+        _ = try client.stopCapture(sessionID: churn.id)
+    }
+    do {
+        _ = try client.sessionStatus(sessionID: firstTerminal.id)
+        fatalError("terminal session history was not bounded")
+    } catch let error as RuntimeErrorDTO {
+        expect(error.code == "session_not_found", "pruned session returned wrong error")
+    }
+
+    let abandonedClient = SonexisRuntimeClient(controlSocketPath: server.paths.controlSocketPath)
+    try abandonedClient.connect()
+    let abandoned = try abandonedClient.startCapture(sourceID: sources[0].id)
+    abandonedClient.disconnect()
+    var ownerCleanedUp = false
+    for _ in 0..<50 where !ownerCleanedUp {
+        usleep(10_000)
+        do {
+            _ = try client.sessionStatus(sessionID: abandoned.id)
+        } catch let error as RuntimeErrorDTO where error.code == "session_not_found" {
+            ownerCleanedUp = true
+        }
+    }
+    expect(ownerCleanedUp, "control disconnect did not clean up its capture session")
+
+    let concurrentA = try client.startCapture(sourceID: sources[0].id)
+    let concurrentB = try client.startCapture(sourceID: sources[0].id)
+    _ = try client.stopCapture(sessionID: concurrentA.id)
+    _ = try client.stopCapture(sessionID: concurrentB.id)
 
     do {
         _ = try client.startCapture(sourceID: "invalid")
