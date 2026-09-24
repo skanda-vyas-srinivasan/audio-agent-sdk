@@ -34,7 +34,7 @@ HAL callback ── preallocated SPSC ring             └─► bounded data pl
 
 Protocol v2 retains separate control, event, and audio planes. A control connection must complete `hello` before any other command. The handshake selects protocol version 2 and advertises runtime version, capabilities, supported audio formats, and resource limits. Event subscriptions receive bounded NDJSON on their own Unix socket so asynchronous events cannot interleave with control responses. Each capture receives distinct session and stream UUIDs.
 
-Capture sessions remain independent, including captures of the same source. This is the simplest ownership model, isolates slow consumers and failures, and avoids an unmeasured shared-Process-Tap lifetime problem. Explicit global/per-owner/session-subscriber limits bound Core Audio objects, queues, timers, descriptors, and kernel socket buffers.
+Capture sessions remain independent, including captures of the same source. This isolates slow consumers and failures and avoids an unmeasured shared-Process-Tap lifetime problem. The creating control connection owns automatic disconnect cleanup and per-client quota accounting. Session status/stop are deliberately available to any accepted same-UID control client, making a standalone `sonexisctl stop SESSION` useful under the Runtime's account-wide trust model. Explicit global/per-owner/subscription/session-subscriber limits bound Core Audio objects, queues, timers, descriptors, and kernel socket buffers.
 
 ## Protocol v2
 
@@ -67,7 +67,7 @@ The reference application will import only the public Python SDK, provide source
 ## Testing strategy
 
 - Swift unit tests: handshake/version negotiation, capabilities, source/session models, format validation, v2 header byte layout, flags, sequence/drop behavior, malformed/truncated frames, and JSON fuzz cases.
-- Swift integration tests: real Unix sockets with a synthetic backend, event subscriptions, runtime status, ownership enforcement, independent streams, multiple clients, slow/non-reading subscribers, session/subscriber limits, abrupt disconnect, shutdown, source diffs, and repeated lifecycle churn.
+- Swift integration tests: real Unix sockets with a synthetic backend, event subscriptions and loss reporting, runtime status, same-UID session management, owner-disconnect cleanup, independent streams, multiple clients, slow/non-reading subscribers, session/subscriber limits, abrupt disconnect, shutdown, source diffs, and repeated lifecycle churn.
 - Python `unittest`: fragmented/coalesced and out-of-order responses, structured errors, handshake mismatch, concurrent requests, capture iteration, truncated/malformed frames, events, cancellation, reconnect, context cleanup, and multiple streams.
 - TypeScript: protocol fixtures and source review now; execute tests when a Node toolchain is available.
 - Stress/fuzz: thousands of command/session cycles, descriptor/thread/RSS sampling, invalid UTF-8/types/order/versions/IDs, oversized input, random frame corruption, and queue saturation.
@@ -86,7 +86,7 @@ The reference application will import only the public Python SDK, provide source
 - Core Audio teardown and environment-change callbacks can race session failure and client cancellation.
 - Source polling must distinguish reliable lifecycle changes from HAL activity heuristics.
 - Events and responses must never interleave on a control writer; separate event sockets avoid that failure mode.
-- JSON integers above JavaScript's safe range require SDK handling; nanosecond and counter values will be decoded conservatively and documented.
+- JSON integers above JavaScript's safe range remain a TypeScript limitation; binary PCM timestamps use `bigint`, while a future protocol should encode control/event `u64` values as decimal strings.
 - A nonblocking socket may fail after a partial packet. The client must report truncated data, and the next successful packet after a Runtime-side drop must carry a discontinuity flag/count.
-- Same-user processes share the trust boundary. Random socket names, directory ownership/mode checks, owner-scoped session authorization, and resource limits reduce accidental or opportunistic interference but do not defend against a fully compromised user account.
+- Same-user processes share the trust boundary. Directory ownership/mode checks, peer-UID checks, unpredictable socket names, owner-scoped cleanup/quotas, and resource limits reject other users and bound accidents, but session IDs are account-wide bearer handles by design.
 - The dirty project file contains unrelated AutoPitch/VoxCent work. v0.2 will reuse existing Xcode source entries and avoid modifying or staging unrelated project changes.
