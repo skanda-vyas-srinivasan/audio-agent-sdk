@@ -52,7 +52,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 backend: RuntimeCaptureBackend, limits: RuntimeResourceLimitsDTO = .init()) {
         paths = RuntimeSocketPaths(directory: socketDirectory)
         self.limits = limits
-        let hub = RuntimeEventHub(directory: socketDirectory)
+        let hub = RuntimeEventHub(directory: socketDirectory, limits: limits)
         eventHub = hub
         coordinator = RuntimeSessionCoordinator(backend: backend, socketDirectory: socketDirectory,
             limits: limits, eventHandler: { event in hub.publish(event) })
@@ -60,6 +60,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
 
     public func start() throws {
         try paths.prepareDirectory()
+        coordinator.resume()
         stateLock.lock()
         guard listener == nil else { stateLock.unlock(); return }
         let newListener = UnixSocketListener(path: paths.controlSocketPath, queue: acceptQueue)
@@ -72,7 +73,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 self.accept(connection, listener: newListener, generation: listenerGeneration)
             }
             stateLock.unlock()
-            startSourceMonitor()
+            startSourceMonitor(generation: listenerGeneration)
         } catch {
             listener = nil
             generation &+= 1
@@ -82,13 +83,15 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     }
 
     public func stop() {
-        eventHub.publish(RuntimeEventDTO(type: .runtimeShuttingDown, message: "Runtime is shutting down"))
+        coordinator.prepareForShutdown()
         monitorQueue.sync {
             sourceTimer?.setEventHandler {}
             sourceTimer?.cancel()
             sourceTimer = nil
             sourceSnapshot.removeAll()
         }
+        coordinator.stopAll()
+        eventHub.publish(RuntimeEventDTO(type: .runtimeShuttingDown, message: "Runtime is shutting down"))
         stateLock.lock()
         let oldListener = listener
         listener = nil
@@ -98,7 +101,6 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         stateLock.unlock()
         oldListener?.stop()
         activeClients.forEach { $0.close() }
-        coordinator.stopAll()
         eventHub.stopAll()
     }
 
@@ -231,6 +233,9 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 return RuntimeResponse(requestID: command.requestID, message: "unsubscribed")
             case .ping:
                 return RuntimeResponse(requestID: command.requestID, message: "pong")
+            case .unknown:
+                throw RuntimeErrorDTO(code: "unsupported_command",
+                    message: "The requested command is not supported")
             }
         } catch let error as RuntimeErrorDTO {
             return RuntimeResponse(requestID: command.requestID, error: error)
@@ -259,12 +264,16 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             activeClients: clientCount, activeSessions: metrics.activeSessions,
             eventSubscribers: eventHub.count, totalSessionsStarted: metrics.totalSessionsStarted,
             totalFramesForwarded: metrics.frames, totalDroppedFrames: metrics.dropped,
-            totalBytesTransmitted: metrics.bytes)
+            totalBytesTransmitted: metrics.bytes, totalEventsDropped: eventHub.totalDroppedEvents)
     }
 
-    private func startSourceMonitor() {
+    private func startSourceMonitor(generation expectedGeneration: UInt64) {
         monitorQueue.async { [weak self] in
             guard let self else { return }
+            self.stateLock.lock()
+            let shouldStart = self.listener != nil && self.generation == expectedGeneration
+            self.stateLock.unlock()
+            guard shouldStart else { return }
             self.refreshSources(publishChanges: false)
             let timer = DispatchSource.makeTimerSource(queue: self.monitorQueue)
             timer.schedule(deadline: .now() + 1, repeating: .seconds(1), leeway: .milliseconds(100))
@@ -281,8 +290,10 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 for (id, source) in next where sourceSnapshot[id] == nil {
                     eventHub.publish(RuntimeEventDTO(type: .sourceAdded, sourceID: id, source: source))
                 }
-                for (id, source) in sourceSnapshot where next[id] == nil {
-                    eventHub.publish(RuntimeEventDTO(type: .sourceRemoved, sourceID: id, source: source))
+                for (id, _) in sourceSnapshot where next[id] == nil {
+                    // Do not attach the stale running/available snapshot to a
+                    // removal event. Clients should evict the source by ID.
+                    eventHub.publish(RuntimeEventDTO(type: .sourceRemoved, sourceID: id))
                 }
                 for (id, source) in next where sourceSnapshot[id] != nil && sourceSnapshot[id] != source {
                     eventHub.publish(RuntimeEventDTO(type: .sourceUpdated, sourceID: id, source: source))

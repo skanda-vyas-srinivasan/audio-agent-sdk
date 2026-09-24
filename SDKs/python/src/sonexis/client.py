@@ -58,8 +58,15 @@ class Sonexis:
                                                "Runtime selected an incompatible protocol")
                 self.handshake = handshake
                 return handshake
-            except (OSError, SonexisError) as error:
-                last_error = error
+            except asyncio.CancelledError:
+                await self.close()
+                raise
+            except BaseException as error:
+                if isinstance(error, (OSError, SonexisError)):
+                    last_error = error
+                else:
+                    last_error = SonexisProtocolError(
+                        "invalid_handshake", "Runtime sent a malformed handshake")
                 await self.close()
                 if attempt < reconnect_attempts:
                     await asyncio.sleep(min(0.1 * (2 ** attempt), 1.0))
@@ -101,36 +108,63 @@ class Sonexis:
 
     async def sources(self) -> List[AudioSource]:
         response = await self._request("list_sources")
-        return [AudioSource.from_wire(value) for value in response.get("sources", [])]
+        try:
+            return [AudioSource.from_wire(value) for value in response["sources"]]
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError("invalid_sources", "Runtime sent malformed sources") from error
 
     async def status(self, session_id: Optional[str] = None) -> Union[RuntimeStatus, CaptureInfo]:
         if session_id is None:
             response = await self._request("runtime_status")
-            return RuntimeStatus.from_wire(response["status"])
+            try:
+                return RuntimeStatus.from_wire(response["status"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise SonexisProtocolError("invalid_status", "Runtime sent malformed status") from error
         response = await self._request("session_status", session_id=session_id)
-        return CaptureInfo.from_wire(response["session"])
+        try:
+            return CaptureInfo.from_wire(response["session"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError("invalid_session", "Runtime sent a malformed session") from error
 
     async def capture(self, source: Union[str, AudioSource], *,
                       format: AudioFormat = AudioFormat()) -> "CaptureSession":
         source_id = source.id if isinstance(source, AudioSource) else source
         response = await self._request("start_capture", source_id=source_id,
                                        format=format.to_wire())
-        capture = CaptureSession(self, CaptureInfo.from_wire(response["session"]))
-        await capture._open()
+        try:
+            capture = CaptureSession(self, CaptureInfo.from_wire(response["session"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError("invalid_session", "Runtime sent a malformed session") from error
+        try:
+            await capture._open()
+        except BaseException:
+            await self._cleanup_request("stop_capture", session_id=capture.info.id)
+            raise
         self._captures.add(capture)
         return capture
 
     async def stop(self, session_id: str) -> CaptureInfo:
         response = await self._request("stop_capture", session_id=session_id)
-        return CaptureInfo.from_wire(response["session"])
+        try:
+            return CaptureInfo.from_wire(response["session"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError("invalid_session", "Runtime sent a malformed session") from error
 
     async def events(self, event_types: Optional[Iterable[str]] = None) -> "EventSubscription":
         params: Dict[str, Any] = {}
         if event_types is not None:
             params["event_types"] = list(event_types)
         response = await self._request("subscribe_events", **params)
-        subscription = EventSubscription(self, response["subscription"])
-        await subscription._open()
+        try:
+            subscription = EventSubscription(self, response["subscription"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError("invalid_subscription",
+                                       "Runtime sent a malformed event subscription") from error
+        try:
+            await subscription._open()
+        except BaseException:
+            await self._cleanup_request("unsubscribe_events", subscription_id=subscription.id)
+            raise
         self._events.add(subscription)
         return subscription
 
@@ -152,12 +186,40 @@ class Sonexis:
                 writer.write(payload)
                 await writer.drain()
             return await future
+        except asyncio.CancelledError:
+            # The request may already be in the kernel buffer. Its eventual
+            # response is valid but no longer has a waiter.
+            self._discarded_request_ids.add(request_id)
+            raise
+        except (OSError, ConnectionError) as error:
+            raise SonexisConnectionError("connection_lost", str(error), retryable=True) from error
         finally:
             self._pending.pop(request_id, None)
-            if future.cancelled():
-                self._discarded_request_ids.add(request_id)
-                if len(self._discarded_request_ids) > 1024:
-                    self._discarded_request_ids.clear()
+            if len(self._discarded_request_ids) > 1024:
+                self._discarded_request_ids.clear()
+
+    async def _cleanup_request(self, command: str, **parameters: Any) -> None:
+        """Complete bounded Runtime cleanup even if the caller is cancelled."""
+        if self._writer is None:
+            return
+        task = asyncio.create_task(self._request(command, **parameters))
+        cancelled = False
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+        except asyncio.CancelledError:
+            cancelled = True
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+            except (SonexisError, asyncio.TimeoutError, OSError):
+                pass
+        except (SonexisError, asyncio.TimeoutError, OSError):
+            pass
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def _control_reader(self) -> None:
         assert self._reader is not None
@@ -173,6 +235,13 @@ class Sonexis:
                     response = json.loads(line)
                 except (UnicodeDecodeError, json.JSONDecodeError) as error:
                     raise SonexisProtocolError("malformed_json", "Runtime sent invalid JSON") from error
+                if (not isinstance(response, dict)
+                        or response.get("message_type") != "response"
+                        or response.get("protocol_version") != PROTOCOL_VERSION
+                        or not isinstance(response.get("response_id"), str)
+                        or not isinstance(response.get("request_id"), str)
+                        or not isinstance(response.get("ok"), bool)):
+                    raise SonexisProtocolError("invalid_response", "Runtime sent an invalid response envelope")
                 request_id = response.get("request_id")
                 future = self._pending.get(request_id)
                 if future is None and request_id in self._discarded_request_ids:
@@ -192,6 +261,13 @@ class Sonexis:
             for future in list(self._pending.values()):
                 if not future.done():
                     future.set_exception(sdk_error)
+            writer = self._writer
+            self._reader = None
+            self._writer = None
+            self.handshake = None
+            if writer is not None:
+                writer.close()
+            self._reader_task = None
 
 
 class CaptureSession(AsyncIterator[AudioFrame]):
@@ -243,11 +319,8 @@ class CaptureSession(AsyncIterator[AudioFrame]):
             except (OSError, ConnectionError):
                 pass
         self.client._captures.discard(self)
-        if stop_runtime and self.client._writer is not None:
-            try:
-                await asyncio.wait_for(asyncio.shield(self.client.stop(self.info.id)), timeout=1.0)
-            except (SonexisError, asyncio.TimeoutError, OSError):
-                pass
+        if stop_runtime:
+            await self.client._cleanup_request("stop_capture", session_id=self.info.id)
 
 
 class EventSubscription(AsyncIterator[RuntimeEvent]):
@@ -286,7 +359,7 @@ class EventSubscription(AsyncIterator[RuntimeEvent]):
             raise SonexisProtocolError("invalid_event", "Invalid event framing")
         try:
             return RuntimeEvent.from_wire(json.loads(line))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SonexisProtocolError("invalid_event", "Runtime sent a malformed event") from error
 
     async def aclose(self, *, unsubscribe: bool = True) -> None:
@@ -302,8 +375,5 @@ class EventSubscription(AsyncIterator[RuntimeEvent]):
             except (OSError, ConnectionError):
                 pass
         self.client._events.discard(self)
-        if unsubscribe and self.client._writer is not None:
-            try:
-                await self.client._request("unsubscribe_events", subscription_id=self.id)
-            except SonexisError:
-                pass
+        if unsubscribe:
+            await self.client._cleanup_request("unsubscribe_events", subscription_id=self.id)

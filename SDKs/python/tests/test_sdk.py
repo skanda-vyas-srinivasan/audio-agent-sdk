@@ -24,6 +24,8 @@ class FakeRuntime:
         self.control_server = None
         self.stream_server = None
         self.event_server = None
+        self.commands = []
+        self.malformed_handshake = False
 
     async def start(self):
         self.stream_server = await asyncio.start_unix_server(self._stream, self.stream_path)
@@ -42,6 +44,7 @@ class FakeRuntime:
                 request = json.loads(line)
                 request_id = request["request_id"]
                 command = request["command"]
+                self.commands.append(command)
                 response = {"message_type": "response", "protocol_version": 2,
                             "response_id": str(uuid.uuid4()), "request_id": request_id, "ok": True}
                 if command == "hello":
@@ -51,6 +54,8 @@ class FakeRuntime:
                         "supported_formats": [AudioFormat().to_wire()],
                         "limits": {"maximum_sessions": 16},
                     }
+                    if self.malformed_handshake:
+                        response["handshake"].pop("runtime_version")
                 elif command == "list_sources":
                     response["sources"] = [{"id": "app.test", "kind": "application",
                         "name": "Test Audio", "process_ids": [123], "bundle_identifier": "test",
@@ -66,6 +71,9 @@ class FakeRuntime:
                             "source_id": "app.test", "state": "capturing", "format": fmt,
                             "data_socket_path": self.stream_path, "started_at_nanoseconds": 10,
                             "metrics": {}}
+                        if request.get("source_id") == "missing-stream":
+                            response["session"]["data_socket_path"] = os.path.join(
+                                self.directory, "missing-stream.sock")
                 elif command == "stop_capture":
                     response["session"] = {"id": "session", "stream_id": str(self.stream_id),
                         "source_id": "app.test", "state": "stopped",
@@ -193,6 +201,30 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SonexisProtocolError) as mismatch:
             await read_frame(reader, self.runtime.stream_id, None)
         self.assertEqual(mismatch.exception.code, "stream_id_mismatch")
+
+        backwards_eos = PCM_HEADER.pack(PCM_MAGIC, 2, FLAG_EOS, 64, 0,
+            self.runtime.stream_id.bytes, 1, 0, 0, 0, 0, 1, 0)
+        reader = asyncio.StreamReader()
+        reader.feed_data(backwards_eos)
+        reader.feed_eof()
+        with self.assertRaises(SonexisProtocolError) as backwards:
+            await read_frame(reader, self.runtime.stream_id, 10)
+        self.assertEqual(backwards.exception.code, "invalid_pcm_sequence")
+
+    async def test_capture_attach_failure_rolls_back_runtime_session(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            with self.assertRaises(OSError):
+                await client.capture("missing-stream")
+            await asyncio.sleep(0)
+            self.assertIn("stop_capture", self.runtime.commands)
+
+    async def test_malformed_handshake_is_protocol_error_and_connection_resets(self):
+        self.runtime.malformed_handshake = True
+        client = Sonexis(self.runtime.control_path)
+        with self.assertRaises(SonexisProtocolError):
+            await client.connect()
+        self.assertIsNone(client.handshake)
+        self.assertIsNone(client._writer)
 
 
 if __name__ == "__main__":

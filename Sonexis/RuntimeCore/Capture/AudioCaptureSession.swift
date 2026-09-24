@@ -350,9 +350,17 @@ final class AudioCaptureSession: @unchecked Sendable {
         tapEngine = nil
         normalizer = nil
         if let ringBuffer {
+            let unreadNativeFrames = UInt64(ringBuffer.fillFrames)
             completedNativeFrames &+= ringBuffer.writtenFrames
-            completedDroppedFrames &+= ringBuffer.droppedFrames
+            completedDroppedFrames &+= ringBuffer.droppedFrames &+ unreadNativeFrames
             completedCaptureCallbacks &+= ringBuffer.writeOperations
+            if unreadNativeFrames > 0, nativeSampleRate > 0 {
+                let unreadOutputFrames = UInt64((Double(unreadNativeFrames)
+                    * Double(outputFormat.sampleRate) / nativeSampleRate).rounded())
+                pendingDroppedOutputFrames &+= unreadOutputFrames
+                normalizedFramesProduced &+= unreadOutputFrames
+                pendingDiscontinuity = true
+            }
         }
         ringBuffer = nil
         inputScratch.removeAll(keepingCapacity: false)

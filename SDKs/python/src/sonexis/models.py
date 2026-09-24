@@ -1,6 +1,6 @@
 """Typed public models for Sonexis Runtime v0.2."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -91,6 +91,21 @@ class SessionMetrics:
 
 
 @dataclass(frozen=True)
+class RuntimeErrorInfo:
+    code: str
+    message: str
+    retryable: bool = False
+    details: Optional[Dict[str, str]] = None
+
+    @classmethod
+    def from_wire(cls, value: Dict[str, Any]) -> "RuntimeErrorInfo":
+        details = value.get("details")
+        return cls(str(value["code"]), str(value["message"]),
+                   bool(value.get("retryable", False)),
+                   {str(k): str(v) for k, v in details.items()} if details else None)
+
+
+@dataclass(frozen=True)
 class CaptureInfo:
     id: str
     stream_id: str
@@ -100,14 +115,15 @@ class CaptureInfo:
     data_socket_path: str
     started_at_ns: int
     metrics: SessionMetrics
-    error: Optional[Dict[str, Any]] = None
+    error: Optional[RuntimeErrorInfo] = None
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "CaptureInfo":
         return cls(str(value["id"]), str(value["stream_id"]), str(value["source_id"]),
                    str(value["state"]), AudioFormat.from_wire(value["format"]),
                    str(value["data_socket_path"]), int(value["started_at_nanoseconds"]),
-                   SessionMetrics.from_wire(value.get("metrics", {})), value.get("error"))
+                   SessionMetrics.from_wire(value.get("metrics", {})),
+                   RuntimeErrorInfo.from_wire(value["error"]) if value.get("error") else None)
 
 
 @dataclass(frozen=True)
@@ -132,15 +148,25 @@ class RuntimeEvent:
     stream_id: Optional[str] = None
     message: Optional[str] = None
     dropped_frames: Optional[int] = None
-    raw: Dict[str, Any] = field(default_factory=dict, repr=False)
+    sequence: Optional[int] = None
+    dropped_events_before: int = 0
+    source: Optional[AudioSource] = None
+    session: Optional[CaptureInfo] = None
+    error: Optional[RuntimeErrorInfo] = None
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "RuntimeEvent":
-        return cls(str(value["event_id"]), str(value["type"]),
-                   int(value["timestamp_nanoseconds"]), value.get("source_id"),
-                   value.get("session_id"), value.get("stream_id"), value.get("message"),
-                   int(value["dropped_frames"]) if value.get("dropped_frames") is not None else None,
-                   value)
+        return cls(
+            str(value["event_id"]), str(value["type"]),
+            int(value["timestamp_nanoseconds"]), value.get("source_id"),
+            value.get("session_id"), value.get("stream_id"), value.get("message"),
+            int(value["dropped_frames"]) if value.get("dropped_frames") is not None else None,
+            int(value["event_sequence"]) if value.get("event_sequence") is not None else None,
+            int(value.get("dropped_events_before", 0)),
+            AudioSource.from_wire(value["source"]) if value.get("source") else None,
+            CaptureInfo.from_wire(value["session"]) if value.get("session") else None,
+            RuntimeErrorInfo.from_wire(value["error"]) if value.get("error") else None,
+        )
 
 
 @dataclass(frozen=True)
@@ -155,6 +181,7 @@ class RuntimeStatus:
     total_frames_forwarded: int
     total_dropped_frames: int
     total_bytes_transmitted: int
+    total_events_dropped: int = 0
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "RuntimeStatus":
@@ -162,7 +189,8 @@ class RuntimeStatus:
                    int(value["uptime_nanoseconds"]), int(value["active_clients"]),
                    int(value["active_sessions"]), int(value["event_subscribers"]),
                    int(value["total_sessions_started"]), int(value["total_frames_forwarded"]),
-                   int(value["total_dropped_frames"]), int(value["total_bytes_transmitted"]))
+                   int(value["total_dropped_frames"]), int(value["total_bytes_transmitted"]),
+                   int(value.get("total_events_dropped", 0)))
 
 
 @dataclass(frozen=True)

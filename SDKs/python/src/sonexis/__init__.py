@@ -3,13 +3,13 @@
 from .client import CaptureSession, EventSubscription, Sonexis
 from .errors import SonexisConnectionError, SonexisError, SonexisProtocolError
 from .models import (AudioFormat, AudioFrame, AudioSource, CaptureInfo, Handshake,
-                     RuntimeEvent, RuntimeStatus, SampleFormat, SessionMetrics)
+                     RuntimeErrorInfo, RuntimeEvent, RuntimeStatus, SampleFormat, SessionMetrics)
 
 SonexisClient = Sonexis
 
 __all__ = [
     "AudioFormat", "AudioFrame", "AudioSource", "CaptureInfo", "CaptureSession",
-    "EventSubscription", "Handshake", "RuntimeEvent", "RuntimeStatus", "SampleFormat",
+    "EventSubscription", "Handshake", "RuntimeErrorInfo", "RuntimeEvent", "RuntimeStatus", "SampleFormat",
     "SessionMetrics", "Sonexis", "SonexisClient", "SonexisConnectionError", "SonexisError",
     "SonexisProtocolError",
 ]

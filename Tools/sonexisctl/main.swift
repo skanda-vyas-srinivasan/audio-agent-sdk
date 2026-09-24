@@ -158,7 +158,7 @@ do {
             else {
                 print("runtime=\(status.runtimeVersion) instance=\(status.runtimeInstanceID)")
                 print("uptime_seconds=\(String(format: "%.3f", Double(status.uptimeNanoseconds) / 1e9)) clients=\(status.activeClients) sessions=\(status.activeSessions) event_subscribers=\(status.eventSubscribers)")
-                print("sessions_started=\(status.totalSessionsStarted) frames=\(status.totalFramesForwarded) dropped=\(status.totalDroppedFrames) bytes=\(status.totalBytesTransmitted)")
+                print("sessions_started=\(status.totalSessionsStarted) frames=\(status.totalFramesForwarded) dropped=\(status.totalDroppedFrames) bytes=\(status.totalBytesTransmitted) events_dropped=\(status.totalEventsDropped)")
             }
         }
     case "watch":
@@ -167,7 +167,9 @@ do {
         try client.receiveEvents(subscription: subscription) { event in
             if arguments.json { try printJSON(event) }
             else {
-                print("\(event.timestampNanoseconds) \(event.type.rawValue) source=\(event.sourceID ?? "-") session=\(event.sessionID ?? "-") \(event.message ?? "")")
+                let sequence = event.eventSequence.map(String.init) ?? "-"
+                let missed = event.droppedEventsBefore ?? 0
+                print("\(event.timestampNanoseconds) seq=\(sequence) missed=\(missed) \(event.type.rawValue) source=\(event.sourceID ?? "-") session=\(event.sessionID ?? "-") \(event.message ?? "")")
             }
             return true
         }

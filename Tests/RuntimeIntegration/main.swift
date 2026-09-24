@@ -114,6 +114,18 @@ do {
            "unsupported protocol version returned the wrong error")
     wrongVersion.close()
 
+    let unknownCommand = try UnixSocketSystem.connect(path: server.paths.controlSocketPath)
+    try unknownCommand.write(RuntimeProtocolCodec.encodeLine(RuntimeCommand(command: .hello,
+        supportedProtocolVersions: [2], clientName: "unknown-command-test")))
+    _ = try RuntimeProtocolCodec.decodeLine(RuntimeResponse.self, from: unknownCommand.read())
+    let unknownJSON = Data("{\"message_type\":\"request\",\"protocol_version\":2,\"request_id\":\"unknown-1\",\"command\":\"future_command\"}\n".utf8)
+    try unknownCommand.write(unknownJSON)
+    let unknownResponse = try RuntimeProtocolCodec.decodeLine(RuntimeResponse.self,
+        from: unknownCommand.read())
+    expect(unknownResponse.error?.code == "unsupported_command",
+           "unknown command was not reported as unsupported")
+    unknownCommand.close()
+
     if let cliPath = ProcessInfo.processInfo.environment["SONEXISCTL_BINARY"] {
         let process = Process()
         let output = Pipe()
@@ -207,6 +219,17 @@ do {
     eventConnection.close()
     try client.unsubscribeEvents(id: subscription.id)
 
+    var cappedSubscriptions: [RuntimeEventSubscriptionDTO] = []
+    for _ in 0..<4 { cappedSubscriptions.append(try client.subscribeEvents()) }
+    do {
+        _ = try client.subscribeEvents()
+        fatalError("per-client event subscription limit was not enforced")
+    } catch let error as RuntimeErrorDTO {
+        expect(error.code == "subscription_limit_exceeded",
+               "event subscription cap returned the wrong error")
+    }
+    for item in cappedSubscriptions { try client.unsubscribeEvents(id: item.id) }
+
     let runtimeStatus = try client.runtimeStatus()
     expect(runtimeStatus.runtimeVersion == "0.2.0", "runtime status omitted version")
     expect(runtimeStatus.totalSessionsStarted >= 10, "runtime session counter did not advance")
@@ -265,7 +288,35 @@ do {
     try secondClient.connect()
     let secondSources = try secondClient.listSources()
     expect(secondSources.count == 1, "second client could not connect")
+    // Session management is intentionally shared by same-UID clients so the
+    // standalone `sonexisctl stop SESSION` command works. The owner connection
+    // still controls automatic disconnect cleanup and per-client quotas.
+    let sharedSession = try client.startCapture(sourceID: sources[0].id)
+    let sharedStatus = try secondClient.sessionStatus(sessionID: sharedSession.id)
+    expect(sharedStatus.state == .capturing,
+           "same-user session status was not shared")
+    let sharedStop = try secondClient.stopCapture(sessionID: sharedSession.id)
+    expect(sharedStop.state == .stopped,
+           "same-user session stop was not shared")
     secondClient.disconnect()
+
+    let eventPressurePath = directory.appendingPathComponent("event-pressure.sock").path
+    let eventPressure = RuntimeEventPlane(path: eventPressurePath)
+    try eventPressure.start()
+    for index in 0..<20 {
+        eventPressure.offer(RuntimeEventDTO(type: .runtimeWarning, message: "missed \(index)"))
+    }
+    for _ in 0..<100 where eventPressure.metrics() < 20 { usleep(1_000) }
+    expect(eventPressure.metrics() == 20, "pre-attach event loss was not counted")
+    let eventPressureClient = try UnixSocketSystem.connect(path: eventPressurePath)
+    usleep(10_000)
+    eventPressure.offer(RuntimeEventDTO(type: .runtimeWarning, message: "marker"))
+    let marker = try RuntimeProtocolCodec.decodeLine(RuntimeEventDTO.self,
+        from: eventPressureClient.read())
+    expect(marker.eventSequence == 1 && marker.droppedEventsBefore == 20,
+           "event loss was not reported on the next delivered event")
+    eventPressure.stop()
+    eventPressureClient.close()
 
     let pressurePath = directory.appendingPathComponent("pressure.sock").path
     let pressurePlane = RuntimeDataPlane(path: pressurePath, streamID: UUID(), maximumSubscribers: 1)

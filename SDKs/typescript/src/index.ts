@@ -46,6 +46,13 @@ export interface CaptureInfo {
   data_socket_path: string;
   started_at_nanoseconds: number;
   metrics: SessionMetrics;
+  error?: RuntimeErrorInfo;
+}
+export interface RuntimeErrorInfo {
+  code: string;
+  message: string;
+  retryable: boolean;
+  details?: Record<string, string>;
 }
 export interface AudioFrame {
   streamId: string;
@@ -67,6 +74,24 @@ export interface RuntimeEvent {
   stream_id?: string;
   message?: string;
   dropped_frames?: number;
+  event_sequence?: number;
+  dropped_events_before?: number;
+  source?: AudioSource;
+  session?: CaptureInfo;
+  error?: RuntimeErrorInfo;
+}
+export interface RuntimeStatus {
+  runtime_version: string;
+  runtime_instance_id: string;
+  uptime_nanoseconds: number;
+  active_clients: number;
+  active_sessions: number;
+  event_subscribers: number;
+  total_sessions_started: number;
+  total_frames_forwarded: number;
+  total_dropped_frames: number;
+  total_bytes_transmitted: number;
+  total_events_dropped: number;
 }
 export interface Handshake {
   protocol_version: 2;
@@ -123,41 +148,50 @@ export class Sonexis extends EventEmitter {
 
   async connect(): Promise<Handshake> {
     if (this.socket && this.handshake) return this.handshake;
-    this.socket = await openSocket(this.socketPath);
-    this.socket.on("data", (chunk) => this.consumeControl(chunk));
-    this.socket.on("close", () => this.failPending(new SonexisError(
+    const socket = await openSocket(this.socketPath);
+    this.socket = socket;
+    socket.on("data", (chunk) => this.consumeControl(chunk));
+    socket.on("close", () => this.handleDisconnect(socket, new SonexisError(
       "disconnected", "Runtime closed the control socket", true)));
-    this.socket.on("error", (error) => this.failPending(error));
-    const response = await this.request("hello", {
-      supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.2.0",
-    });
-    const handshake = response.handshake as Handshake;
-    if (handshake?.protocol_version !== 2) {
-      throw new SonexisError("invalid_handshake", "Runtime did not select protocol v2");
+    socket.on("error", (error) => this.handleDisconnect(socket, error));
+    try {
+      const response = await this.request("hello", {
+        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.2.0",
+      });
+      const handshake = response.handshake as Handshake;
+      if (handshake?.protocol_version !== 2) {
+        throw new SonexisError("invalid_handshake", "Runtime did not select protocol v2");
+      }
+      this.handshake = handshake;
+      return handshake;
+    } catch (error) {
+      await this.close();
+      throw error;
     }
-    this.handshake = handshake;
-    return handshake;
   }
 
   async close(): Promise<void> {
     const socket = this.socket;
     this.socket = undefined;
     this.handshake = undefined;
-    if (socket) await new Promise<void>((resolve) => {
+    this.controlBuffer = Buffer.alloc(0);
+    this.failPending(new SonexisError("disconnected", "Client closed", true));
+    if (socket && !socket.destroyed) await new Promise<void>((resolve) => {
       socket.once("close", resolve);
       socket.destroy();
     });
   }
 
-  async [Symbol.asyncDispose](): Promise<void> { await this.close(); }
-
   async sources(): Promise<AudioSource[]> {
     return (await this.request("list_sources")).sources as AudioSource[];
   }
 
-  async status(sessionId?: string): Promise<Record<string, unknown>> {
-    return this.request(sessionId ? "session_status" : "runtime_status",
+  async status(): Promise<RuntimeStatus>;
+  async status(sessionId: string): Promise<CaptureInfo>;
+  async status(sessionId?: string): Promise<RuntimeStatus | CaptureInfo> {
+    const response = await this.request(sessionId ? "session_status" : "runtime_status",
       sessionId ? { session_id: sessionId } : {});
+    return (sessionId ? response.session : response.status) as RuntimeStatus | CaptureInfo;
   }
 
   async capture(source: AudioSource | string,
@@ -165,7 +199,12 @@ export class Sonexis extends EventEmitter {
                   sample_format: "pcm_s16le", interleaved: true }): Promise<CaptureStream> {
     const sourceId = typeof source === "string" ? source : source.id;
     const response = await this.request("start_capture", { source_id: sourceId, format });
-    return CaptureStream.open(this, response.session as CaptureInfo);
+    const info = response.session as CaptureInfo;
+    try { return await CaptureStream.open(this, info); }
+    catch (error) {
+      try { await this.cleanupCapture(info.id); } catch { /* bounded cleanup */ }
+      throw error;
+    }
   }
 
   async stop(sessionId: string): Promise<CaptureInfo> {
@@ -175,12 +214,17 @@ export class Sonexis extends EventEmitter {
   async events(eventTypes?: string[]): Promise<EventStream> {
     const response = await this.request("subscribe_events",
       eventTypes ? { event_types: eventTypes } : {});
-    return EventStream.open(this, response.subscription as {
+    const subscription = response.subscription as {
       id: string; event_socket_path: string; event_types: string[];
-    });
+    };
+    try { return await EventStream.open(this, subscription); }
+    catch (error) {
+      try { await this.cleanupSubscription(subscription.id); } catch { }
+      throw error;
+    }
   }
 
-  async request(command: string, fields: Record<string, unknown> = {}): Promise<WireResponse> {
+  private async request(command: string, fields: Record<string, unknown> = {}): Promise<WireResponse> {
     if (!this.socket) throw new SonexisError("not_connected", "Connect first");
     const requestId = randomUUID();
     const request = { message_type: "request", protocol_version: 2,
@@ -203,11 +247,26 @@ export class Sonexis extends EventEmitter {
     }
     let newline: number;
     while ((newline = this.controlBuffer.indexOf(0x0a)) >= 0) {
+      if (newline + 1 > 65536) {
+        const error = new SonexisError("message_too_large", "Response exceeds 64 KiB");
+        this.failPending(error); this.socket?.destroy(); return;
+      }
       const line = this.controlBuffer.subarray(0, newline);
       this.controlBuffer = this.controlBuffer.subarray(newline + 1);
       let response: WireResponse;
-      try { response = JSON.parse(line.toString("utf8")) as WireResponse; }
-      catch { this.failPending(new SonexisError("malformed_json", "Runtime sent invalid JSON")); return; }
+      try {
+        response = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(line)) as WireResponse;
+      } catch {
+        this.failPending(new SonexisError("malformed_json", "Runtime sent invalid JSON"));
+        this.socket?.destroy(); return;
+      }
+      if ((response as Record<string, unknown>).message_type !== "response"
+          || (response as Record<string, unknown>).protocol_version !== 2
+          || typeof (response as Record<string, unknown>).response_id !== "string"
+          || typeof response.request_id !== "string" || typeof response.ok !== "boolean") {
+        this.failPending(new SonexisError("invalid_response", "Runtime sent an invalid response envelope"));
+        this.socket?.destroy(); return;
+      }
       const pending = this.pending.get(response.request_id);
       if (!pending) { this.failPending(new SonexisError("unknown_response", "Unknown response ID")); return; }
       this.pending.delete(response.request_id);
@@ -224,13 +283,38 @@ export class Sonexis extends EventEmitter {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
+
+  private handleDisconnect(socket: Socket, error: Error): void {
+    if (this.socket !== socket) return;
+    this.socket = undefined;
+    this.handshake = undefined;
+    this.controlBuffer = Buffer.alloc(0);
+    this.failPending(error);
+  }
+
+  async unsubscribe(subscriptionId: string): Promise<void> {
+    await this.request("unsubscribe_events", { subscription_id: subscriptionId });
+  }
+
+  async cleanupCapture(sessionId: string): Promise<void> {
+    await boundedCleanup(this.stop(sessionId));
+  }
+
+  async cleanupSubscription(subscriptionId: string): Promise<void> {
+    await boundedCleanup(this.unsubscribe(subscriptionId));
+  }
 }
 
 export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFrame> {
   private buffer = Buffer.alloc(0);
   private queue: AudioFrame[] = [];
-  private waiters: Array<(value: IteratorResult<AudioFrame>) => void> = [];
+  private waiters: Array<{ resolve: (value: IteratorResult<AudioFrame>) => void;
+    reject: (error: Error) => void }> = [];
   private ended = false;
+  private cleaned = false;
+  private terminalError?: Error;
+  private closing = false;
+  private sawEndOfStream = false;
   private previousSequence?: bigint;
 
   private constructor(private readonly client: Sonexis, readonly info: CaptureInfo,
@@ -240,31 +324,45 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
     const socket = await openSocket(info.data_socket_path);
     const stream = new CaptureStream(client, info, socket);
     socket.on("data", (chunk) => stream.consume(chunk));
-    socket.on("close", () => stream.finish());
-    socket.on("error", (error) => stream.emit("streamError", error));
+    socket.on("close", () => {
+      const truncated = !stream.closing && !stream.sawEndOfStream
+        ? new SonexisError("truncated_pcm_stream", "Audio stream closed without EOS") : undefined;
+      if (truncated) stream.emit("streamError", truncated);
+      stream.finish(truncated); void stream.cleanupRuntime();
+    });
+    socket.on("error", (error) => { stream.emit("streamError", error); stream.finish(error); });
     return stream;
   }
 
   async close(): Promise<void> {
-    if (this.ended) return;
+    this.closing = true;
     this.socket.destroy();
     this.finish();
-    try { await this.client.stop(this.info.id); } catch { /* idempotent cleanup */ }
+    await this.cleanupRuntime();
   }
 
+
   async *[Symbol.asyncIterator](): AsyncIterator<AudioFrame> {
-    while (true) {
-      if (this.queue.length) {
-        const frame = this.queue.shift()!;
-        if (this.queue.length < 32) this.socket.resume();
-        yield frame;
+    try {
+      while (true) {
+        if (this.queue.length) {
+          const frame = this.queue.shift()!;
+          if (this.queue.length < 32) this.socket.resume();
+          yield frame;
+        }
+        else if (this.ended) {
+          if (this.terminalError) throw this.terminalError;
+          return;
+        }
+        else {
+          const result = await new Promise<IteratorResult<AudioFrame>>((resolve, reject) =>
+            this.waiters.push({ resolve, reject }));
+          if (result.done) return;
+          yield result.value;
+        }
       }
-      else if (this.ended) return;
-      else {
-        const result = await new Promise<IteratorResult<AudioFrame>>((resolve) => this.waiters.push(resolve));
-        if (result.done) return;
-        yield result.value;
-      }
+    } finally {
+      await this.close();
     }
   }
 
@@ -272,7 +370,10 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
     this.buffer = Buffer.concat([this.buffer, chunk]);
     while (this.buffer.length >= 64) {
       const payloadSize = this.buffer.readUInt32BE(12);
-      if (payloadSize > 512 * 1024) { this.emit("error", new SonexisError("invalid_pcm", "Payload too large")); this.close(); return; }
+      if (payloadSize > 512 * 1024) {
+        const error = new SonexisError("invalid_pcm", "Payload too large");
+        this.emit("streamError", error); this.socket.destroy(); this.finish(error); return;
+      }
       if (this.buffer.length < 64 + payloadSize) return;
       const packet = this.buffer.subarray(0, 64 + payloadSize);
       this.buffer = this.buffer.subarray(64 + payloadSize);
@@ -281,90 +382,134 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
       catch (error) {
         this.emit("streamError", error);
         this.socket.destroy();
-        this.finish();
+        this.finish(error instanceof Error ? error : new Error(String(error)));
         return;
       }
       this.previousSequence = frame.sequence;
-      if (frame.frameCount === 0) { this.finish(); return; }
+      if (frame.frameCount === 0) { this.sawEndOfStream = true; this.finish(); return; }
       this.emit("audio", frame);
       const waiter = this.waiters.shift();
-      if (waiter) waiter({ value: frame, done: false });
-      else {
+      if (waiter) waiter.resolve({ value: frame, done: false });
+      else if (this.listenerCount("audio") === 0) {
         this.queue.push(frame);
         if (this.queue.length >= 64) this.socket.pause();
       }
     }
   }
 
-  private finish(): void {
+  private finish(error?: Error): void {
     if (this.ended) return;
     this.ended = true;
-    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined, done: true });
+    this.terminalError = error;
+    for (const waiter of this.waiters.splice(0)) {
+      if (error) waiter.reject(error);
+      else waiter.resolve({ value: undefined, done: true });
+    }
+  }
+
+  private async cleanupRuntime(): Promise<void> {
+    if (this.cleaned) return;
+    this.cleaned = true;
+    try { await this.client.cleanupCapture(this.info.id); } catch { /* control teardown is authoritative */ }
   }
 }
 
 export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEvent> {
-  private buffer = "";
+  private buffer = Buffer.alloc(0);
   private queue: RuntimeEvent[] = [];
-  private waiters: Array<(value: IteratorResult<RuntimeEvent>) => void> = [];
+  private waiters: Array<{ resolve: (value: IteratorResult<RuntimeEvent>) => void;
+    reject: (error: Error) => void }> = [];
   private ended = false;
+  private cleaned = false;
+  private terminalError?: Error;
+  private closing = false;
 
   private constructor(private readonly client: Sonexis, readonly id: string,
                       private readonly socket: Socket) { super(); }
   static async open(client: Sonexis, value: { id: string; event_socket_path: string }): Promise<EventStream> {
     const socket = await openSocket(value.event_socket_path);
     const events = new EventStream(client, value.id, socket);
-    socket.on("data", (chunk) => events.consume(chunk.toString("utf8")));
-    socket.on("close", () => events.finish());
-    socket.on("error", (error) => events.emit("streamError", error));
+    socket.on("data", (chunk) => events.consume(chunk));
+    socket.on("close", () => {
+      const truncated = !events.closing && events.buffer.length > 0
+        ? new SonexisError("truncated_event_stream", "Event stream closed mid-message") : undefined;
+      if (truncated) events.emit("streamError", truncated);
+      events.finish(truncated); void events.cleanupRuntime();
+    });
+    socket.on("error", (error) => { events.emit("streamError", error); events.finish(error); });
     return events;
   }
   async close(): Promise<void> {
-    if (this.ended) return;
+    this.closing = true;
     this.socket.destroy(); this.finish();
-    try { await this.client.request("unsubscribe_events", { subscription_id: this.id }); } catch { }
+    await this.cleanupRuntime();
   }
   async *[Symbol.asyncIterator](): AsyncIterator<RuntimeEvent> {
-    while (true) {
-      if (this.queue.length) {
-        const event = this.queue.shift()!;
-        if (this.queue.length < 128) this.socket.resume();
-        yield event;
+    try {
+      while (true) {
+        if (this.queue.length) {
+          const event = this.queue.shift()!;
+          if (this.queue.length < 128) this.socket.resume();
+          yield event;
+        }
+        else if (this.ended) {
+          if (this.terminalError) throw this.terminalError;
+          return;
+        }
+        else {
+          const result = await new Promise<IteratorResult<RuntimeEvent>>((resolve, reject) =>
+            this.waiters.push({ resolve, reject }));
+          if (result.done) return;
+          yield result.value;
+        }
       }
-      else if (this.ended) return;
-      else {
-        const result = await new Promise<IteratorResult<RuntimeEvent>>((resolve) => this.waiters.push(resolve));
-        if (result.done) return;
-        yield result.value;
-      }
+    } finally {
+      await this.close();
     }
   }
-  private consume(text: string): void {
-    this.buffer += text;
+  private consume(chunk: Buffer): void {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    if (this.buffer.length > 65536 && this.buffer.indexOf(0x0a) < 0) {
+      const error = new SonexisError("message_too_large", "Event exceeds 64 KiB");
+      this.emit("streamError", error); this.socket.destroy(); this.finish(error); return;
+    }
     let newline: number;
-    while ((newline = this.buffer.indexOf("\n")) >= 0) {
+    while ((newline = this.buffer.indexOf(0x0a)) >= 0) {
       let event: RuntimeEvent;
-      try { event = JSON.parse(this.buffer.slice(0, newline)) as RuntimeEvent; }
+      if (newline + 1 > 65536) {
+        const error = new SonexisError("message_too_large", "Event exceeds 64 KiB");
+        this.emit("streamError", error); this.socket.destroy(); this.finish(error); return;
+      }
+      try { event = JSON.parse(this.buffer.subarray(0, newline).toString("utf8")) as RuntimeEvent; }
       catch (error) {
         this.emit("streamError", error);
         this.socket.destroy();
-        this.finish();
+        this.finish(error instanceof Error ? error : new Error(String(error)));
         return;
       }
-      this.buffer = this.buffer.slice(newline + 1);
+      this.buffer = this.buffer.subarray(newline + 1);
       this.emit("event", event);
       const waiter = this.waiters.shift();
-      if (waiter) waiter({ value: event, done: false });
-      else {
+      if (waiter) waiter.resolve({ value: event, done: false });
+      else if (this.listenerCount("event") === 0) {
         this.queue.push(event);
         if (this.queue.length >= 256) this.socket.pause();
       }
     }
   }
-  private finish(): void {
+  private finish(error?: Error): void {
     if (this.ended) return;
     this.ended = true;
-    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined, done: true });
+    this.terminalError = error;
+    for (const waiter of this.waiters.splice(0)) {
+      if (error) waiter.reject(error);
+      else waiter.resolve({ value: undefined, done: true });
+    }
+  }
+  private async cleanupRuntime(): Promise<void> {
+    if (this.cleaned) return;
+    this.cleaned = true;
+    try { await this.client.cleanupSubscription(this.id); } catch { }
   }
 }
 
@@ -407,4 +552,19 @@ export function decodeFrame(packet: Buffer, expectedStreamId: string,
 function uuidFromBytes(bytes: Buffer): string {
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function boundedCleanup(promise: Promise<unknown>, timeoutMs = 1000): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new SonexisError(
+          "cleanup_timeout", "Runtime cleanup timed out", true)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }

@@ -16,6 +16,7 @@ public final class RuntimeDataPlane: @unchecked Sendable {
     private let queue: DispatchQueue
     private let listener: UnixSocketListener
     private let maximumSubscribers: Int
+    private let warningHandler: @Sendable (_ disconnectedClients: Int) -> Void
     private let capacityLimit = 64
     private let capacity = DispatchSemaphore(value: 64)
     private let metricsLock = NSLock()
@@ -32,10 +33,12 @@ public final class RuntimeDataPlane: @unchecked Sendable {
     private var lastSequence: UInt64 = 0
     private var lastTimestamp: UInt64 = 0
 
-    public init(path: String, streamID: UUID, maximumSubscribers: Int = 4) {
+    public init(path: String, streamID: UUID, maximumSubscribers: Int = 4,
+                warningHandler: @escaping @Sendable (_ disconnectedClients: Int) -> Void = { _ in }) {
         self.path = path
         self.streamID = streamID
         self.maximumSubscribers = maximumSubscribers
+        self.warningHandler = warningHandler
         queue = DispatchQueue(label: "com.sonexis.runtime.data.\(streamID.uuidString)")
         listener = UnixSocketListener(path: path, queue: queue, acceptedConnectionsNonBlocking: true)
     }
@@ -120,6 +123,7 @@ public final class RuntimeDataPlane: @unchecked Sendable {
                     self.pendingDroppedFrames &+= UInt64(frame.frameCount)
                 }
                 self.metricsLock.unlock()
+                if !dead.isEmpty { self.warningHandler(dead.count) }
                 self.lastSequence = frame.sequence
                 self.lastTimestamp = frame.timestampNanoseconds
             } catch {
@@ -194,9 +198,12 @@ public final class RuntimeEventPlane: @unchecked Sendable {
     private let queue: DispatchQueue
     private let listener: UnixSocketListener
     private let capacity = DispatchSemaphore(value: 256)
+    private let metricsLock = NSLock()
     private var connection: UnixSocketConnection?
     private var running = false
-    private(set) var droppedEvents: UInt64 = 0
+    private var droppedEvents: UInt64 = 0
+    private var pendingDroppedEvents: UInt64 = 0
+    private var nextSequence: UInt64 = 1
 
     public init(path: String) {
         self.path = path
@@ -221,23 +228,34 @@ public final class RuntimeEventPlane: @unchecked Sendable {
 
     public func offer(_ event: RuntimeEventDTO) {
         guard capacity.wait(timeout: .now()) == .success else {
-            queue.async { [weak self] in self?.droppedEvents &+= 1 }
+            recordDrop()
             return
         }
         queue.async { [weak self] in
-            defer { self?.capacity.signal() }
-            guard let self, self.running, let connection = self.connection else {
-                self?.droppedEvents &+= 1
+            guard let self else { return }
+            defer { self.capacity.signal() }
+            guard self.running, let connection = self.connection else {
+                self.recordDrop()
                 return
             }
+            let pending = self.takePendingDrops()
+            let delivered = event.delivered(sequence: self.nextSequence,
+                droppedEventsBefore: pending)
             do {
-                try connection.write(RuntimeProtocolCodec.encodeLine(event))
+                try connection.write(RuntimeProtocolCodec.encodeLine(delivered))
+                self.nextSequence &+= 1
             } catch {
                 connection.close()
                 self.connection = nil
-                self.droppedEvents &+= 1
+                self.restoreDrops(pending &+ 1)
             }
         }
+    }
+
+    public func metrics() -> UInt64 {
+        metricsLock.lock()
+        defer { metricsLock.unlock() }
+        return droppedEvents
     }
 
     public func stop() {
@@ -248,6 +266,28 @@ public final class RuntimeEventPlane: @unchecked Sendable {
             connection?.close()
             connection = nil
         }
+    }
+
+    private func recordDrop() {
+        metricsLock.lock()
+        droppedEvents &+= 1
+        pendingDroppedEvents &+= 1
+        metricsLock.unlock()
+    }
+
+    private func takePendingDrops() -> UInt64 {
+        metricsLock.lock()
+        let value = pendingDroppedEvents
+        pendingDroppedEvents = 0
+        metricsLock.unlock()
+        return value
+    }
+
+    private func restoreDrops(_ count: UInt64) {
+        metricsLock.lock()
+        droppedEvents &+= 1
+        pendingDroppedEvents &+= count
+        metricsLock.unlock()
     }
 }
 
@@ -266,10 +306,16 @@ public final class RuntimeEventHub: @unchecked Sendable {
     }
 
     private let directory: URL
+    private let limits: RuntimeResourceLimitsDTO
     private let queue = DispatchQueue(label: "com.sonexis.runtime.event-hub")
     private var subscriptions: [String: Subscription] = [:]
+    private var reservedSubscriptions = 0
+    private var archivedDroppedEvents: UInt64 = 0
 
-    public init(directory: URL) { self.directory = directory }
+    public init(directory: URL, limits: RuntimeResourceLimitsDTO = .init()) {
+        self.directory = directory
+        self.limits = limits
+    }
 
     public func subscribe(ownerID: String, eventTypes: [RuntimeEventTypeDTO]?) throws -> RuntimeEventSubscriptionDTO {
         let id = UUID().uuidString.lowercased()
@@ -277,10 +323,30 @@ public final class RuntimeEventHub: @unchecked Sendable {
         guard !selected.isEmpty else {
             throw RuntimeErrorDTO(code: "invalid_event_filter", message: "At least one event type is required")
         }
+        try queue.sync {
+            guard subscriptions.count + reservedSubscriptions < limits.maximumEventSubscriptions else {
+                throw RuntimeErrorDTO(code: "subscription_limit_exceeded",
+                    message: "Runtime event subscription limit reached", retryable: true)
+            }
+            let owned = subscriptions.values.filter { $0.ownerID == ownerID }.count
+            guard owned < limits.maximumEventSubscriptionsPerClient else {
+                throw RuntimeErrorDTO(code: "subscription_limit_exceeded",
+                    message: "Client event subscription limit reached", retryable: true)
+            }
+            reservedSubscriptions += 1
+        }
+        var reservationActive = true
+        defer {
+            if reservationActive { queue.sync { reservedSubscriptions -= 1 } }
+        }
         let path = directory.appendingPathComponent("events-\(id).sock").path
         let plane = RuntimeEventPlane(path: path)
         try plane.start()
-        queue.sync { subscriptions[id] = Subscription(id: id, ownerID: ownerID, types: selected, plane: plane) }
+        queue.sync {
+            reservedSubscriptions -= 1
+            reservationActive = false
+            subscriptions[id] = Subscription(id: id, ownerID: ownerID, types: selected, plane: plane)
+        }
         return RuntimeEventSubscriptionDTO(id: id, eventSocketPath: path,
             eventTypes: selected.sorted { $0.rawValue < $1.rawValue })
     }
@@ -296,6 +362,7 @@ public final class RuntimeEventHub: @unchecked Sendable {
             return subscriptions.removeValue(forKey: id)!
         }
         removed.plane.stop()
+        queue.sync { archivedDroppedEvents &+= removed.plane.metrics() }
     }
 
     public func publish(_ event: RuntimeEventDTO) {
@@ -310,6 +377,7 @@ public final class RuntimeEventHub: @unchecked Sendable {
             return matches
         }
         removed.forEach { $0.plane.stop() }
+        queue.sync { archivedDroppedEvents &+= removed.reduce(0) { $0 &+ $1.plane.metrics() } }
     }
 
     public func stopAll() {
@@ -319,7 +387,14 @@ public final class RuntimeEventHub: @unchecked Sendable {
             return values
         }
         removed.forEach { $0.plane.stop() }
+        queue.sync { archivedDroppedEvents &+= removed.reduce(0) { $0 &+ $1.plane.metrics() } }
     }
 
     public var count: Int { queue.sync { subscriptions.count } }
+
+    public var totalDroppedEvents: UInt64 {
+        queue.sync {
+            archivedDroppedEvents &+ subscriptions.values.reduce(0) { $0 &+ $1.plane.metrics() }
+        }
+    }
 }

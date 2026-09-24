@@ -91,6 +91,45 @@ public struct RuntimeSourceDTO: Codable, Equatable, Sendable {
     }
 
     public var isActive: Bool { processState == .running }
+
+    // JSONEncoder's built-in snake-case strategy renders acronym plurals as
+    // `process_i_ds`. Pin this one public wire key to the documented spelling.
+    private enum EncodingKeys: String, CodingKey {
+        case id, kind, processID, processIDs = "process_ids", bundleIdentifier, name
+        case processState, isAvailable, isProducingAudio, nativeFormat
+    }
+    private enum DecodingKeys: String, CodingKey {
+        case id, kind, processID, processIDs, bundleIdentifier, name
+        case processState, isAvailable, isProducingAudio, nativeFormat
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: DecodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try container.decode(RuntimeSourceKindDTO.self, forKey: .kind)
+        processID = try container.decodeIfPresent(Int32.self, forKey: .processID)
+        processIDs = try container.decode([Int32].self, forKey: .processIDs)
+        bundleIdentifier = try container.decodeIfPresent(String.self, forKey: .bundleIdentifier)
+        name = try container.decode(String.self, forKey: .name)
+        processState = try container.decode(RuntimeSourceProcessStateDTO.self, forKey: .processState)
+        isAvailable = try container.decode(Bool.self, forKey: .isAvailable)
+        isProducingAudio = try container.decodeIfPresent(Bool.self, forKey: .isProducingAudio)
+        nativeFormat = try container.decodeIfPresent(RuntimePCMFormatDTO.self, forKey: .nativeFormat)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: EncodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encodeIfPresent(processID, forKey: .processID)
+        try container.encode(processIDs, forKey: .processIDs)
+        try container.encodeIfPresent(bundleIdentifier, forKey: .bundleIdentifier)
+        try container.encode(name, forKey: .name)
+        try container.encode(processState, forKey: .processState)
+        try container.encode(isAvailable, forKey: .isAvailable)
+        try container.encodeIfPresent(isProducingAudio, forKey: .isProducingAudio)
+        try container.encodeIfPresent(nativeFormat, forKey: .nativeFormat)
+    }
 }
 
 public enum RuntimeSessionStateDTO: String, Codable, Sendable {
@@ -212,15 +251,21 @@ public struct RuntimeResourceLimitsDTO: Codable, Equatable, Sendable {
     public let maximumSessionsPerClient: Int
     public let maximumSubscribersPerStream: Int
     public let maximumControlMessageBytes: Int
+    public let maximumEventSubscriptions: Int
+    public let maximumEventSubscriptionsPerClient: Int
 
     public init(maximumControlClients: Int = 32, maximumSessions: Int = 16,
                 maximumSessionsPerClient: Int = 8, maximumSubscribersPerStream: Int = 4,
-                maximumControlMessageBytes: Int = 64 * 1024) {
+                maximumControlMessageBytes: Int = 64 * 1024,
+                maximumEventSubscriptions: Int = 32,
+                maximumEventSubscriptionsPerClient: Int = 4) {
         self.maximumControlClients = maximumControlClients
         self.maximumSessions = maximumSessions
         self.maximumSessionsPerClient = maximumSessionsPerClient
         self.maximumSubscribersPerStream = maximumSubscribersPerStream
         self.maximumControlMessageBytes = maximumControlMessageBytes
+        self.maximumEventSubscriptions = maximumEventSubscriptions
+        self.maximumEventSubscriptionsPerClient = maximumEventSubscriptionsPerClient
     }
 }
 
@@ -244,6 +289,7 @@ public struct RuntimeStatusDTO: Codable, Equatable, Sendable {
     public let totalFramesForwarded: UInt64
     public let totalDroppedFrames: UInt64
     public let totalBytesTransmitted: UInt64
+    public let totalEventsDropped: UInt64
 }
 
 public enum RuntimeEventTypeDTO: String, Codable, CaseIterable, Sendable {
@@ -262,6 +308,10 @@ public enum RuntimeEventTypeDTO: String, Codable, CaseIterable, Sendable {
 public struct RuntimeEventDTO: Codable, Equatable, Sendable {
     public let protocolVersion: Int
     public let eventID: String
+    /// Monotonic per-subscription sequence for successfully delivered events.
+    public let eventSequence: UInt64?
+    /// Events discarded for this subscription immediately before this event.
+    public let droppedEventsBefore: UInt64?
     public let type: RuntimeEventTypeDTO
     public let timestampNanoseconds: UInt64
     public let sourceID: String?
@@ -274,13 +324,17 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
     public let droppedFrames: UInt64?
 
     public init(type: RuntimeEventTypeDTO,
+                eventID: String = UUID().uuidString.lowercased(),
+                eventSequence: UInt64? = nil, droppedEventsBefore: UInt64? = nil,
                 timestampNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds,
                 sourceID: String? = nil, sessionID: String? = nil, streamID: String? = nil,
                 source: RuntimeSourceDTO? = nil, session: RuntimeSessionDTO? = nil,
                 message: String? = nil, error: RuntimeErrorDTO? = nil,
                 droppedFrames: UInt64? = nil) {
         protocolVersion = RuntimeProtocolInfo.protocolVersion
-        eventID = UUID().uuidString.lowercased()
+        self.eventID = eventID
+        self.eventSequence = eventSequence
+        self.droppedEventsBefore = droppedEventsBefore
         self.type = type
         self.timestampNanoseconds = timestampNanoseconds
         self.sourceID = sourceID
@@ -291,6 +345,14 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
         self.message = message
         self.error = error
         self.droppedFrames = droppedFrames
+    }
+
+    public func delivered(sequence: UInt64, droppedEventsBefore: UInt64) -> Self {
+        Self(type: type, eventID: eventID, eventSequence: sequence,
+            droppedEventsBefore: droppedEventsBefore == 0 ? nil : droppedEventsBefore,
+            timestampNanoseconds: timestampNanoseconds, sourceID: sourceID,
+            sessionID: sessionID, streamID: streamID, source: source, session: session,
+            message: message, error: error, droppedFrames: droppedFrames)
     }
 }
 
@@ -310,6 +372,17 @@ public enum RuntimeCommandName: String, Codable, Sendable {
     case subscribeEvents = "subscribe_events"
     case unsubscribeEvents = "unsubscribe_events"
     case ping
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 /// One JSON object followed by a newline. The first command on a connection must be `hello`.
@@ -439,8 +512,13 @@ public enum RuntimeProtocolCodec {
             for piece in pieces.dropFirst() {
                 camel += piece.prefix(1).uppercased() + piece.dropFirst()
             }
-            camel = camel.replacingOccurrences(of: "Ids", with: "IDs")
-                .replacingOccurrences(of: "Id", with: "ID")
+            if camel.hasSuffix("Ids") {
+                camel.removeLast(3)
+                camel += "IDs"
+            } else if camel.hasSuffix("Id") {
+                camel.removeLast(2)
+                camel += "ID"
+            }
             return RuntimeCodingKey(stringValue: camel)!
         }
         return decoder
@@ -448,7 +526,8 @@ public enum RuntimeProtocolCodec {
 
     public static func encodeLine<T: Encodable>(_ value: T) throws -> Data {
         let payload = try encoder().encode(value)
-        guard payload.count <= maximumControlMessageBytes else {
+        // The advertised limit includes the trailing NDJSON newline.
+        guard payload.count < maximumControlMessageBytes else {
             throw RuntimeErrorDTO(code: "message_too_large", message: "Control message exceeds \(maximumControlMessageBytes) bytes")
         }
         var line = payload

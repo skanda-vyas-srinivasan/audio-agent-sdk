@@ -26,6 +26,15 @@ do {
     expect(decodedCommand == command,
            "control command did not round trip")
 
+    let source = RuntimeSourceDTO(id: "app.example", processID: 42,
+        bundleIdentifier: "com.example", name: "Example")
+    let sourceLine = try RuntimeProtocolCodec.encodeLine(source)
+    let sourceJSON = String(decoding: sourceLine, as: UTF8.self)
+    expect(sourceJSON.contains("\"process_ids\""), "source process_ids wire key is missing")
+    expect(!sourceJSON.contains("process_i_ds"), "source uses an unstable acronym key")
+    let decodedSource = try RuntimeProtocolCodec.decodeLine(RuntimeSourceDTO.self, from: sourceLine)
+    expect(decodedSource == source, "source did not round trip: \(sourceJSON) decoded=\(decodedSource)")
+
     for split in 0...line.count {
         var parser = RuntimeNDJSONParser()
         let first = try parser.append(line.prefix(split))

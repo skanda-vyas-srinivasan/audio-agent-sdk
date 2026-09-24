@@ -37,6 +37,11 @@ async def read_frame(
     stream_id = uuid.UUID(bytes=stream_bytes)
     if stream_id != expected_stream_id:
         raise SonexisProtocolError("stream_id_mismatch", "PCM frame belongs to another stream")
+    if previous_sequence is not None:
+        if sequence <= previous_sequence:
+            raise SonexisProtocolError("invalid_pcm_sequence", "PCM sequence did not advance")
+        if sequence != previous_sequence + 1 and not flags & FLAG_DISCONTINUITY:
+            raise SonexisProtocolError("unmarked_pcm_gap", "PCM sequence gap lacks discontinuity")
     formats = {1: SampleFormat.PCM_S16LE, 2: SampleFormat.FLOAT32_LE}
     if format_code not in formats:
         raise SonexisProtocolError("invalid_pcm_header", "Unknown PCM sample format")
@@ -51,11 +56,6 @@ async def read_frame(
         raise SonexisProtocolError("invalid_pcm_header", "PCM payload and format are inconsistent")
     if payload_size > MAX_PCM_BYTES:
         raise SonexisProtocolError("invalid_pcm_header", "PCM payload exceeds the limit")
-    if previous_sequence is not None:
-        if sequence <= previous_sequence:
-            raise SonexisProtocolError("invalid_pcm_sequence", "PCM sequence did not advance")
-        if sequence != previous_sequence + 1 and not flags & FLAG_DISCONTINUITY:
-            raise SonexisProtocolError("unmarked_pcm_gap", "PCM sequence gap lacks discontinuity")
     try:
         payload = await reader.readexactly(payload_size)
     except asyncio.IncompleteReadError as error:

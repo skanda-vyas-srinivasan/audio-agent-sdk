@@ -72,9 +72,14 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
     private let backend: RuntimeCaptureBackend
     private let socketDirectory: URL
     private let queue = DispatchQueue(label: "com.sonexis.runtime.sessions")
+    private let startGroup = DispatchGroup()
     private var records: [String: Record] = [:]
+    private var acceptingStarts = true
     private var reservedStarts = 0
     private var totalSessionsStarted: UInt64 = 0
+    private var archivedFrames: UInt64 = 0
+    private var archivedDrops: UInt64 = 0
+    private var archivedBytes: UInt64 = 0
     private let limits: RuntimeResourceLimitsDTO
     private let eventHandler: @Sendable (RuntimeEventDTO) -> Void
 
@@ -101,6 +106,10 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
                 }.joined(separator: ",")])
         }
         try queue.sync {
+            guard acceptingStarts else {
+                throw RuntimeErrorDTO(code: "runtime_shutting_down",
+                    message: "Runtime is shutting down", retryable: true)
+            }
             let active = records.values.filter { $0.state == .starting || $0.state == .capturing }
             let owned = active.filter { $0.ownerID == ownerID }
             guard active.count + reservedStarts < limits.maximumSessions else {
@@ -110,7 +119,9 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
                 throw RuntimeErrorDTO(code: "session_limit_exceeded", message: "Client session limit reached", retryable: true)
             }
             reservedStarts += 1
+            startGroup.enter()
         }
+        defer { startGroup.leave() }
         var reservationActive = true
         defer {
             if reservationActive { queue.sync { reservedStarts -= 1 } }
@@ -119,7 +130,11 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
         let streamID = UUID()
         let dataPath = socketDirectory.appendingPathComponent("stream-\(streamID.uuidString.lowercased()).sock").path
         let plane = RuntimeDataPlane(path: dataPath, streamID: streamID,
-            maximumSubscribers: limits.maximumSubscribersPerStream)
+            maximumSubscribers: limits.maximumSubscribersPerStream) { [eventHandler] disconnected in
+                eventHandler(RuntimeEventDTO(type: .clientWarning, sourceID: sourceID,
+                    sessionID: sessionID, streamID: streamID.uuidString.lowercased(),
+                    message: "Disconnected \(disconnected) slow audio subscriber(s)"))
+            }
         try plane.start()
 
         let startedAt = DispatchTime.now().uptimeNanoseconds
@@ -141,40 +156,63 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
             }, onEnded: { [weak self] error in
                 self?.captureEnded(sessionID: sessionID, error: error)
             })
-            let snapshot = queue.sync {
+            let snapshot = try queue.sync {
                 // Backend startup may synchronously report termination.
                 guard record.state == .starting else {
                     backendSession.stop()
-                    return snapshot(record)
+                    throw record.terminalError ?? RuntimeErrorDTO(code: "capture_ended_during_start",
+                        message: "Capture ended before startup completed", retryable: true)
                 }
                 record.format = backendSession.outputFormat
                 record.backendSession = backendSession
                 record.state = .capturing
-                return self.snapshot(record)
+                let snapshot = self.snapshot(record)
+                // Publish while serialized with termination so capture_started can
+                // never follow capture_stopped/capture_failed for this session.
+                self.eventHandler(RuntimeEventDTO(type: .captureStarted, sourceID: sourceID,
+                    sessionID: sessionID, streamID: streamID.uuidString.lowercased(), session: snapshot))
+                return snapshot
             }
-            eventHandler(RuntimeEventDTO(type: .captureStarted, sourceID: sourceID,
-                sessionID: sessionID, streamID: streamID.uuidString.lowercased(), session: snapshot))
             return snapshot
         } catch {
-            _ = queue.sync { records.removeValue(forKey: sessionID) }
+            let failure = error as? RuntimeErrorDTO ?? RuntimeErrorDTO(code: "capture_start_failed",
+                message: String(describing: error), retryable: true)
+            let shouldPublishFailure = queue.sync {
+                var publish = false
+                if let existing = records[sessionID] {
+                    if existing.state == .starting {
+                        existing.state = .failed
+                        existing.terminalError = failure
+                        publish = true
+                    }
+                    archiveAndRemove(existing)
+                }
+                return publish
+            }
             plane.stop()
+            if shouldPublishFailure {
+                eventHandler(RuntimeEventDTO(type: .captureFailed, sourceID: sourceID,
+                    sessionID: sessionID, streamID: streamID.uuidString.lowercased(), error: failure))
+            }
             throw error
         }
     }
 
     public func stopCapture(sessionID: String, ownerID: String) throws -> RuntimeSessionDTO {
-        let terminal = try queue.sync {
+        let result: (RuntimeSessionDTO, Bool) = try queue.sync {
             guard let record = records[sessionID] else {
                 throw RuntimeErrorDTO(code: "session_not_found", message: "No capture session named \(sessionID)")
             }
-            stop(record, state: .stopped, error: nil)
+            let transitioned = stop(record, state: .stopped, error: nil)
             let terminal = snapshot(record)
             pruneTerminalRecords()
-            return terminal
+            return (terminal, transitioned)
         }
-        eventHandler(RuntimeEventDTO(type: .captureStopped, sourceID: terminal.sourceID,
-            sessionID: terminal.id, streamID: terminal.streamID, session: terminal))
-        return terminal
+        if result.1 {
+            eventHandler(RuntimeEventDTO(type: .captureStopped, sourceID: result.0.sourceID,
+                sessionID: result.0.id, streamID: result.0.streamID, session: result.0))
+        }
+        return result.0
     }
 
     public func session(sessionID: String, ownerID: String) throws -> RuntimeSessionDTO {
@@ -187,11 +225,19 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
     }
 
     public func stopSessions(ownerID: String) {
-        queue.sync {
+        let stopped: [RuntimeSessionDTO] = queue.sync {
             let owned = records.values.filter { $0.ownerID == ownerID }
-            owned.filter { $0.state == .starting || $0.state == .capturing }
-                .forEach { stop($0, state: .stopped, error: nil) }
-            owned.forEach { records.removeValue(forKey: $0.id) }
+            let active = owned.filter { $0.state == .starting || $0.state == .capturing }
+            let snapshots = active.compactMap { record -> RuntimeSessionDTO? in
+                stop(record, state: .stopped, error: nil) ? snapshot(record) : nil
+            }
+            owned.forEach(archiveAndRemove)
+            return snapshots
+        }
+        stopped.forEach { terminal in
+            eventHandler(RuntimeEventDTO(type: .captureStopped, sourceID: terminal.sourceID,
+                sessionID: terminal.id, streamID: terminal.streamID, session: terminal,
+                message: "Owning control client disconnected"))
         }
     }
 
@@ -204,11 +250,21 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
     }
 
     public func stopAll() {
+        prepareForShutdown()
         queue.sync {
             records.values.filter { $0.state == .starting || $0.state == .capturing }
                 .forEach { stop($0, state: .stopped, error: nil) }
             records.removeAll()
         }
+    }
+
+    public func prepareForShutdown() {
+        queue.sync { acceptingStarts = false }
+        startGroup.wait()
+    }
+
+    public func resume() {
+        queue.sync { acceptingStarts = true }
     }
 
     public func diagnostics() -> (activeSessions: Int, totalSessionsStarted: UInt64,
@@ -223,16 +279,17 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
                 $0 &+ $1.captureMetrics.ringDroppedFrames &+ $1.captureMetrics.deliveryDroppedFrames
             }
             return (active.count, totalSessionsStarted,
-                metrics.reduce(0) { $0 &+ $1.framesForwarded },
-                captureDrops &+ metrics.reduce(0) { $0 &+ $1.queueDroppedFrames &+ $1.noSubscriberFrames },
-                metrics.reduce(0) { $0 &+ $1.bytesTransmitted })
+                archivedFrames &+ metrics.reduce(0) { $0 &+ $1.framesForwarded },
+                archivedDrops &+ captureDrops &+ metrics.reduce(0) {
+                    $0 &+ $1.queueDroppedFrames &+ $1.noSubscriberFrames
+                }, archivedBytes &+ metrics.reduce(0) { $0 &+ $1.bytesTransmitted })
         }
     }
 
     private func captureEnded(sessionID: String, error: RuntimeErrorDTO?) {
         queue.async { [weak self] in
             guard let self, let record = self.records[sessionID], record.state == .starting || record.state == .capturing else { return }
-            self.stop(record, state: error == nil ? .stopped : .failed, error: error)
+            guard self.stop(record, state: error == nil ? .stopped : .failed, error: error) else { return }
             let snapshot = self.snapshot(record)
             self.pruneTerminalRecords()
             self.eventHandler(RuntimeEventDTO(type: error == nil ? .captureStopped : .captureFailed,
@@ -241,8 +298,10 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
         }
     }
 
-    private func stop(_ record: Record, state: RuntimeSessionStateDTO, error: RuntimeErrorDTO?) {
-        guard record.state == .starting || record.state == .capturing else { return }
+    @discardableResult
+    private func stop(_ record: Record, state: RuntimeSessionStateDTO,
+                      error: RuntimeErrorDTO?) -> Bool {
+        guard record.state == .starting || record.state == .capturing else { return false }
         record.state = state
         record.terminalError = error
         let session = record.backendSession
@@ -251,6 +310,7 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
         // Stop production before closing subscribers, so no callback can target a removed socket.
         session?.stop()
         record.dataPlane.stop()
+        return true
     }
 
     private func snapshot(_ record: Record) -> RuntimeSessionDTO {
@@ -282,7 +342,19 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
             .filter { $0.state == .stopped || $0.state == .failed }
             .sorted { $0.startedAt < $1.startedAt }
         for record in terminal.prefix(max(0, terminal.count - limit)) {
-            records.removeValue(forKey: record.id)
+            archiveAndRemove(record)
         }
+    }
+
+    /// Moves a record's final counters into monotonic Runtime lifetime totals.
+    /// Must be called on `queue`.
+    private func archiveAndRemove(_ record: Record) {
+        guard records.removeValue(forKey: record.id) != nil else { return }
+        let data = record.dataPlane.metrics()
+        archivedFrames &+= data.framesForwarded
+        archivedDrops &+= record.captureMetrics.ringDroppedFrames
+            &+ record.captureMetrics.deliveryDroppedFrames
+            &+ data.queueDroppedFrames &+ data.noSubscriberFrames
+        archivedBytes &+= data.bytesTransmitted
     }
 }

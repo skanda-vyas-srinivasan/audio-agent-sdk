@@ -133,8 +133,14 @@ public final class UnixSocketListener: @unchecked Sendable {
             try UnixSocketSystem.prepareSocketPath(path)
             try UnixSocketSystem.bind(fd, path: path)
             didBind = true
-            guard fstat(fd, &boundStatus) == 0 else {
-                throw UnixSocketError.systemCall("fstat", errno)
+            // Track the filesystem socket node, not the socket descriptor's
+            // kernel object: their inode numbers are distinct on Darwin.
+            guard lstat(path, &boundStatus) == 0 else {
+                throw UnixSocketError.systemCall("lstat", errno)
+            }
+            guard boundStatus.st_mode & S_IFMT == S_IFSOCK else {
+                throw RuntimeErrorDTO(code: "invalid_socket_path",
+                    message: "Bound Runtime path is not a Unix socket")
             }
             guard Darwin.listen(fd, 16) == 0 else { throw UnixSocketError.systemCall("listen", errno) }
         } catch {
