@@ -1,7 +1,5 @@
 import AppKit
-import Combine
 import CoreAudio
-import SwiftUI
 
 struct AudioCaptureTarget: Codable, Equatable, Identifiable {
     let bundleID: String
@@ -18,14 +16,9 @@ struct AudioCaptureTarget: Codable, Equatable, Identifiable {
     }
 
     static func runningApps() -> [Self] {
-        var seen = Set<String>()
-        return NSWorkspace.shared.runningApplications.compactMap { app in
-            guard app.activationPolicy == .regular,
-                  app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
-                  let id = app.bundleIdentifier, let url = app.bundleURL,
-                  seen.insert(id).inserted else { return nil }
-            return Self(bundleID: id, name: app.localizedName ?? id, bundlePath: url.path)
-        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        (try? AudioSourceRegistry().availableSources().compactMap { source in
+            try? Self(source: source)
+        }) ?? []
     }
 
     func contains(bundleID processBundleID: String, bundlePath processPath: String?, executablePath: String? = nil) -> Bool {
@@ -87,70 +80,5 @@ private enum ProcessResponsibility {
         let owner = lookup(pid)
         guard owner > 1, owner != pid, owner != ProcessInfo.processInfo.processIdentifier else { return nil }
         return NSRunningApplication(processIdentifier: owner)?.bundleIdentifier
-    }
-}
-
-extension AudioEngine {
-    func selectCaptureTarget(_ target: AudioCaptureTarget?) {
-        guard target != captureTarget else { return }
-        do {
-            try processTapEngine?.setCaptureTarget(target)
-            captureTarget = target
-            if let target {
-                UserDefaults.standard.set(try JSONEncoder().encode(target), forKey: AudioCaptureTarget.storageKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: AudioCaptureTarget.storageKey)
-            }
-            inputDeviceName = target?.name ?? "System Audio"
-            errorMessage = nil
-        } catch {
-            errorMessage = "Could not change audio source: \(error)"
-        }
-    }
-}
-
-struct CaptureTargetMenu: View {
-    @ObservedObject var audioEngine: AudioEngine
-    @State private var apps = AudioCaptureTarget.runningApps()
-    private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
-
-    var body: some View {
-        Menu {
-            Button {
-                audioEngine.selectCaptureTarget(nil)
-            } label: {
-                if audioEngine.captureTarget == nil { Label("All audio", systemImage: "checkmark") }
-                else { Text("All audio") }
-            }
-            Divider()
-            if let selected = audioEngine.captureTarget, !apps.contains(where: { $0.id == selected.id }) {
-                Text("\(selected.name) — not running")
-            }
-            ForEach(apps) { app in
-                Button {
-                    audioEngine.selectCaptureTarget(app)
-                } label: {
-                    if audioEngine.captureTarget?.id == app.id { Label(app.name, systemImage: "checkmark") }
-                    else { Text(app.name) }
-                }
-            }
-            if apps.isEmpty { Text("Open an app to select it") }
-        } label: {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Apply effects to").font(.system(size: 9)).foregroundStyle(AppColors.textMuted)
-                    Text(audioEngine.captureTarget?.name ?? "All audio")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(AppColors.textPrimary)
-                        .lineLimit(1).truncationMode(.tail)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.down").font(.system(size: 10)).foregroundStyle(AppColors.neonPink)
-            }
-            .frame(width: 140, height: 32)
-        }
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .onReceive(refresh) { _ in apps = AudioCaptureTarget.runningApps() }
     }
 }

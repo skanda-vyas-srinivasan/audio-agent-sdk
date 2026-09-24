@@ -43,10 +43,11 @@ final class TapCaptureEngine {
 
     func prepare(
         sourceDevice defaultOutput: AudioDeviceSummary,
-        outputStreamFormat: AudioStreamBasicDescription,
+        outputStreamFormat: AudioStreamBasicDescription? = nil,
         ownProcessObjectID: AudioObjectID,
         captureTarget: AudioCaptureTarget? = nil,
-        fixedSelection: ProcessTapSelection? = nil
+        fixedSelection: ProcessTapSelection? = nil,
+        muteBehavior: CATapMuteBehavior = CATapMuteBehavior(rawValue: 2)!
     ) throws -> TapCaptureConfiguration {
         self.ownProcessID = ownProcessObjectID
         self.captureTarget = captureTarget
@@ -62,7 +63,7 @@ final class TapCaptureEngine {
         selectedProcessIDs = selectedIDs
         tapDescription.name = "ProcessTapDSP System Output Tap"
         tapDescription.isPrivate = true
-        tapDescription.muteBehavior = CATapMuteBehavior(rawValue: 2)!
+        tapDescription.muteBehavior = muteBehavior
 
         var createdTapID = kAudioObjectUnknown
         try checkOSStatus(
@@ -90,10 +91,12 @@ final class TapCaptureEngine {
 
         let createdTapFormat = try CoreAudioSupport.tapFormat(tapID)
         print("Tap format: \(createdTapFormat.formatSummary)")
-        guard createdTapFormat.isPlaybackCompatible(with: outputStreamFormat) else {
-            throw SonexisError(
-                message: "Sonexis requires matching Float32 tap/output formats and does not perform sample-rate conversion. Tap: \(createdTapFormat.formatSummary). Output: \(outputStreamFormat.formatSummary)"
-            )
+        if let outputStreamFormat {
+            guard createdTapFormat.isPlaybackCompatible(with: outputStreamFormat) else {
+                throw SonexisError(
+                    message: "Sonexis requires matching Float32 tap/output formats and does not perform sample-rate conversion. Tap: \(createdTapFormat.formatSummary). Output: \(outputStreamFormat.formatSummary)"
+                )
+            }
         }
 
         let tapUID = try CoreAudioSupport.tapUID(tapID)
