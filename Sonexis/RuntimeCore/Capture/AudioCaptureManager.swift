@@ -6,10 +6,12 @@ final class AudioCaptureManager: @unchecked Sendable {
 
     func startCapture(
         source: AudioSource,
+        outputFormat: RuntimePCMFormat = .pcm16Mono16kHz,
         onAudioFrame: AudioCaptureSession.FrameHandler? = nil
     ) throws -> AudioCaptureSession {
         let session = try AudioCaptureSession(
             source: source,
+            outputFormat: outputFormat,
             frameHandler: onAudioFrame,
             onTermination: { [weak self] id in
                 guard let manager = self else { return }
@@ -18,8 +20,13 @@ final class AudioCaptureManager: @unchecked Sendable {
                 }
             }
         )
-        try session.start()
         queue.sync { sessions[session.id] = session }
+        do {
+            try session.start()
+        } catch {
+            queue.sync { sessions.removeValue(forKey: session.id) }
+            throw error
+        }
         return session
     }
 

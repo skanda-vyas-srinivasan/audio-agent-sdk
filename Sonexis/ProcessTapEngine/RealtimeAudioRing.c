@@ -14,6 +14,7 @@ struct SonexisAudioRingBuffer {
     atomic_ullong droppedFrames;
     atomic_ullong underflowFrames;
     atomic_ullong writtenFrames;
+    atomic_ullong writeOperations;
     atomic_ullong readFrames;
     atomic_uint lastInputPeakPPM;
     atomic_uint targetFillFrames;
@@ -107,6 +108,7 @@ SonexisAudioRingBuffer *SonexisAudioRingBufferCreate(uint32_t capacityFrames, ui
     atomic_init(&ringBuffer->droppedFrames, 0);
     atomic_init(&ringBuffer->underflowFrames, 0);
     atomic_init(&ringBuffer->writtenFrames, 0);
+    atomic_init(&ringBuffer->writeOperations, 0);
     atomic_init(&ringBuffer->readFrames, 0);
     atomic_init(&ringBuffer->lastInputPeakPPM, 0);
     atomic_init(&ringBuffer->targetFillFrames, 0);
@@ -269,6 +271,7 @@ uint32_t SonexisAudioRingBufferWriteFromAudioBufferList(
     if (ringBuffer == NULL || inputData == NULL) {
         return 0;
     }
+    atomic_fetch_add_explicit(&ringBuffer->writeOperations, 1, memory_order_relaxed);
 
     uint32_t incomingFrames = minimumFrameCountInAudioBufferList(inputData);
     if (incomingFrames == 0) {
@@ -385,6 +388,7 @@ uint32_t SonexisAudioRingBufferWriteInterleaved(
     if (ringBuffer == NULL || inputSamples == NULL || frames == 0) {
         return 0;
     }
+    atomic_fetch_add_explicit(&ringBuffer->writeOperations, 1, memory_order_relaxed);
 
     uint64_t writeFrame = atomic_load_explicit(&ringBuffer->writeFrame, memory_order_relaxed);
     uint64_t readFrame = atomic_load_explicit(&ringBuffer->readFrame, memory_order_acquire);
@@ -680,6 +684,14 @@ uint64_t SonexisAudioRingBufferGetWrittenFrames(SonexisAudioRingBuffer *ringBuff
     }
 
     return atomic_load_explicit(&ringBuffer->writtenFrames, memory_order_relaxed);
+}
+
+uint64_t SonexisAudioRingBufferGetWriteOperations(SonexisAudioRingBuffer *ringBuffer) {
+    if (ringBuffer == NULL) {
+        return 0;
+    }
+
+    return atomic_load_explicit(&ringBuffer->writeOperations, memory_order_relaxed);
 }
 
 uint64_t SonexisAudioRingBufferGetReadFrames(SonexisAudioRingBuffer *ringBuffer) {

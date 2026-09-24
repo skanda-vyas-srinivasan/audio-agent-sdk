@@ -3,14 +3,27 @@ import Foundation
 
 private final class RuntimeCaptureSessionAdapter: RuntimeBackendCaptureSession, @unchecked Sendable {
     let session: AudioCaptureSession
-    let outputFormat = RuntimePCMFormatDTO.runtimeDefault
+    let outputFormat: RuntimePCMFormatDTO
 
-    init(session: AudioCaptureSession) {
+    init(session: AudioCaptureSession, outputFormat: RuntimePCMFormatDTO) {
         self.session = session
+        self.outputFormat = outputFormat
     }
 
     func stop() {
         session.stop()
+    }
+
+    func metrics() -> RuntimeCaptureMetricsDTO {
+        let value = session.metrics()
+        return RuntimeCaptureMetricsDTO(captureCallbacks: value.captureCallbacks,
+            nativeFramesReceived: value.nativeFramesReceived,
+            normalizedFramesDelivered: value.normalizedFramesDelivered,
+            ringDroppedFrames: value.ringDroppedFrames,
+            deliveryDroppedFrames: value.deliveryDroppedFrames,
+            conversionBatches: value.conversionBatches,
+            conversionNanoseconds: value.conversionNanoseconds,
+            ringBacklogFrames: value.ringBacklogFrames)
     }
 }
 
@@ -29,22 +42,19 @@ private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sen
                 name: source.name,
                 isActive: source.state == .active,
                 isProducingAudio: source.isProducingAudio,
-                nativeFormat: source.nativeFormat.map {
-                    RuntimePCMFormatDTO(
-                        sampleRate: UInt32($0.sampleRate.rounded()),
-                        channelCount: UInt16($0.channelCount),
-                        bitsPerChannel: UInt16($0.bitsPerChannel),
-                        encoding: $0.isFloat ? "float" : "signed_integer_little_endian",
-                        interleaved: $0.isInterleaved
-                    )
-                }
+                // The registry's format is the prospective default-output format,
+                // not an application-native fact. The capture session's negotiated
+                // output format is authoritative, so do not mislabel this source.
+                nativeFormat: nil
             )
         }
     }
 
     func startCapture(
         sourceID: String,
+        format: RuntimePCMFormatDTO,
         onFrame: @escaping @Sendable (RuntimeBackendAudioFrame) -> Void,
+        onDeviceChanged: @escaping @Sendable () -> Void,
         onEnded: @escaping @Sendable (RuntimeErrorDTO?) -> Void
     ) throws -> RuntimeBackendCaptureSession {
         let source: AudioSource
@@ -58,13 +68,18 @@ private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sen
         }
         let session: AudioCaptureSession
         do {
-            session = try manager.startCapture(source: source) { frame in
+            let coreFormat = RuntimePCMFormat(sampleRate: format.sampleRate,
+                channelCount: format.channelCount,
+                sampleFormat: format.sampleFormat == .pcmS16LE ? .pcmS16LE : .float32LE)
+            session = try manager.startCapture(source: source, outputFormat: coreFormat) { frame in
                 onFrame(RuntimeBackendAudioFrame(
                     payload: frame.pcm,
                     sequence: frame.sequence,
                     timestampNanoseconds: frame.timestampNanoseconds,
                     frameCount: frame.frameCount,
-                    format: .runtimeDefault
+                    format: format,
+                    discontinuity: frame.discontinuity,
+                    droppedFramesBefore: frame.droppedFramesBefore
                 ))
             }
         } catch AudioCaptureError.sourceUnavailable {
@@ -88,7 +103,8 @@ private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sen
                 break
             }
         }
-        return RuntimeCaptureSessionAdapter(session: session)
+        session.onEnvironmentChange(onDeviceChanged)
+        return RuntimeCaptureSessionAdapter(session: session, outputFormat: format)
     }
 }
 

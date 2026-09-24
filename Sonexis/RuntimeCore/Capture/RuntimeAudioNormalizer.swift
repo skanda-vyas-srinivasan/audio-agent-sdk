@@ -31,19 +31,23 @@ final class RuntimeAudioNormalizer {
     private let outputBuffer: AVAudioPCMBuffer
     private let maxInputFrames: AVAudioFrameCount
 
-    init(sampleRate: Double, channels: UInt32, maxInputFrames: AVAudioFrameCount = 2_048) throws {
+    init(sampleRate: Double, channels: UInt32,
+         output: RuntimePCMFormat = .pcm16Mono16kHz,
+         maxInputFrames: AVAudioFrameCount = 2_048) throws {
         guard sampleRate > 0, channels > 0 else {
             throw AudioNormalizationError.unsupportedInputFormat(sampleRate: sampleRate, channels: channels)
         }
+        let outputCommonFormat: AVAudioCommonFormat = output.sampleFormat == .pcmS16LE
+            ? .pcmFormatInt16 : .pcmFormatFloat32
         guard let inputFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: sampleRate,
             channels: AVAudioChannelCount(channels),
             interleaved: true
         ), let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: Double(RuntimePCMFormat.pcm16Mono16kHz.sampleRate),
-            channels: AVAudioChannelCount(RuntimePCMFormat.pcm16Mono16kHz.channelCount),
+            commonFormat: outputCommonFormat,
+            sampleRate: Double(output.sampleRate),
+            channels: AVAudioChannelCount(output.channelCount),
             interleaved: true
         ) else {
             throw AudioNormalizationError.unsupportedInputFormat(sampleRate: sampleRate, channels: channels)
@@ -106,4 +110,3 @@ final class RuntimeAudioNormalizer {
         return Data(bytes: outputData, count: byteCount)
     }
 }
-

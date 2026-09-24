@@ -33,19 +33,29 @@ public struct RuntimeSocketPaths: Equatable, Sendable {
 
 public final class SonexisRuntimeServer: @unchecked Sendable {
     public let paths: RuntimeSocketPaths
+    public let limits: RuntimeResourceLimitsDTO
+    public let runtimeInstanceID = UUID().uuidString.lowercased()
     private let coordinator: RuntimeSessionCoordinator
+    private let eventHub: RuntimeEventHub
     private let acceptQueue = DispatchQueue(label: "com.sonexis.runtime.control.accept")
     private let clientQueue = DispatchQueue(label: "com.sonexis.runtime.control.clients", attributes: .concurrent)
+    private let monitorQueue = DispatchQueue(label: "com.sonexis.runtime.source-monitor")
     private let stateLock = NSLock()
-    private let maximumControlClients = 32
+    private let startedAt = DispatchTime.now().uptimeNanoseconds
     private var clients: [String: UnixSocketConnection] = [:]
     private var listener: UnixSocketListener?
+    private var sourceTimer: DispatchSourceTimer?
+    private var sourceSnapshot: [String: RuntimeSourceDTO] = [:]
     private var generation: UInt64 = 0
 
     public init(socketDirectory: URL = RuntimeSocketPaths.userDefault.directory,
-                backend: RuntimeCaptureBackend) {
+                backend: RuntimeCaptureBackend, limits: RuntimeResourceLimitsDTO = .init()) {
         paths = RuntimeSocketPaths(directory: socketDirectory)
-        coordinator = RuntimeSessionCoordinator(backend: backend, socketDirectory: socketDirectory)
+        self.limits = limits
+        let hub = RuntimeEventHub(directory: socketDirectory)
+        eventHub = hub
+        coordinator = RuntimeSessionCoordinator(backend: backend, socketDirectory: socketDirectory,
+            limits: limits, eventHandler: { event in hub.publish(event) })
     }
 
     public func start() throws {
@@ -62,6 +72,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 self.accept(connection, listener: newListener, generation: listenerGeneration)
             }
             stateLock.unlock()
+            startSourceMonitor()
         } catch {
             listener = nil
             generation &+= 1
@@ -71,6 +82,13 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     }
 
     public func stop() {
+        eventHub.publish(RuntimeEventDTO(type: .runtimeShuttingDown, message: "Runtime is shutting down"))
+        monitorQueue.sync {
+            sourceTimer?.setEventHandler {}
+            sourceTimer?.cancel()
+            sourceTimer = nil
+            sourceSnapshot.removeAll()
+        }
         stateLock.lock()
         let oldListener = listener
         listener = nil
@@ -81,6 +99,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         oldListener?.stop()
         activeClients.forEach { $0.close() }
         coordinator.stopAll()
+        eventHub.stopAll()
     }
 
     private func accept(_ connection: UnixSocketConnection,
@@ -93,41 +112,29 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             connection.close()
             return
         }
-        let possibleEvictions = clients.count >= maximumControlClients ? Array(clients.keys) : []
-        stateLock.unlock()
-
-        let idleOwner = possibleEvictions.first {
-            !coordinator.hasActiveSessions(ownerID: $0)
-        }
-
-        stateLock.lock()
-        guard listener === acceptedListener, generation == acceptedGeneration else {
+        guard clients.count < limits.maximumControlClients else {
             stateLock.unlock()
-            connection.close()
-            return
-        }
-        var evicted: UnixSocketConnection?
-        if clients.count >= maximumControlClients, let idleOwner {
-            evicted = clients.removeValue(forKey: idleOwner)
-        }
-        guard clients.count < maximumControlClients else {
-            stateLock.unlock()
+            let error = RuntimeErrorDTO(code: "client_limit_exceeded",
+                message: "Runtime control client limit reached", retryable: true)
+            try? connection.write(RuntimeProtocolCodec.encodeLine(
+                RuntimeResponse(requestID: "unknown", error: error)))
             connection.close()
             return
         }
         clients[ownerID] = connection
         stateLock.unlock()
-        evicted?.close()
         clientQueue.async { [weak self] in self?.serve(connection: connection, ownerID: ownerID) }
     }
 
     private func serve(connection: UnixSocketConnection, ownerID: String) {
         defer {
             coordinator.stopSessions(ownerID: ownerID)
+            eventHub.removeSubscriptions(ownerID: ownerID)
             stateLock.lock(); clients.removeValue(forKey: ownerID); stateLock.unlock()
             connection.close()
         }
         var parser = RuntimeNDJSONParser()
+        var handshaken = false
         while true {
             do {
                 let bytes = try connection.read()
@@ -143,12 +150,12 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                     let response: RuntimeResponse
                     do {
                         let command = try RuntimeProtocolCodec.decodeLine(RuntimeCommand.self, from: line)
-                        response = execute(command, ownerID: ownerID)
+                        response = execute(command, ownerID: ownerID, handshaken: &handshaken)
                     } catch let error as RuntimeErrorDTO {
                         response = RuntimeResponse(requestID: "unknown", error: error)
                     } catch {
                         response = RuntimeResponse(requestID: "unknown", error: RuntimeErrorDTO(
-                            code: "internal_error", message: error.localizedDescription))
+                            code: "internal_error", message: "Runtime could not process the request"))
                     }
                     try connection.write(RuntimeProtocolCodec.encodeLine(response))
                 }
@@ -156,33 +163,72 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         }
     }
 
-    private func execute(_ command: RuntimeCommand, ownerID: String) -> RuntimeResponse {
-        guard command.version == RuntimeCommand.currentVersion else {
+    private func execute(_ command: RuntimeCommand, ownerID: String,
+                         handshaken: inout Bool) -> RuntimeResponse {
+        guard command.messageType == "request", !command.requestID.isEmpty,
+              command.requestID.utf8.count <= 128 else {
+            return RuntimeResponse(requestID: "unknown", error: RuntimeErrorDTO(
+                code: "invalid_request", message: "request_id must contain 1...128 UTF-8 bytes"))
+        }
+        guard command.protocolVersion == RuntimeProtocolInfo.protocolVersion else {
             return RuntimeResponse(requestID: command.requestID, error: RuntimeErrorDTO(
-                code: "unsupported_version", message: "Protocol version \(command.version) is unsupported"))
+                code: "unsupported_protocol_version", message: "Protocol version is unsupported",
+                details: ["supported_versions": "2"]))
+        }
+        if !handshaken, command.command != .hello {
+            return RuntimeResponse(requestID: command.requestID, error: RuntimeErrorDTO(
+                code: "handshake_required", message: "hello must be the first command"))
         }
         do {
             switch command.command {
+            case .hello:
+                guard !handshaken else {
+                    throw RuntimeErrorDTO(code: "already_handshaken", message: "hello was already completed")
+                }
+                guard command.supportedProtocolVersions?.contains(RuntimeProtocolInfo.protocolVersion) == true else {
+                    throw RuntimeErrorDTO(code: "unsupported_protocol_version",
+                        message: "Client does not support protocol version 2",
+                        details: ["supported_versions": "2"])
+                }
+                handshaken = true
+                return RuntimeResponse(requestID: command.requestID, handshake: RuntimeHandshakeDTO(
+                    protocolVersion: RuntimeProtocolInfo.protocolVersion,
+                    runtimeVersion: RuntimeProtocolInfo.runtimeVersion,
+                    runtimeInstanceID: runtimeInstanceID,
+                    capabilities: RuntimeProtocolInfo.capabilities,
+                    supportedFormats: RuntimePCMFormatDTO.supported,
+                    limits: limits))
             case .listSources:
-                return RuntimeResponse(requestID: command.requestID, sources: try coordinator.availableSources())
+                return RuntimeResponse(requestID: command.requestID,
+                    sources: try coordinator.availableSources())
             case .startCapture:
                 guard let sourceID = command.sourceID else {
-                    throw RuntimeErrorDTO(code: "missing_source_id", message: "start_capture requires sourceID")
+                    throw RuntimeErrorDTO(code: "missing_source_id", message: "start_capture requires source_id")
                 }
                 return RuntimeResponse(requestID: command.requestID,
-                    session: try coordinator.startCapture(sourceID: sourceID, ownerID: ownerID))
+                    session: try coordinator.startCapture(sourceID: sourceID,
+                        format: command.format ?? .runtimeDefault, ownerID: ownerID))
             case .stopCapture:
-                guard let sessionID = command.sessionID else {
-                    throw RuntimeErrorDTO(code: "missing_session_id", message: "stop_capture requires sessionID")
-                }
+                let sessionID = try requiredSessionID(command)
                 return RuntimeResponse(requestID: command.requestID,
-                    session: try coordinator.stopCapture(sessionID: sessionID))
+                    session: try coordinator.stopCapture(sessionID: sessionID, ownerID: ownerID))
             case .sessionStatus:
-                guard let sessionID = command.sessionID else {
-                    throw RuntimeErrorDTO(code: "missing_session_id", message: "session_status requires sessionID")
-                }
+                let sessionID = try requiredSessionID(command)
                 return RuntimeResponse(requestID: command.requestID,
-                    session: try coordinator.session(sessionID: sessionID))
+                    session: try coordinator.session(sessionID: sessionID, ownerID: ownerID))
+            case .runtimeStatus:
+                return RuntimeResponse(requestID: command.requestID, status: runtimeStatus())
+            case .subscribeEvents:
+                return RuntimeResponse(requestID: command.requestID,
+                    subscription: try eventHub.subscribe(ownerID: ownerID, eventTypes: command.eventTypes))
+            case .unsubscribeEvents:
+                guard let subscriptionID = command.subscriptionID,
+                      subscriptionID.utf8.count <= 128 else {
+                    throw RuntimeErrorDTO(code: "missing_subscription_id",
+                        message: "unsubscribe_events requires subscription_id")
+                }
+                try eventHub.unsubscribe(id: subscriptionID, ownerID: ownerID)
+                return RuntimeResponse(requestID: command.requestID, message: "unsubscribed")
             case .ping:
                 return RuntimeResponse(requestID: command.requestID, message: "pong")
             }
@@ -191,6 +237,62 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         } catch {
             return RuntimeResponse(requestID: command.requestID,
                 error: RuntimeErrorDTO(code: "runtime_error", message: String(describing: error)))
+        }
+    }
+
+    private func requiredSessionID(_ command: RuntimeCommand) throws -> String {
+        guard let sessionID = command.sessionID, !sessionID.isEmpty,
+              sessionID.utf8.count <= 128 else {
+            throw RuntimeErrorDTO(code: "missing_session_id", message: "A valid session_id is required")
+        }
+        return sessionID
+    }
+
+    private func runtimeStatus() -> RuntimeStatusDTO {
+        let metrics = coordinator.diagnostics()
+        stateLock.lock()
+        let clientCount = clients.count
+        stateLock.unlock()
+        return RuntimeStatusDTO(runtimeVersion: RuntimeProtocolInfo.runtimeVersion,
+            runtimeInstanceID: runtimeInstanceID,
+            uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds - startedAt,
+            activeClients: clientCount, activeSessions: metrics.activeSessions,
+            eventSubscribers: eventHub.count, totalSessionsStarted: metrics.totalSessionsStarted,
+            totalFramesForwarded: metrics.frames, totalDroppedFrames: metrics.dropped,
+            totalBytesTransmitted: metrics.bytes)
+    }
+
+    private func startSourceMonitor() {
+        monitorQueue.async { [weak self] in
+            guard let self else { return }
+            self.refreshSources(publishChanges: false)
+            let timer = DispatchSource.makeTimerSource(queue: self.monitorQueue)
+            timer.schedule(deadline: .now() + 1, repeating: .seconds(1), leeway: .milliseconds(100))
+            timer.setEventHandler { [weak self] in self?.refreshSources(publishChanges: true) }
+            self.sourceTimer = timer
+            timer.resume()
+        }
+    }
+
+    private func refreshSources(publishChanges: Bool) {
+        do {
+            let next = Dictionary(uniqueKeysWithValues: try coordinator.availableSources().map { ($0.id, $0) })
+            if publishChanges {
+                for (id, source) in next where sourceSnapshot[id] == nil {
+                    eventHub.publish(RuntimeEventDTO(type: .sourceAdded, sourceID: id, source: source))
+                }
+                for (id, source) in sourceSnapshot where next[id] == nil {
+                    eventHub.publish(RuntimeEventDTO(type: .sourceRemoved, sourceID: id, source: source))
+                }
+                for (id, source) in next where sourceSnapshot[id] != nil && sourceSnapshot[id] != source {
+                    eventHub.publish(RuntimeEventDTO(type: .sourceUpdated, sourceID: id, source: source))
+                }
+            }
+            sourceSnapshot = next
+        } catch {
+            eventHub.publish(RuntimeEventDTO(type: .runtimeWarning,
+                message: "Source discovery failed", error: RuntimeErrorDTO(
+                    code: "source_discovery_failed", message: String(describing: error), retryable: true)))
         }
     }
 }

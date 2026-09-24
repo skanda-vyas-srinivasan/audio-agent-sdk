@@ -1,6 +1,7 @@
 import Foundation
 
 struct CaptureMetrics: Codable, Equatable, Sendable {
+    let captureCallbacks: UInt64
     let nativeFramesReceived: UInt64
     let normalizedFramesDelivered: UInt64
     let bytesDelivered: UInt64

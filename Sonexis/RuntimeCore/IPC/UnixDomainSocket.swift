@@ -81,6 +81,16 @@ public final class UnixSocketConnection: @unchecked Sendable {
         }
     }
 
+    public func isPeerClosed() -> Bool {
+        guard let fd = try? beginOperation() else { return true }
+        defer { endOperation() }
+        var byte: UInt8 = 0
+        let count = Darwin.recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+        if count == 0 { return true }
+        if count < 0, errno != EAGAIN, errno != EWOULDBLOCK, errno != EINTR { return true }
+        return false
+    }
+
     private func beginOperation() throws -> Int32 {
         state.lock(); defer { state.unlock() }
         guard descriptor >= 0, !isClosing else { throw UnixSocketError.disconnected }
@@ -104,6 +114,8 @@ public final class UnixSocketListener: @unchecked Sendable {
     private var descriptor: Int32 = -1
     private var source: DispatchSourceRead?
     private var ownsSocketPath = false
+    private var boundDevice: dev_t?
+    private var boundInode: ino_t?
 
     public init(path: String, queue: DispatchQueue, acceptedConnectionsNonBlocking: Bool = false) {
         self.path = path
@@ -116,10 +128,14 @@ public final class UnixSocketListener: @unchecked Sendable {
     public func start(onAccept: @escaping @Sendable (UnixSocketConnection) -> Void) throws {
         let fd = try UnixSocketSystem.makeSocket()
         var didBind = false
+        var boundStatus = stat()
         do {
             try UnixSocketSystem.prepareSocketPath(path)
             try UnixSocketSystem.bind(fd, path: path)
             didBind = true
+            guard fstat(fd, &boundStatus) == 0 else {
+                throw UnixSocketError.systemCall("fstat", errno)
+            }
             guard Darwin.listen(fd, 16) == 0 else { throw UnixSocketError.systemCall("listen", errno) }
         } catch {
             _ = Darwin.close(fd)
@@ -134,6 +150,8 @@ public final class UnixSocketListener: @unchecked Sendable {
         }
         descriptor = fd
         ownsSocketPath = true
+        boundDevice = boundStatus.st_dev
+        boundInode = boundStatus.st_ino
         let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         source = readSource
         stateLock.unlock()
@@ -143,6 +161,14 @@ public final class UnixSocketListener: @unchecked Sendable {
             while true {
                 let client = Darwin.accept(fd, nil, nil)
                 if client >= 0 {
+                    var peerUID = uid_t(0)
+                    var peerGID = gid_t(0)
+                    guard getpeereid(client, &peerUID, &peerGID) == 0,
+                          peerUID == getuid() else {
+                        _ = Darwin.close(client)
+                        continue
+                    }
+                    UnixSocketSystem.setCloseOnExec(client)
                     if self?.acceptedConnectionsNonBlocking == true {
                         UnixSocketSystem.setNonBlocking(client)
                     } else {
@@ -165,14 +191,23 @@ public final class UnixSocketListener: @unchecked Sendable {
         stateLock.lock()
         let oldSource = source
         let shouldRemovePath = ownsSocketPath
+        let expectedDevice = boundDevice
+        let expectedInode = boundInode
         source = nil
         descriptor = -1
         ownsSocketPath = false
+        boundDevice = nil
+        boundInode = nil
         stateLock.unlock()
         oldSource?.cancel()
-        if shouldRemovePath,
-           let status = try? FileManager.default.attributesOfItem(atPath: path)[.type] as? FileAttributeType,
-           status == .typeSocket { try? FileManager.default.removeItem(atPath: path) }
+        var currentStatus = stat()
+        if shouldRemovePath, let expectedDevice, let expectedInode,
+           lstat(path, &currentStatus) == 0,
+           currentStatus.st_mode & S_IFMT == S_IFSOCK,
+           currentStatus.st_dev == expectedDevice,
+           currentStatus.st_ino == expectedInode {
+            try? FileManager.default.removeItem(atPath: path)
+        }
     }
 }
 
@@ -197,7 +232,13 @@ public enum UnixSocketSystem {
     fileprivate static func makeSocket() throws -> Int32 {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw UnixSocketError.systemCall("socket", errno) }
+        setCloseOnExec(fd)
         return fd
+    }
+
+    fileprivate static func setCloseOnExec(_ fd: Int32) {
+        let flags = fcntl(fd, F_GETFD, 0)
+        if flags >= 0 { _ = fcntl(fd, F_SETFD, flags | FD_CLOEXEC) }
     }
 
     fileprivate static func bind(_ fd: Int32, path: String) throws {

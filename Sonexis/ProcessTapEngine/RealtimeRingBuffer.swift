@@ -81,6 +81,11 @@ final class RealtimeRingBuffer {
         return SonexisAudioRingBufferGetWrittenFrames(pointer)
     }
 
+    var writeOperations: UInt64 {
+        guard let pointer else { return 0 }
+        return SonexisAudioRingBufferGetWriteOperations(pointer)
+    }
+
     var readFrames: UInt64 {
         guard let pointer else { return 0 }
         return SonexisAudioRingBufferGetReadFrames(pointer)

@@ -13,7 +13,6 @@ do {
     expect(first.id == restarted.id, "application source identity changed with PID")
     expect(first.processIdentifiers == [200, 400], "source PIDs were not normalized")
 
-    let normalizer = try RuntimeAudioNormalizer(sampleRate: 48_000, channels: 2)
     let nativeFrames: UInt32 = 4_800
     var samples = [Float](repeating: 0, count: Int(nativeFrames) * 2)
     for frame in 0..<Int(nativeFrames) {
@@ -21,22 +20,35 @@ do {
         samples[frame * 2] = value
         samples[frame * 2 + 1] = value
     }
-    var pcm = Data()
-    var offset = 0
-    while offset < Int(nativeFrames) {
-        let chunkFrames = min(2_048, Int(nativeFrames) - offset)
-        try samples.withUnsafeBufferPointer { buffer in
-            pcm.append(try normalizer.convert(
-                samples: buffer.baseAddress!.advanced(by: offset * 2),
-                frameCount: UInt32(chunkFrames)
-            ))
+    let formats = [
+        RuntimePCMFormat(sampleRate: 16_000, channelCount: 1, sampleFormat: .pcmS16LE),
+        RuntimePCMFormat(sampleRate: 24_000, channelCount: 1, sampleFormat: .pcmS16LE),
+        RuntimePCMFormat(sampleRate: 48_000, channelCount: 1, sampleFormat: .pcmS16LE),
+        RuntimePCMFormat(sampleRate: 48_000, channelCount: 2, sampleFormat: .pcmS16LE),
+        RuntimePCMFormat(sampleRate: 48_000, channelCount: 1, sampleFormat: .float32LE),
+        RuntimePCMFormat(sampleRate: 48_000, channelCount: 2, sampleFormat: .float32LE),
+    ]
+    for format in formats {
+        let normalizer = try RuntimeAudioNormalizer(sampleRate: 48_000, channels: 2, output: format)
+        var pcm = Data()
+        var offset = 0
+        while offset < Int(nativeFrames) {
+            let chunkFrames = min(2_048, Int(nativeFrames) - offset)
+            try samples.withUnsafeBufferPointer { buffer in
+                pcm.append(try normalizer.convert(
+                    samples: buffer.baseAddress!.advanced(by: offset * 2),
+                    frameCount: UInt32(chunkFrames)
+                ))
+            }
+            offset += chunkFrames
         }
-        offset += chunkFrames
+        let outputFrames = pcm.count / format.bytesPerFrame
+        let expectedFrames = Int(format.sampleRate / 10)
+        expect(((expectedFrames - 12)...(expectedFrames + 12)).contains(outputFrames),
+               "normalizer did not preserve 100 ms duration for \(format)")
+        expect(pcm.count % format.bytesPerFrame == 0, "output was not sample aligned")
+        expect(!pcm.allSatisfy { $0 == 0 }, "normalizer emitted silence for a tone")
     }
-    let outputFrames = pcm.count / RuntimePCMFormat.pcm16Mono16kHz.bytesPerFrame
-    expect((1_590...1_610).contains(outputFrames), "normalizer did not preserve 100 ms duration")
-    expect(pcm.count % 2 == 0, "PCM16 output was not sample aligned")
-    expect(!pcm.allSatisfy { $0 == 0 }, "normalizer emitted silence for a tone")
 
     print("Runtime core tests passed")
 } catch {

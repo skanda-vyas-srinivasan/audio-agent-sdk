@@ -37,10 +37,11 @@ enum AudioCaptureError: Error, CustomStringConvertible {
 final class AudioCaptureSession: @unchecked Sendable {
     typealias FrameHandler = @Sendable (AudioFrame) -> Void
     typealias StateHandler = @Sendable (AudioCaptureSessionState, Error?) -> Void
+    typealias EnvironmentHandler = @Sendable () -> Void
 
     let id: UUID
     let source: AudioSource
-    let outputFormat = RuntimePCMFormat.pcm16Mono16kHz
+    let outputFormat: RuntimePCMFormat
 
     private let queue: DispatchQueue
     private let deliveryQueue: DispatchQueue
@@ -58,6 +59,7 @@ final class AudioCaptureSession: @unchecked Sendable {
     private var terminalError: Error?
     private var frameHandler: FrameHandler?
     private var stateHandler: StateHandler?
+    private var environmentHandler: EnvironmentHandler?
     private var onTermination: (@Sendable (UUID) -> Void)?
     private var sequence: UInt64 = 0
     private var normalizedFramesDelivered: UInt64 = 0
@@ -66,12 +68,18 @@ final class AudioCaptureSession: @unchecked Sendable {
     private var conversionBatches: UInt64 = 0
     private var conversionNanoseconds: UInt64 = 0
     private var completedNativeFrames: UInt64 = 0
+    private var completedCaptureCallbacks: UInt64 = 0
     private var completedDroppedFrames: UInt64 = 0
     private var deliveryDroppedFrames: UInt64 = 0
+    private var observedRingDroppedFrames: UInt64 = 0
+    private var pendingDroppedOutputFrames: UInt64 = 0
+    private var pendingDiscontinuity = false
+    private var nativeSampleRate: Double = 0
 
     init(
         id: UUID = UUID(),
         source: AudioSource,
+        outputFormat: RuntimePCMFormat = .pcm16Mono16kHz,
         frameHandler: FrameHandler?,
         onTermination: (@Sendable (UUID) -> Void)?
     ) throws {
@@ -80,6 +88,7 @@ final class AudioCaptureSession: @unchecked Sendable {
         }
         self.id = id
         self.source = source
+        self.outputFormat = outputFormat
         self.target = try AudioCaptureTarget(source: source)
         self.frameHandler = frameHandler
         self.onTermination = onTermination
@@ -116,9 +125,14 @@ final class AudioCaptureSession: @unchecked Sendable {
         }
     }
 
+    func onEnvironmentChange(_ handler: @escaping EnvironmentHandler) {
+        performAsync { [weak self] in self?.environmentHandler = handler }
+    }
+
     func metrics() -> CaptureMetrics {
         performSync {
             CaptureMetrics(
+                captureCallbacks: completedCaptureCallbacks + (ringBuffer?.writeOperations ?? 0),
                 nativeFramesReceived: completedNativeFrames + (ringBuffer?.writtenFrames ?? 0),
                 normalizedFramesDelivered: normalizedFramesDelivered,
                 bytesDelivered: bytesDelivered,
@@ -141,6 +155,7 @@ final class AudioCaptureSession: @unchecked Sendable {
             transition(to: .stopped)
             frameHandler = nil
             stateHandler = nil
+            environmentHandler = nil
             notifyTermination()
         }
         // An external stop does not return while a previously accepted consumer
@@ -180,7 +195,9 @@ final class AudioCaptureSession: @unchecked Sendable {
         let outputDevice = try CoreAudioSupport.deviceSummary(outputDeviceID)
         let ownProcessID = try CoreAudioSupport.processObjectID(forPID: getpid()) ?? kAudioObjectUnknown
         let tap = TapCaptureEngine(lifecycleQueue: queue)
-        tap.processSelectionDidChange = { [weak self] in self?.rebuildForEnvironmentChange() }
+        tap.processSelectionDidChange = { [weak self] in
+            self?.rebuildForEnvironmentChange(notifyDeviceChange: false)
+        }
         tapEngine = tap
 
         let configuration = try tap.prepare(
@@ -203,11 +220,14 @@ final class AudioCaptureSession: @unchecked Sendable {
         ring.setReadEnabled(true)
         let normalizer = try RuntimeAudioNormalizer(
             sampleRate: tapFormat.mSampleRate,
-            channels: tapFormat.mChannelsPerFrame
+            channels: tapFormat.mChannelsPerFrame,
+            output: outputFormat
         )
         inputScratch = [Float](repeating: 0, count: 2_048 * Int(tapFormat.mChannelsPerFrame))
         ringBuffer = ring
         self.normalizer = normalizer
+        nativeSampleRate = tapFormat.mSampleRate
+        observedRingDroppedFrames = 0
 
         try tap.createIOProc(ringBuffer: ring)
         startDrainTimer()
@@ -230,6 +250,18 @@ final class AudioCaptureSession: @unchecked Sendable {
     private func drainAvailableAudio() {
         guard currentState == .running || currentState == .starting,
               let ringBuffer, let normalizer else { return }
+
+        let ringDrops = ringBuffer.droppedFrames
+        if ringDrops > observedRingDroppedFrames {
+            let nativeDrops = ringDrops - observedRingDroppedFrames
+            let estimatedOutputDrops = nativeSampleRate > 0
+                ? UInt64((Double(nativeDrops) * Double(outputFormat.sampleRate) / nativeSampleRate).rounded())
+                : 0
+            pendingDroppedOutputFrames &+= estimatedOutputDrops
+            normalizedFramesProduced &+= estimatedOutputDrops
+            pendingDiscontinuity = true
+            observedRingDroppedFrames = ringDrops
+        }
 
         var batches = 0
         while batches < 32 {
@@ -261,15 +293,21 @@ final class AudioCaptureSession: @unchecked Sendable {
                         / UInt64(outputFormat.sampleRate),
                     frameCount: outputFrames,
                     format: outputFormat,
-                    pcm: pcm
+                    pcm: pcm,
+                    discontinuity: pendingDiscontinuity,
+                    droppedFramesBefore: UInt32(clamping: pendingDroppedOutputFrames)
                 )
                 sequence &+= 1
                 normalizedFramesProduced &+= UInt64(outputFrames)
                 if enqueueForDelivery(frame) {
                     normalizedFramesDelivered &+= UInt64(outputFrames)
                     bytesDelivered &+= UInt64(pcm.count)
+                    pendingDroppedOutputFrames = 0
+                    pendingDiscontinuity = false
                 } else {
                     deliveryDroppedFrames &+= UInt64(outputFrames)
+                    pendingDroppedOutputFrames &+= UInt64(outputFrames)
+                    pendingDiscontinuity = true
                 }
                 guard currentState == .running || currentState == .starting else { return }
             } catch {
@@ -280,11 +318,13 @@ final class AudioCaptureSession: @unchecked Sendable {
         }
     }
 
-    private func rebuildForEnvironmentChange() {
+    private func rebuildForEnvironmentChange(notifyDeviceChange: Bool) {
         guard currentState == .running else { return }
         do {
+            pendingDiscontinuity = true
             teardownPipeline()
             try buildPipeline()
+            if notifyDeviceChange { environmentHandler?() }
         } catch {
             fail(error)
         }
@@ -298,6 +338,7 @@ final class AudioCaptureSession: @unchecked Sendable {
         transition(to: .failed, error: error)
         frameHandler = nil
         stateHandler = nil
+        environmentHandler = nil
         notifyTermination()
     }
 
@@ -311,6 +352,7 @@ final class AudioCaptureSession: @unchecked Sendable {
         if let ringBuffer {
             completedNativeFrames &+= ringBuffer.writtenFrames
             completedDroppedFrames &+= ringBuffer.droppedFrames
+            completedCaptureCallbacks &+= ringBuffer.writeOperations
         }
         ringBuffer = nil
         inputScratch.removeAll(keepingCapacity: false)
@@ -323,7 +365,7 @@ final class AudioCaptureSession: @unchecked Sendable {
             mElement: kAudioObjectPropertyElementMain
         )
         let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.rebuildForEnvironmentChange()
+            self?.rebuildForEnvironmentChange(notifyDeviceChange: true)
         }
         try checkOSStatus(
             AudioObjectAddPropertyListenerBlock(
