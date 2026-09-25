@@ -1,6 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decodeFrame, SonexisError } from "../src/index.js";
+import {
+  AmbiguousSourceError,
+  AudioFrame,
+  AudioFormats,
+  AudioSource,
+  CaptureStream,
+  decodeFrame,
+  filterSources,
+  MultiSourceSession,
+  resolveSource,
+  Sonexis,
+  SonexisError,
+  SourceNotFoundError,
+} from "../src/index.js";
+
+function source(id: string, name: string, bundle: string, pid: number,
+                available = true): AudioSource {
+  return { id, name, bundle_identifier: bundle, process_ids: [pid],
+    kind: "application", process_state: available ? "running" : "stopped",
+    is_available: available };
+}
 
 test("decodes a protocol v2 PCM fixture", () => {
   const streamId = "00112233-4455-6677-8899-aabbccddeeff";
@@ -32,3 +52,108 @@ test("rejects a wrong stream", () => {
   packet.writeUInt16BE(1, 58);
   assert.throws(() => decodeFrame(packet, "00112233-4455-6677-8899-aabbccddeeff"), SonexisError);
 });
+
+test("resolves exact source selectors without silently choosing ambiguous names", () => {
+  const sources = [
+    source("app.spotify", "Spotify", "com.spotify.client", 10),
+    source("app.chat.one", "Chat", "example.chat.one", 20),
+    source("app.chat.two", "Chat", "example.chat.two", 21),
+    source("app.stopped", "Stopped", "example.stopped", 30, false),
+  ];
+  assert.equal(resolveSource(sources, "app.spotify").name, "Spotify");
+  assert.equal(resolveSource(sources, "com.spotify.client").id, "app.spotify");
+  assert.equal(resolveSource(sources, "spotify").id, "app.spotify");
+  assert.equal(resolveSource(sources, 10).id, "app.spotify");
+  assert.equal(resolveSource(sources, sources[0]).id, "app.spotify");
+  assert.throws(() => resolveSource(sources, "Chat"), (error: unknown) => {
+    assert.ok(error instanceof AmbiguousSourceError);
+    assert.deepEqual(new Set(Object.values(error.details)),
+      new Set(["app.chat.one", "app.chat.two"]));
+    return true;
+  });
+  assert.throws(() => resolveSource(sources, "missing"), SourceNotFoundError);
+  assert.throws(() => resolveSource(sources, "Stopped"), SourceNotFoundError);
+});
+
+test("filters source snapshots and exposes safe format presets", () => {
+  const sources = [
+    source("app.spotify", "Spotify", "com.spotify.client", 10),
+    source("app.chat", "Chat", "example.chat", 20),
+    source("app.stopped", "Stopped", "example.stopped", 30, false),
+  ];
+  assert.deepEqual(filterSources(sources, { query: "SPOT" }).map((value) => value.id),
+    ["app.spotify"]);
+  assert.deepEqual(filterSources(sources, { pid: 20 }).map((value) => value.id), ["app.chat"]);
+  assert.equal(filterSources(sources, { availableOnly: false }).length, 3);
+  assert.deepEqual(AudioFormats.speech16k(), {
+    sample_rate: 16000, channel_count: 1, sample_format: "pcm_s16le", interleaved: true,
+  });
+  assert.equal(AudioFormats.openAIRealtime().sample_rate, 24000);
+  assert.equal(AudioFormats.geminiLive().sample_rate, 16000);
+  assert.equal(AudioFormats.pcm48kStereo().channel_count, 2);
+});
+
+test("waitForSource refreshes snapshots and reports a structured timeout", async () => {
+  const client = new Sonexis("/unused");
+  let snapshots = 0;
+  client.sources = async () => ++snapshots < 2
+    ? [] : [source("app.later", "Later", "example.later", 40)];
+  const found = await client.waitForSource("Later", { timeoutMs: 100, pollIntervalMs: 1 });
+  assert.equal(found.id, "app.later");
+
+  client.sources = async () => [];
+  await assert.rejects(
+    client.waitForSource("Never", { timeoutMs: 1, pollIntervalMs: 1 }),
+    (error: unknown) => {
+      assert.ok(error instanceof SourceNotFoundError);
+      assert.equal(error.code, "source_wait_timeout");
+      assert.equal(error.retryable, true);
+      return true;
+    });
+});
+
+test("multi-source sessions preserve labels and source-aware frame context", async () => {
+  const spotify = source("app.spotify", "Spotify", "com.spotify.client", 10);
+  const chat = source("app.chat", "Chat", "example.chat", 20);
+  const frames = new Map<string, AudioFrame>([
+    ["Spotify", frame(spotify, "session-music", "00112233-4455-6677-8899-aabbccddeeff")],
+    ["Chat", frame(chat, "session-chat", "10112233-4455-6677-8899-aabbccddeeff")],
+  ]);
+  const fakeClient = {
+    capture: async (selector: string): Promise<CaptureStream> => {
+      const value = frames.get(selector)!;
+      return {
+        close: async () => undefined,
+        async *[Symbol.asyncIterator]() { yield value; },
+      } as unknown as CaptureStream;
+    },
+  } as unknown as Sonexis;
+  const group = new MultiSourceSession(fakeClient, 4);
+  await group.add("media", "Spotify");
+  await group.add("conversation", "Chat");
+  const received = new Map<string, AudioFrame>();
+  for await (const value of group.frames()) received.set(value.label, value.frame);
+  assert.equal(received.get("media")?.sourceName, "Spotify");
+  assert.equal(received.get("media")?.sessionId, "session-music");
+  assert.equal(received.get("conversation")?.source.id, "app.chat");
+  assert.deepEqual(group.labels, []);
+});
+
+function frame(audioSource: AudioSource, sessionId: string, streamId: string): AudioFrame {
+  return {
+    streamId,
+    sequence: 1n,
+    timestampNs: 100n,
+    frameCount: 160,
+    format: AudioFormats.speech16k(),
+    data: Buffer.alloc(320),
+    discontinuity: false,
+    droppedFramesBefore: 0,
+    source: audioSource,
+    sourceId: audioSource.id,
+    sourceName: audioSource.name,
+    bundleIdentifier: audioSource.bundle_identifier,
+    sessionId,
+    receivedAtNs: 200n,
+  };
+}

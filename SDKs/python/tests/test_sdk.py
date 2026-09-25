@@ -28,6 +28,14 @@ class FakeRuntime:
         self.event_server = None
         self.commands = []
         self.malformed_handshake = False
+        self.sources = [{"id": "app.test", "kind": "application",
+            "name": "Test Audio", "process_ids": [123], "bundle_identifier": "test",
+            "process_state": "running", "is_available": True,
+            "is_producing_audio": True, "native_format": None},
+            {"id": "missing-stream", "kind": "application",
+             "name": "Missing Stream", "process_ids": [456],
+             "bundle_identifier": "test.missing", "process_state": "running",
+             "is_available": True, "is_producing_audio": False, "native_format": None}]
 
     async def start(self):
         self.stream_server = await asyncio.start_unix_server(self._stream, self.stream_path)
@@ -59,10 +67,7 @@ class FakeRuntime:
                     if self.malformed_handshake:
                         response["handshake"].pop("runtime_version")
                 elif command == "list_sources":
-                    response["sources"] = [{"id": "app.test", "kind": "application",
-                        "name": "Test Audio", "process_ids": [123], "bundle_identifier": "test",
-                        "process_state": "running", "is_available": True,
-                        "is_producing_audio": True, "native_format": None}]
+                    response["sources"] = self.sources
                 elif command == "start_capture":
                     if request.get("source_id") == "bad":
                         response.update(ok=False, error={"code": "source_not_found",
@@ -70,7 +75,7 @@ class FakeRuntime:
                     else:
                         fmt = request.get("format", AudioFormat().to_wire())
                         response["session"] = {"id": "session", "stream_id": str(self.stream_id),
-                            "source_id": "app.test", "state": "capturing", "format": fmt,
+                            "source_id": request.get("source_id"), "state": "capturing", "format": fmt,
                             "data_socket_path": self.stream_path, "started_at_nanoseconds": 10,
                             "metrics": {}}
                         if request.get("source_id") == "missing-stream":
@@ -87,6 +92,12 @@ class FakeRuntime:
                         "active_clients": 1, "active_sessions": 0, "event_subscribers": 0,
                         "total_sessions_started": 1, "total_frames_forwarded": 160,
                         "total_dropped_frames": 0, "total_bytes_transmitted": 320}
+                elif command == "session_status":
+                    response["session"] = {"id": request["session_id"],
+                        "stream_id": str(self.stream_id), "source_id": "app.test",
+                        "state": "stopped", "format": AudioFormat().to_wire(),
+                        "data_socket_path": self.stream_path,
+                        "started_at_nanoseconds": 10, "metrics": {}}
                 elif command == "subscribe_events":
                     response["subscription"] = {"id": "events", "event_socket_path": self.event_path,
                         "event_types": ["runtime_warning"]}

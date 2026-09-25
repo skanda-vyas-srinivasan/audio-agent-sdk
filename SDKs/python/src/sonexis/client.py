@@ -1,22 +1,27 @@
-"""Async public client for Sonexis Runtime v0.2."""
+"""Async public client for Sonexis Runtime v0.3."""
 
 import asyncio
+from dataclasses import replace
 import json
 import os
+import time
 import uuid
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, Union
 
-from .errors import SonexisConnectionError, SonexisError, SonexisProtocolError
+from .errors import (AmbiguousSourceError, CaptureFailedError, SonexisConnectionError,
+                     SonexisError, SonexisProtocolError, SourceNotFoundError)
 from .models import (AudioFormat, AudioFrame, AudioSource, CaptureInfo, Handshake,
                      RuntimeEvent, RuntimeStatus)
 from .protocol import FLAG_EOS, MAX_CONTROL_BYTES, PROTOCOL_VERSION, read_frame
+
+SourceSelector = Union[str, int, AudioSource]
 
 
 class Sonexis:
     """A reusable asynchronous connection to the local Sonexis Runtime."""
 
     def __init__(self, socket_path: Optional[str] = None, *, client_name: str = "sonexis-python",
-                 client_version: str = "0.2.0") -> None:
+                 client_version: str = "0.3.0") -> None:
         self.socket_path = socket_path or os.environ.get(
             "SONEXIS_RUNTIME_SOCKET", f"/tmp/sonexis-runtime-{os.getuid()}/control.sock")
         self.client_name = client_name
@@ -128,6 +133,94 @@ class Sonexis:
         except (KeyError, TypeError, ValueError) as error:
             raise SonexisProtocolError("invalid_sources", "Runtime sent malformed sources") from error
 
+    async def find_sources(
+        self,
+        query: Optional[str] = None,
+        *,
+        source_id: Optional[str] = None,
+        bundle_identifier: Optional[str] = None,
+        pid: Optional[int] = None,
+        name: Optional[str] = None,
+        available_only: bool = True,
+    ) -> List[AudioSource]:
+        """Return sources matching explicit fields or a case-insensitive search string."""
+        values = await self.sources()
+        matches: List[AudioSource] = []
+        for source in values:
+            if available_only and not source.available:
+                continue
+            if source_id is not None and source.id != source_id:
+                continue
+            if bundle_identifier is not None and source.bundle_identifier != bundle_identifier:
+                continue
+            if pid is not None and pid not in source.process_ids:
+                continue
+            if name is not None and source.name != name:
+                continue
+            if query is not None:
+                folded = query.casefold()
+                fields = (source.id, source.name, source.bundle_identifier or "")
+                if not any(folded in value.casefold() for value in fields):
+                    continue
+            matches.append(source)
+        return matches
+
+    async def get_source(self, selector: SourceSelector) -> AudioSource:
+        """Resolve an ID, bundle ID, PID, exact app name, or source object uniquely."""
+        if isinstance(selector, AudioSource):
+            candidates = [source for source in await self.sources()
+                          if source.id == selector.id and source.available]
+        elif isinstance(selector, int):
+            candidates = [source for source in await self.sources()
+                          if selector in source.process_ids and source.available]
+        else:
+            sources = [source for source in await self.sources() if source.available]
+            candidates = [source for source in sources if source.id == selector]
+            if not candidates:
+                candidates = [source for source in sources
+                              if source.bundle_identifier == selector]
+            if not candidates:
+                candidates = [source for source in sources if source.name == selector]
+            if not candidates:
+                folded = selector.casefold()
+                candidates = [source for source in sources
+                              if source.name.casefold() == folded]
+        if not candidates:
+            raise SourceNotFoundError(
+                "source_not_found", f"No available audio source matches {selector!r}", retryable=True)
+        if len(candidates) > 1:
+            details = {f"candidate_{index}": source.id
+                       for index, source in enumerate(candidates, 1)}
+            raise AmbiguousSourceError(
+                "ambiguous_source", f"Audio source selector {selector!r} is ambiguous",
+                details=details)
+        return candidates[0]
+
+    async def wait_for_source(
+        self,
+        selector: SourceSelector,
+        *,
+        timeout: Optional[float] = None,
+        poll_interval: float = 0.25,
+    ) -> AudioSource:
+        """Wait for a fresh, uniquely resolved source snapshot to become available."""
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be positive")
+        deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+        while True:
+            try:
+                return await self.get_source(selector)
+            except SourceNotFoundError:
+                if deadline is not None:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise SourceNotFoundError(
+                            "source_wait_timeout",
+                            f"Timed out waiting for audio source {selector!r}", retryable=True)
+                    await asyncio.sleep(min(poll_interval, remaining))
+                else:
+                    await asyncio.sleep(poll_interval)
+
     async def status(self, session_id: Optional[str] = None) -> Union[RuntimeStatus, CaptureInfo]:
         if session_id is None:
             response = await self._request("runtime_status")
@@ -141,13 +234,45 @@ class Sonexis:
         except (KeyError, TypeError, ValueError) as error:
             raise SonexisProtocolError("invalid_session", "Runtime sent a malformed session") from error
 
-    async def capture(self, source: Union[str, AudioSource], *,
-                      format: AudioFormat = AudioFormat()) -> "CaptureSession":
-        source_id = source.id if isinstance(source, AudioSource) else source
-        response = await self._request("start_capture", source_id=source_id,
+    async def create_capture(self, source: SourceSelector, *,
+                             format: AudioFormat = AudioFormat()) -> CaptureInfo:
+        """Create a Runtime capture without attaching its binary data socket."""
+        resolved = await self.get_source(source)
+        response = await self._request("start_capture", source_id=resolved.id,
                                        format=format.to_wire())
         try:
-            capture = CaptureSession(self, CaptureInfo.from_wire(response["session"]))
+            return CaptureInfo.from_wire(response["session"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError("invalid_session", "Runtime sent a malformed session") from error
+
+    async def attach_capture(
+        self,
+        capture: Union[str, CaptureInfo],
+        *,
+        source: Optional[AudioSource] = None,
+    ) -> "CaptureSession":
+        """Attach the PCM plane for an existing same-user Runtime capture."""
+        info: CaptureInfo
+        if isinstance(capture, str):
+            value = await self.status(capture)
+            assert isinstance(value, CaptureInfo)
+            info = value
+        else:
+            info = capture
+        resolved = source or await self.get_source(info.source_id)
+        session = CaptureSession(self, info, resolved)
+        await session._open()
+        self._captures.add(session)
+        return session
+
+    async def capture(self, source: SourceSelector, *,
+                      format: AudioFormat = AudioFormat()) -> "CaptureSession":
+        resolved = await self.get_source(source)
+        response = await self._request("start_capture", source_id=resolved.id,
+                                       format=format.to_wire())
+        try:
+            info = CaptureInfo.from_wire(response["session"])
+            capture = CaptureSession(self, info, resolved)
         except (KeyError, TypeError, ValueError) as error:
             raise SonexisProtocolError("invalid_session", "Runtime sent a malformed session") from error
         try:
@@ -157,6 +282,11 @@ class Sonexis:
             raise
         self._captures.add(capture)
         return capture
+
+    def session(self, *, max_queue_frames: int = 128) -> "MultiSourceSession":
+        """Create a labeled multi-source capture session."""
+        from .multi import MultiSourceSession
+        return MultiSourceSession(self, max_queue_frames=max_queue_frames)
 
     async def stop(self, session_id: str) -> CaptureInfo:
         response = await self._request("stop_capture", session_id=session_id)
@@ -288,17 +418,22 @@ class Sonexis:
 class CaptureSession(AsyncIterator[AudioFrame]):
     """An independent negotiated PCM stream and its capture lifecycle."""
 
-    def __init__(self, client: Sonexis, info: CaptureInfo) -> None:
+    def __init__(self, client: Sonexis, info: CaptureInfo,
+                 source: Optional[AudioSource] = None) -> None:
         self.client = client
         self.info = info
+        self.source = source
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._previous_sequence: Optional[int] = None
         self._closed = False
         self._cleanup_task: Optional[asyncio.Task] = None
+        self.terminal_info: Optional[CaptureInfo] = None
+        self.terminal_error: Optional[SonexisError] = None
 
     def __repr__(self) -> str:
-        return f"CaptureSession(id={self.info.id!r}, source={self.info.source_id!r}, format={self.info.format!r})"
+        name = self.source.name if self.source else self.info.source_id
+        return f"CaptureSession(id={self.info.id!r}, source={name!r}, format={self.info.format!r})"
 
     async def _open(self) -> None:
         self._reader, self._writer = await asyncio.open_unix_connection(self.info.data_socket_path)
@@ -323,8 +458,31 @@ class CaptureSession(AsyncIterator[AudioFrame]):
         self._previous_sequence = frame.sequence
         if frame.frame_count == 0:
             await self.aclose(stop_runtime=False)
+            try:
+                status = await self.client.status(self.info.id)
+                assert isinstance(status, CaptureInfo)
+                self.terminal_info = status
+                if status.state == "failed":
+                    failure = status.error
+                    self.terminal_error = CaptureFailedError(
+                        failure.code if failure else "capture_failed",
+                        failure.message if failure else "Capture failed",
+                        retryable=failure.retryable if failure else False,
+                        details=failure.details if failure else None,
+                    )
+                    raise self.terminal_error
+            except (SonexisConnectionError, SonexisProtocolError):
+                # EOS itself remains authoritative when terminal status cannot
+                # be queried. Abrupt sockets still fail in read_frame().
+                pass
             raise StopAsyncIteration
-        return frame
+        return replace(
+            frame,
+            source=self.source,
+            session_id=self.info.id,
+            runtime_started_at_ns=self.info.started_at_ns,
+            received_at_ns=time.monotonic_ns(),
+        )
 
     async def aclose(self, *, stop_runtime: bool = True) -> None:
         if self._cleanup_task is None:

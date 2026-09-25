@@ -9,6 +9,22 @@ export interface AudioFormat {
   sample_format: SampleFormat;
   interleaved: boolean;
 }
+
+function audioFormat(sampleRate: number, channelCount: number,
+                     sampleFormat: SampleFormat = "pcm_s16le"): AudioFormat {
+  return { sample_rate: sampleRate, channel_count: channelCount, sample_format: sampleFormat,
+    interleaved: true };
+}
+
+/** Known-good format requests for common realtime audio consumers. */
+export const AudioFormats = Object.freeze({
+  speech16k: (): AudioFormat => audioFormat(16000, 1),
+  openAIRealtime: (): AudioFormat => audioFormat(24000, 1),
+  geminiLive: (): AudioFormat => audioFormat(16000, 1),
+  pcm48kMono: (): AudioFormat => audioFormat(48000, 1),
+  pcm48kStereo: (): AudioFormat => audioFormat(48000, 2),
+});
+
 export interface AudioSource {
   id: string;
   kind: "application" | "microphone" | "system_mix" | "remote" | "virtual";
@@ -19,6 +35,18 @@ export interface AudioSource {
   is_available: boolean;
   is_producing_audio?: boolean;
   native_format?: AudioFormat;
+}
+
+export type SourceSelector = AudioSource | string | number;
+
+export interface SourceFilter {
+  /** Case-insensitive substring matched against ID, bundle ID, and name. */
+  query?: string;
+  sourceId?: string;
+  bundleIdentifier?: string;
+  pid?: number;
+  name?: string;
+  availableOnly?: boolean;
 }
 export interface SessionMetrics {
   capture_callbacks: number;
@@ -54,7 +82,7 @@ export interface RuntimeErrorInfo {
   retryable: boolean;
   details?: Record<string, string>;
 }
-export interface AudioFrame {
+export interface DecodedAudioFrame {
   streamId: string;
   sequence: bigint;
   timestampNs: bigint;
@@ -63,6 +91,17 @@ export interface AudioFrame {
   data: Buffer;
   discontinuity: boolean;
   droppedFramesBefore: number;
+}
+
+/** A decoded PCM frame enriched with capture-session and source identity. */
+export interface AudioFrame extends DecodedAudioFrame {
+  source: AudioSource;
+  sourceId: string;
+  sourceName: string;
+  bundleIdentifier?: string;
+  sessionId: string;
+  /** Local monotonic receipt time, separate from the Runtime stream timestamp. */
+  receivedAtNs: bigint;
 }
 export interface RuntimeEvent {
   protocol_version: 2;
@@ -112,6 +151,77 @@ export class SonexisError extends Error {
   }
 }
 
+export class SourceNotFoundError extends SonexisError {
+  constructor(message: string, code = "source_not_found",
+              details: Record<string, string> = {}) {
+    super(code, message, true, details);
+    this.name = "SourceNotFoundError";
+  }
+}
+
+export class AmbiguousSourceError extends SonexisError {
+  constructor(message: string, details: Record<string, string>) {
+    super("ambiguous_source", message, false, details);
+    this.name = "AmbiguousSourceError";
+  }
+}
+
+/** Filter an already-fetched source snapshot without another Runtime request. */
+export function filterSources(sources: readonly AudioSource[], filter: SourceFilter = {}): AudioSource[] {
+  const availableOnly = filter.availableOnly ?? true;
+  const query = filter.query?.toLowerCase();
+  return sources.filter((source) => {
+    if (availableOnly && !source.is_available) return false;
+    if (filter.sourceId !== undefined && source.id !== filter.sourceId) return false;
+    if (filter.bundleIdentifier !== undefined
+        && source.bundle_identifier !== filter.bundleIdentifier) return false;
+    if (filter.pid !== undefined && !source.process_ids.includes(filter.pid)) return false;
+    if (filter.name !== undefined && source.name !== filter.name) return false;
+    if (query !== undefined && ![source.id, source.bundle_identifier ?? "", source.name]
+      .some((value) => value.toLowerCase().includes(query))) return false;
+    return true;
+  });
+}
+
+/** Resolve an ID, bundle ID, PID, exact app name, or source object uniquely. */
+export function resolveSource(sources: readonly AudioSource[], selector: SourceSelector): AudioSource {
+  const available = sources.filter((source) => source.is_available);
+  let candidates: AudioSource[];
+  if (typeof selector === "number") {
+    candidates = available.filter((source) => source.process_ids.includes(selector));
+  } else if (typeof selector !== "string") {
+    candidates = available.filter((source) => source.id === selector.id);
+  } else {
+    candidates = available.filter((source) => source.id === selector);
+    if (!candidates.length) {
+      candidates = available.filter((source) => source.bundle_identifier === selector);
+    }
+    if (!candidates.length) {
+      candidates = available.filter((source) => source.name === selector);
+    }
+    if (!candidates.length) {
+      const folded = selector.toLowerCase();
+      candidates = available.filter((source) => source.name.toLowerCase() === folded);
+    }
+  }
+  if (!candidates.length) {
+    throw new SourceNotFoundError(`No available audio source matches ${formatSelector(selector)}`);
+  }
+  if (candidates.length > 1) {
+    const details = Object.fromEntries(candidates.map((source, index) =>
+      [`candidate_${index + 1}`, source.id]));
+    throw new AmbiguousSourceError(
+      `Audio source selector ${formatSelector(selector)} is ambiguous`, details);
+  }
+  return candidates[0];
+}
+
+function formatSelector(selector: SourceSelector): string {
+  if (typeof selector === "string") return JSON.stringify(selector);
+  if (typeof selector === "number") return String(selector);
+  return JSON.stringify(selector.id);
+}
+
 type WireResponse = Record<string, unknown> & {
   request_id: string; ok: boolean;
   error?: { code: string; message: string; retryable?: boolean; details?: Record<string, string> };
@@ -156,7 +266,7 @@ export class Sonexis extends EventEmitter {
     socket.on("error", (error) => this.handleDisconnect(socket, error));
     try {
       const response = await this.request("hello", {
-        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.2.0",
+        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.3.0",
       });
       const handshake = response.handshake as Handshake;
       if (handshake?.protocol_version !== 2) {
@@ -186,6 +296,45 @@ export class Sonexis extends EventEmitter {
     return (await this.request("list_sources")).sources as AudioSource[];
   }
 
+  /** Search a fresh Runtime snapshot. A string query is a case-insensitive substring search. */
+  async findSources(queryOrFilter: string | SourceFilter = {}): Promise<AudioSource[]> {
+    const filter = typeof queryOrFilter === "string"
+      ? { query: queryOrFilter } : queryOrFilter;
+    return filterSources(await this.sources(), filter);
+  }
+
+  /** Resolve a source selector exactly; ambiguous names are never chosen silently. */
+  async getSource(selector: SourceSelector): Promise<AudioSource> {
+    return resolveSource(await this.sources(), selector);
+  }
+
+  /** Poll fresh source snapshots until an exact selector becomes available. */
+  async waitForSource(selector: SourceSelector, options: {
+    timeoutMs?: number; pollIntervalMs?: number; signal?: AbortSignal;
+  } = {}): Promise<AudioSource> {
+    const pollIntervalMs = options.pollIntervalMs ?? 250;
+    if (pollIntervalMs <= 0) throw new RangeError("pollIntervalMs must be positive");
+    if (options.timeoutMs !== undefined && options.timeoutMs < 0) {
+      throw new RangeError("timeoutMs must not be negative");
+    }
+    const deadline = options.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs;
+    while (true) {
+      if (options.signal?.aborted) throw abortError();
+      try {
+        return await this.getSource(selector);
+      } catch (error) {
+        if (!(error instanceof SourceNotFoundError)) throw error;
+        const remaining = deadline === undefined ? undefined : deadline - Date.now();
+        if (remaining !== undefined && remaining <= 0) {
+          throw new SourceNotFoundError(
+            `Timed out waiting for audio source ${formatSelector(selector)}`, "source_wait_timeout");
+        }
+        await delay(remaining === undefined ? pollIntervalMs : Math.min(pollIntervalMs, remaining),
+          options.signal);
+      }
+    }
+  }
+
   async status(): Promise<RuntimeStatus>;
   async status(sessionId: string): Promise<CaptureInfo>;
   async status(sessionId?: string): Promise<RuntimeStatus | CaptureInfo> {
@@ -194,13 +343,12 @@ export class Sonexis extends EventEmitter {
     return (sessionId ? response.session : response.status) as RuntimeStatus | CaptureInfo;
   }
 
-  async capture(source: AudioSource | string,
-                format: AudioFormat = { sample_rate: 16000, channel_count: 1,
-                  sample_format: "pcm_s16le", interleaved: true }): Promise<CaptureStream> {
-    const sourceId = typeof source === "string" ? source : source.id;
-    const response = await this.request("start_capture", { source_id: sourceId, format });
+  async capture(source: SourceSelector,
+                format: AudioFormat = AudioFormats.speech16k()): Promise<CaptureStream> {
+    const resolved = await this.getSource(source);
+    const response = await this.request("start_capture", { source_id: resolved.id, format });
     const info = response.session as CaptureInfo;
-    try { return await CaptureStream.open(this, info); }
+    try { return await CaptureStream.open(this, info, resolved); }
     catch (error) {
       try { await this.cleanupCapture(info.id); } catch { /* bounded cleanup */ }
       throw error;
@@ -222,6 +370,11 @@ export class Sonexis extends EventEmitter {
       try { await this.cleanupSubscription(subscription.id); } catch { }
       throw error;
     }
+  }
+
+  /** Own multiple independent captures while preserving a stable label for each frame. */
+  session(options: { maxQueueFrames?: number } = {}): MultiSourceSession {
+    return new MultiSourceSession(this, options.maxQueueFrames ?? 128);
   }
 
   private async request(command: string, fields: Record<string, unknown> = {}): Promise<WireResponse> {
@@ -318,11 +471,12 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
   private previousSequence?: bigint;
 
   private constructor(private readonly client: Sonexis, readonly info: CaptureInfo,
-                      private readonly socket: Socket) { super(); }
+                      readonly source: AudioSource, private readonly socket: Socket) { super(); }
 
-  static async open(client: Sonexis, info: CaptureInfo): Promise<CaptureStream> {
+  static async open(client: Sonexis, info: CaptureInfo,
+                    source: AudioSource): Promise<CaptureStream> {
     const socket = await openSocket(info.data_socket_path);
-    const stream = new CaptureStream(client, info, socket);
+    const stream = new CaptureStream(client, info, source, socket);
     socket.on("data", (chunk) => stream.consume(chunk));
     socket.on("close", () => {
       const truncated = !stream.closing && !stream.sawEndOfStream
@@ -377,14 +531,23 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
       if (this.buffer.length < 64 + payloadSize) return;
       const packet = this.buffer.subarray(0, 64 + payloadSize);
       this.buffer = this.buffer.subarray(64 + payloadSize);
-      let frame: AudioFrame;
-      try { frame = decodeFrame(packet, this.info.stream_id, this.previousSequence); }
+      let decoded: DecodedAudioFrame;
+      try { decoded = decodeFrame(packet, this.info.stream_id, this.previousSequence); }
       catch (error) {
         this.emit("streamError", error);
         this.socket.destroy();
         this.finish(error instanceof Error ? error : new Error(String(error)));
         return;
       }
+      const frame: AudioFrame = {
+        ...decoded,
+        source: this.source,
+        sourceId: this.source.id,
+        sourceName: this.source.name,
+        bundleIdentifier: this.source.bundle_identifier,
+        sessionId: this.info.id,
+        receivedAtNs: process.hrtime.bigint(),
+      };
       this.previousSequence = frame.sequence;
       if (frame.frameCount === 0) { this.sawEndOfStream = true; this.finish(); return; }
       this.emit("audio", frame);
@@ -411,6 +574,144 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
     if (this.cleaned) return;
     this.cleaned = true;
     try { await this.client.cleanupCapture(this.info.id); } catch { /* control teardown is authoritative */ }
+  }
+}
+
+export interface LabeledAudioFrame {
+  label: string;
+  frame: AudioFrame;
+  source: AudioSource;
+  sessionId: string;
+  streamId: string;
+  timestampNs: bigint;
+}
+
+interface MultiSourceEnd {
+  label: string;
+  error?: Error;
+}
+
+/** Bounded orchestration for independent, labeled capture streams. */
+export class MultiSourceSession {
+  readonly maxQueueFrames: number;
+  droppedFrames = 0;
+  private readonly captures = new Map<string, CaptureStream>();
+  private readonly pumps = new Map<string, Promise<void>>();
+  private readonly pendingLabels = new Set<string>();
+  private readonly queue: LabeledAudioFrame[] = [];
+  private readonly ends: MultiSourceEnd[] = [];
+  private readonly waiters: Array<() => void> = [];
+  private closed = false;
+  private iteratorActive = false;
+  private closePromise?: Promise<void>;
+
+  constructor(private readonly client: Sonexis, maxQueueFrames = 128) {
+    if (!Number.isInteger(maxQueueFrames) || maxQueueFrames < 1) {
+      throw new RangeError("maxQueueFrames must be a positive integer");
+    }
+    this.maxQueueFrames = maxQueueFrames;
+  }
+
+  get labels(): readonly string[] {
+    return [...this.captures.keys()];
+  }
+
+  async add(label: string, source: SourceSelector,
+            format: AudioFormat = AudioFormats.speech16k()): Promise<CaptureStream> {
+    if (this.closed) throw new SonexisError("session_closed", "Multi-source session is closed");
+    if (!label || this.captures.has(label) || this.pendingLabels.has(label)) {
+      throw new SonexisError("invalid_label", "Capture label must be non-empty and unique");
+    }
+    this.pendingLabels.add(label);
+    try {
+      const capture = await this.client.capture(source, format);
+      if (this.closed) {
+        await capture.close();
+        throw new SonexisError("session_closed", "Multi-source session closed during capture");
+      }
+      this.captures.set(label, capture);
+      const pump = this.pump(label, capture);
+      this.pumps.set(label, pump);
+      return capture;
+    } finally {
+      this.pendingLabels.delete(label);
+    }
+  }
+
+  async remove(label: string): Promise<void> {
+    const capture = this.captures.get(label);
+    const pump = this.pumps.get(label);
+    this.captures.delete(label);
+    this.pumps.delete(label);
+    if (capture) await capture.close();
+    if (pump) await pump;
+    this.wake();
+  }
+
+  async *frames(): AsyncIterableIterator<LabeledAudioFrame> {
+    if (this.iteratorActive) {
+      throw new SonexisError("consumer_exists", "Multi-source frames already have a consumer");
+    }
+    this.iteratorActive = true;
+    try {
+      while (!this.closed) {
+        const frame = this.queue.shift();
+        if (frame) {
+          yield frame;
+          continue;
+        }
+        const end = this.ends.shift();
+        if (end?.error) throw end.error;
+        if (!this.captures.size) return;
+        await new Promise<void>((resolve) => this.waiters.push(resolve));
+      }
+    } finally {
+      this.iteratorActive = false;
+      await this.close();
+    }
+  }
+
+  close(): Promise<void> {
+    this.closePromise ??= this.finishClose();
+    return this.closePromise;
+  }
+
+  private async finishClose(): Promise<void> {
+    this.closed = true;
+    this.pendingLabels.clear();
+    const captures = [...this.captures.values()];
+    this.captures.clear();
+    await Promise.allSettled(captures.map((capture) => capture.close()));
+    await Promise.allSettled([...this.pumps.values()]);
+    this.pumps.clear();
+    for (const waiter of this.waiters.splice(0)) waiter();
+  }
+
+  private async pump(label: string, capture: CaptureStream): Promise<void> {
+    let error: Error | undefined;
+    try {
+      for await (const frame of capture) {
+        if (this.closed || this.captures.get(label) !== capture) break;
+        if (this.queue.length >= this.maxQueueFrames) {
+          const dropped = this.queue.shift();
+          this.droppedFrames += dropped?.frame.frameCount ?? 0;
+        }
+        this.queue.push({ label, frame, source: frame.source, sessionId: frame.sessionId,
+          streamId: frame.streamId, timestampNs: frame.timestampNs });
+        this.wake();
+      }
+    } catch (caught) {
+      error = caught instanceof Error ? caught : new Error(String(caught));
+    } finally {
+      if (this.captures.get(label) === capture) this.captures.delete(label);
+      this.pumps.delete(label);
+      this.ends.push({ label, error });
+      this.wake();
+    }
+  }
+
+  private wake(): void {
+    this.waiters.shift()?.();
   }
 }
 
@@ -514,7 +815,7 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
 }
 
 export function decodeFrame(packet: Buffer, expectedStreamId: string,
-                            previousSequence?: bigint): AudioFrame {
+                            previousSequence?: bigint): DecodedAudioFrame {
   if (packet.length < 64 || packet.readUInt32BE(0) !== 0x53585043
       || packet.readUInt16BE(4) !== 2 || packet.readUInt32BE(8) !== 64) {
     throw new SonexisError("invalid_pcm_header", "Invalid PCM header");
@@ -552,6 +853,29 @@ export function decodeFrame(packet: Buffer, expectedStreamId: string,
 function uuidFromBytes(bytes: Buffer): string {
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function abortError(): SonexisError {
+  return new SonexisError("cancelled", "Operation was cancelled");
+}
+
+function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
 }
 
 async function boundedCleanup(promise: Promise<unknown>, timeoutMs = 1000): Promise<void> {

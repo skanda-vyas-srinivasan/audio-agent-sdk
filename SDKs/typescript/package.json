@@ -1,6 +1,6 @@
 {
   "name": "@sonexis/runtime",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Typed Node.js client for the local Sonexis audio Runtime",
   "type": "module",
   "main": "dist/index.js",

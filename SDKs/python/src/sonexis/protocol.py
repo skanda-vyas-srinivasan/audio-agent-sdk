@@ -49,8 +49,9 @@ async def read_frame(
     if flags & FLAG_EOS:
         if payload_size or frame_count:
             raise SonexisProtocolError("invalid_pcm_header", "EOS frame contains audio")
-        return AudioFrame(str(stream_id), sequence, timestamp_ns, 0,
-                          AudioFormat(0, 0, sample_format), b"")
+        return AudioFrame(stream_id=str(stream_id), sequence=sequence,
+                          timestamp_ns=timestamp_ns, frame_count=0,
+                          format=AudioFormat(0, 0, sample_format), data=b"")
     expected_size = frame_count * channels * sample_format.bytes_per_sample
     if not sample_rate or not frame_count or not channels or payload_size != expected_size:
         raise SonexisProtocolError("invalid_pcm_header", "PCM payload and format are inconsistent")
@@ -60,6 +61,9 @@ async def read_frame(
         payload = await reader.readexactly(payload_size)
     except asyncio.IncompleteReadError as error:
         raise SonexisProtocolError("truncated_pcm_stream", "Audio stream ended mid-payload") from error
-    return AudioFrame(str(stream_id), sequence, timestamp_ns, frame_count,
-                      AudioFormat(sample_rate, channels, sample_format), payload,
-                      bool(flags & FLAG_DISCONTINUITY), dropped_before)
+    return AudioFrame(stream_id=str(stream_id), sequence=sequence,
+                      timestamp_ns=timestamp_ns, frame_count=frame_count,
+                      format=AudioFormat(sample_rate, channels, sample_format),
+                      data=payload,
+                      discontinuity=bool(flags & FLAG_DISCONTINUITY),
+                      dropped_frames_before=dropped_before)

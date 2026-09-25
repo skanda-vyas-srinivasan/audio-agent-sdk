@@ -25,8 +25,18 @@ class SonexisError(Exception):
     @classmethod
     def from_response(cls, response: Dict[str, Any]) -> "SonexisError":
         error = response.get("error") or {}
-        return cls(
-            str(error.get("code", "runtime_error")),
+        code = str(error.get("code", "runtime_error"))
+        error_type = {
+            "source_unavailable": SourceUnavailableError,
+            "source_not_found": SourceNotFoundError,
+            "unsupported_format": UnsupportedFormatError,
+            "session_limit_exceeded": SessionLimitError,
+            "permission_denied": PermissionDeniedError,
+            "slow_consumer": SlowConsumerError,
+            "capture_failed": CaptureFailedError,
+        }.get(code, cls)
+        return error_type(
+            code,
             str(error.get("message", "Runtime request failed")),
             retryable=bool(error.get("retryable", False)),
             details={str(k): str(v) for k, v in (error.get("details") or {}).items()},
@@ -40,3 +50,39 @@ class SonexisConnectionError(SonexisError):
 
 class SonexisProtocolError(SonexisError):
     """The Runtime sent malformed or incompatible protocol data."""
+
+
+class SourceNotFoundError(SonexisError):
+    """No currently available source matched a selector."""
+
+
+class AmbiguousSourceError(SonexisError):
+    """A selector matched more than one source and must be made explicit."""
+
+
+class ProviderError(SonexisError):
+    """An optional realtime provider adapter failed."""
+
+
+class CaptureFailedError(SonexisError):
+    """A capture reached terminal failure after it had started."""
+
+
+class SourceUnavailableError(SonexisError):
+    """A known source is not currently available; refreshing may succeed."""
+
+
+class UnsupportedFormatError(SonexisError):
+    """The Runtime or provider does not accept the requested audio format."""
+
+
+class SessionLimitError(SonexisError):
+    """The Runtime's bounded capture-session limit was reached."""
+
+
+class PermissionDeniedError(SonexisError):
+    """macOS denied the Runtime permission to capture application audio."""
+
+
+class SlowConsumerError(SonexisError):
+    """A consumer fell behind a bounded realtime stream."""

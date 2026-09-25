@@ -1,4 +1,4 @@
-"""Typed public models for Sonexis Runtime v0.2."""
+"""Typed public models for Sonexis Runtime v0.3."""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -30,6 +30,21 @@ class AudioFormat:
         }
 
     @classmethod
+    def speech_16k(cls) -> "AudioFormat":
+        """PCM16 mono used by conventional speech pipelines."""
+        return cls(16_000, 1, SampleFormat.PCM_S16LE)
+
+    @classmethod
+    def openai_realtime(cls) -> "AudioFormat":
+        """PCM16 mono accepted by the OpenAI Realtime audio input."""
+        return cls(24_000, 1, SampleFormat.PCM_S16LE)
+
+    @classmethod
+    def gemini_live(cls) -> "AudioFormat":
+        """PCM16 mono accepted by Gemini Live realtime input."""
+        return cls(16_000, 1, SampleFormat.PCM_S16LE)
+
+    @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "AudioFormat":
         return cls(int(value["sample_rate"]), int(value["channel_count"]),
                    SampleFormat(value["sample_format"]), bool(value.get("interleaved", True)))
@@ -46,6 +61,10 @@ class AudioSource:
     available: bool
     producing_audio: Optional[bool]
     native_format: Optional[AudioFormat]
+
+    def __repr__(self) -> str:
+        bundle = f", bundle_identifier={self.bundle_identifier!r}" if self.bundle_identifier else ""
+        return f"AudioSource(id={self.id!r}, name={self.name!r}{bundle})"
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "AudioSource":
@@ -136,6 +155,36 @@ class AudioFrame:
     data: bytes
     discontinuity: bool = False
     dropped_frames_before: int = 0
+    source: Optional[AudioSource] = None
+    session_id: Optional[str] = None
+    runtime_started_at_ns: Optional[int] = None
+    received_at_ns: Optional[int] = None
+
+    @property
+    def source_id(self) -> Optional[str]:
+        return self.source.id if self.source else None
+
+    @property
+    def source_name(self) -> Optional[str]:
+        return self.source.name if self.source else None
+
+    @property
+    def bundle_identifier(self) -> Optional[str]:
+        return self.source.bundle_identifier if self.source else None
+
+    @property
+    def estimated_capture_at_ns(self) -> Optional[int]:
+        """Estimated monotonic time; this is not a preserved HAL host timestamp."""
+        if self.runtime_started_at_ns is None:
+            return None
+        return self.runtime_started_at_ns + self.timestamp_ns
+
+    @property
+    def estimated_sonexis_latency_ns(self) -> Optional[int]:
+        capture = self.estimated_capture_at_ns
+        if capture is None or self.received_at_ns is None:
+            return None
+        return max(0, self.received_at_ns - capture)
 
 
 @dataclass(frozen=True)
