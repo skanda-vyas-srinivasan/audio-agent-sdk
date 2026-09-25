@@ -231,7 +231,7 @@ do {
     for item in cappedSubscriptions { try client.unsubscribeEvents(id: item.id) }
 
     let runtimeStatus = try client.runtimeStatus()
-    expect(runtimeStatus.runtimeVersion == "0.2.0", "runtime status omitted version")
+    expect(runtimeStatus.runtimeVersion == "0.3.0", "runtime status omitted version")
     expect(runtimeStatus.totalSessionsStarted >= 10, "runtime session counter did not advance")
 
     let firstTerminal = try client.startCapture(sourceID: sources[0].id)
