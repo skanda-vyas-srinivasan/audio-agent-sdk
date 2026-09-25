@@ -6,6 +6,7 @@ import {
   AudioFormats,
   AudioSource,
   CaptureStream,
+  decodeEvent,
   decodeFrame,
   filterSources,
   MultiSourceSession,
@@ -42,6 +43,33 @@ test("decodes a protocol v2 PCM fixture", () => {
   assert.equal(frame.sequence, 7n);
   assert.equal(frame.droppedFramesBefore, 3);
   assert.equal(frame.data.length, 4);
+  assert.equal(frame.endOfStream, false);
+});
+
+test("rejects zero-length non-EOS PCM and accepts a strict EOS", () => {
+  const streamId = "00112233-4455-6677-8899-aabbccddeeff";
+  const packet = Buffer.alloc(64);
+  packet.writeUInt32BE(0x53585043, 0);
+  packet.writeUInt16BE(2, 4);
+  packet.writeUInt32BE(64, 8);
+  Buffer.from(streamId.replaceAll("-", ""), "hex").copy(packet, 16);
+  packet.writeUInt16BE(1, 58);
+  assert.throws(() => decodeFrame(packet, streamId), SonexisError);
+  packet.writeUInt16BE(2, 6);
+  assert.equal(decodeFrame(packet, streamId).endOfStream, true);
+});
+
+test("strictly validates Runtime event envelopes and UTF-8", () => {
+  const event = decodeEvent(Buffer.from(JSON.stringify({
+    protocol_version: 2,
+    event_id: "event-1",
+    type: "capture_started",
+    timestamp_nanoseconds: 123,
+    event_sequence: 1,
+  })));
+  assert.equal(event.type, "capture_started");
+  assert.throws(() => decodeEvent(Buffer.from("{}")), SonexisError);
+  assert.throws(() => decodeEvent(Buffer.from([0xff])), SonexisError);
 });
 
 test("rejects a wrong stream", () => {
@@ -149,6 +177,7 @@ function frame(audioSource: AudioSource, sessionId: string, streamId: string): A
     data: Buffer.alloc(320),
     discontinuity: false,
     droppedFramesBefore: 0,
+    endOfStream: false,
     source: audioSource,
     sourceId: audioSource.id,
     sourceName: audioSource.name,

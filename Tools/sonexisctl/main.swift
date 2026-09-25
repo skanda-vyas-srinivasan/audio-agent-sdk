@@ -92,6 +92,25 @@ private func printSession(_ session: RuntimeSessionDTO) {
     print("session=\(session.id) stream=\(session.streamID) state=\(session.state.rawValue) source=\(session.sourceID) format=\(session.format.sampleFormat.rawValue)/\(session.format.sampleRate)Hz/\(session.format.channelCount)ch frames=\(session.metrics.framesForwarded) dropped=\(session.metrics.droppedFrames)")
 }
 
+private func secureOutputHandle(path: String) throws -> FileHandle {
+    let descriptor = open(path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
+                          mode_t(0o600))
+    guard descriptor >= 0 else {
+        throw RuntimeErrorDTO(code: "output_error",
+            message: "Could not securely open \(path): \(String(cString: strerror(errno)))")
+    }
+    var status = stat()
+    guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFREG,
+          status.st_uid == geteuid(), fchmod(descriptor, mode_t(0o600)) == 0,
+          ftruncate(descriptor, 0) == 0 else {
+        let savedError = errno
+        close(descriptor)
+        throw RuntimeErrorDTO(code: "output_error",
+            message: "Output must be a private regular file: \(String(cString: strerror(savedError)))")
+    }
+    return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+}
+
 do {
     let arguments = try Arguments(Array(CommandLine.arguments.dropFirst()))
     if ["help", "--help", "-h"].contains(arguments.command) {
@@ -115,10 +134,7 @@ do {
         if arguments.json { try printJSON(session) } else { printSession(session) }
         let handle: FileHandle?
         if let path = arguments.output {
-            guard FileManager.default.createFile(atPath: path, contents: nil) else {
-                throw RuntimeErrorDTO(code: "output_error", message: "Could not create \(path)")
-            }
-            handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+            handle = try secureOutputHandle(path: path)
         } else { handle = nil }
         defer { try? handle?.close() }
 

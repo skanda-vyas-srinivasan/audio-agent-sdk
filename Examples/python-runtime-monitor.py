@@ -3,13 +3,31 @@
 
 import argparse
 import asyncio
+import os
 import signal
+import stat
 import time
 import wave
 from contextlib import nullcontext
 from pathlib import Path
 
 from sonexis import AudioFormat, SampleFormat, Sonexis
+
+
+def secure_output(path: Path):
+    flags = os.O_WRONLY | os.O_CREAT
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    status = os.fstat(descriptor)
+    if not stat.S_ISREG(status.st_mode) or status.st_uid != os.geteuid():
+        os.close(descriptor)
+        raise ValueError("Output must be a regular file owned by the current user")
+    os.fchmod(descriptor, 0o600)
+    os.ftruncate(descriptor, 0)
+    return os.fdopen(descriptor, "wb")
 
 
 def arguments():
@@ -71,12 +89,12 @@ async def main():
             if args.output.suffix.lower() == ".wav":
                 if audio_format.sample_format is not SampleFormat.PCM_S16LE:
                     raise SystemExit("WAV output currently requires pcm_s16le")
-                wav = wave.open(str(args.output), "wb")
+                wav = wave.open(secure_output(args.output), "wb")
                 wav.setnchannels(audio_format.channels)
                 wav.setsampwidth(2)
                 wav.setframerate(audio_format.sample_rate)
             else:
-                output = args.output.open("wb")
+                output = secure_output(args.output)
 
         frames = bytes_received = dropped = 0
         started = last_report = time.monotonic()

@@ -3,6 +3,7 @@
 import base64
 import asyncio
 import os
+import sys
 import uuid
 from typing import Any, AsyncIterator, List, Optional
 
@@ -18,13 +19,18 @@ class OpenAIRealtimeSink:
     required_format = AudioFormat.openai_realtime()
 
     def __init__(self, connection: Any, *, connection_context: Any = None,
-                 client: Any = None, prefetched_events: Optional[List[Any]] = None) -> None:
+                 client: Any = None, prefetched_events: Optional[List[Any]] = None,
+                 close_timeout: float = 2.0) -> None:
         self._connection = connection
         self._connection_context = connection_context
         self._client = client
         self._prefetched_events = prefetched_events or []
         self._closed = False
         self._close_task: Optional[asyncio.Task] = None
+        self._close_timeout = close_timeout
+        self._send_lock = asyncio.Lock()
+        self._stream_id: Optional[str] = None
+        self._last_sequence: Optional[int] = None
 
     @classmethod
     async def connect(
@@ -34,10 +40,15 @@ class OpenAIRealtimeSink:
         model: str = "gpt-live-1",
         instructions: str = "Respond concisely to the incoming audio.",
         voice: str = "marin",
+        handshake_timeout: float = 10.0,
+        close_timeout: float = 2.0,
     ) -> "OpenAIRealtimeSink":
         key = api_key or os.environ.get("OPENAI_API_KEY")
         if not key:
             raise ProviderError("missing_credentials", "OPENAI_API_KEY is not set")
+        if sys.version_info < (3, 10):
+            raise ProviderError("unsupported_python",
+                                "The OpenAI adapter requires Python 3.10+")
         try:
             from openai import AsyncOpenAI
         except ImportError as error:
@@ -48,8 +59,9 @@ class OpenAIRealtimeSink:
         client = AsyncOpenAI(api_key=key)
         context = client.live.connect()
         try:
-            connection = await context.__aenter__()
-            await connection.session.start(
+            connection = await asyncio.wait_for(
+                context.__aenter__(), timeout=handshake_timeout)
+            await asyncio.wait_for(connection.session.start(
                 session={
                     "model": model,
                     "instructions": instructions,
@@ -59,15 +71,15 @@ class OpenAIRealtimeSink:
                     },
                 },
                 event_id=f"sonexis_{uuid.uuid4().hex}",
-            )
+            ), timeout=handshake_timeout)
             iterator = connection.__aiter__()
-            first = await iterator.__anext__()
+            first = await asyncio.wait_for(iterator.__anext__(), timeout=handshake_timeout)
             if getattr(first, "type", None) != "session.started":
                 raise ProviderError("provider_handshake_failed",
                                     "OpenAI did not acknowledge session.start")
             # Preserve the iterator advanced above for event delivery.
             sink = cls(connection, connection_context=context, client=client,
-                       prefetched_events=[first])
+                       prefetched_events=[first], close_timeout=close_timeout)
             sink._event_iterator = iterator
             return sink
         except BaseException:
@@ -89,20 +101,33 @@ class OpenAIRealtimeSink:
                 "unsupported_provider_format",
                 f"OpenAI GPT-Live requires {self.required_format!r}; got {frame.format!r}",
             )
-        if len(frame.data) % 2:
-            raise ProviderError("invalid_audio", "PCM16 payload contains a partial sample")
+        expected = frame.frame_count * frame.format.channels * frame.format.sample_format.bytes_per_sample
+        if frame.frame_count < 1 or len(frame.data) != expected:
+            raise ProviderError("invalid_audio", "PCM payload does not match its frame metadata")
 
     async def send_audio(self, frame: AudioFrame) -> AudioSendReceipt:
         if self._closed:
             raise ProviderError("provider_closed", "OpenAI session is closed")
         self._validate(frame)
-        encoded = base64.b64encode(frame.data).decode("ascii")
-        try:
-            await self._connection.session.input_audio.append(audio=encoded)
-        except asyncio.CancelledError:
-            raise
-        except BaseException as error:
-            raise ProviderError("provider_send_failed", str(error), retryable=True) from error
+        async with self._send_lock:
+            if self._stream_id is None:
+                self._stream_id = frame.stream_id
+            elif self._stream_id != frame.stream_id:
+                raise ProviderError("provider_stream_mismatch",
+                                    "Use one OpenAI sink per Sonexis stream")
+            if self._last_sequence is not None and frame.sequence <= self._last_sequence:
+                raise ProviderError("provider_sequence_error",
+                                    "Audio frames must be sent in sequence order")
+            encoded = base64.b64encode(frame.data).decode("ascii")
+            try:
+                await self._connection.session.input_audio.append(audio=encoded)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as error:
+                raise ProviderError("provider_send_failed", str(error), retryable=True) from error
+            if self._closed:
+                raise ProviderError("provider_closed", "OpenAI session closed during send")
+            self._last_sequence = frame.sequence
         return send_receipt("openai", frame, len(encoded))
 
     async def events(self) -> AsyncIterator[ProviderEvent]:
@@ -150,12 +175,22 @@ class OpenAIRealtimeSink:
 
     async def _finish_close(self) -> None:
         try:
-            await self._connection.session.close()
+            await asyncio.wait_for(
+                self._connection.session.close(), timeout=self._close_timeout)
         except BaseException:
             pass
         try:
             if self._connection_context is not None:
-                await self._connection_context.__aexit__(None, None, None)
+                try:
+                    await asyncio.wait_for(
+                        self._connection_context.__aexit__(None, None, None),
+                        timeout=self._close_timeout)
+                except BaseException:
+                    pass
         finally:
             if self._client is not None:
-                await self._client.close()
+                try:
+                    await asyncio.wait_for(
+                        self._client.close(), timeout=self._close_timeout)
+                except BaseException:
+                    pass

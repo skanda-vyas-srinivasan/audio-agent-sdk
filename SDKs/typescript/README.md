@@ -65,8 +65,10 @@ later request.
 ## Labeled multi-source capture
 
 `MultiSourceSession` owns independent Runtime captures. It does not mix them: every frame keeps its
-source, stream, session, timestamp, and caller-assigned label. Its local merge queue is bounded and
-drops the oldest queued frame when full; `droppedFrames` reports the dropped sample-frame count.
+source, stream, session, timestamp, and caller-assigned label. Every label has a fairly drained
+queue bounded to `maxQueueFrames` packets. A full label queue drops new frames;
+`droppedFrames` and `droppedFramesByLabel` report lost PCM sample frames, and the next retained
+labeled frame reports a local discontinuity.
 
 ```ts
 const group = sx.session({ maxQueueFrames: 128 });
@@ -92,8 +94,8 @@ audio/event loop closes its Runtime resource. EventEmitter-only consumers are su
 filling the iterator queue; listen for `streamError` and call `close()` during application
 shutdown.
 
-The current repository environment does not contain Node/npm/TypeScript, so this package was
-reviewed statically here. Run the following on a Node-equipped host:
+The package was compiled and its tests executed with a checksum-verified temporary Node 22.23.0
+toolchain; nothing was installed system-wide. Re-run with any supported Node toolchain:
 
 ```sh
 cd SDKs/typescript

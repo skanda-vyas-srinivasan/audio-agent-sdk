@@ -20,6 +20,10 @@ Choose a source by number. While capturing, enter `s` to switch sources or `q` t
 
 Provider modes are optional and keep credentials in the environment:
 
+Provider extras require Python 3.10 or newer; the offline mock and core SDK
+remain compatible with Python 3.9. Create and activate a 3.10+ environment (for
+example, `python3.10 -m venv .venv-ai`) before the provider install commands.
+
 ```sh
 python -m pip install -e 'SDKs/python[openai]'
 export OPENAI_API_KEY='...'
@@ -30,7 +34,7 @@ export GEMINI_API_KEY='...'
 python Examples/audio-agent/audio_agent.py --provider gemini --source Discord
 ```
 
-Provider modes select their required Sonexis format preset automatically. No credential or captured audio is logged or stored unless `--output` is explicitly supplied.
+Provider modes select their required Sonexis format preset automatically. No credential or captured audio is logged or stored unless `--output` is explicitly supplied. Recordings are created as private regular files (`0600`), and symbolic-link targets are refused.
 
 For deterministic offline development, replay a matching PCM16 WAV:
 

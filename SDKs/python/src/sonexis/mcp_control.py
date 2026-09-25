@@ -44,11 +44,7 @@ class SonexisControlTools:
         return {"session": _jsonable(await self.client.status(session_id))}
 
     async def start_capture(self, source: str, format_profile: str = "speech_16k") -> Dict[str, Any]:
-        if not self.allow_capture:
-            raise SonexisError(
-                "capture_control_disabled",
-                "Start the MCP server with --allow-capture to enable audio capture",
-            )
+        self._require_capture_control()
         profiles = {
             "speech_16k": AudioFormat.speech_16k,
             "openai_realtime": AudioFormat.openai_realtime,
@@ -65,4 +61,12 @@ class SonexisControlTools:
         }
 
     async def stop_capture(self, session_id: str) -> Dict[str, Any]:
+        self._require_capture_control()
         return {"session": _jsonable(await self.client.stop(session_id))}
+
+    def _require_capture_control(self) -> None:
+        if not self.allow_capture:
+            raise SonexisError(
+                "capture_control_disabled",
+                "Start the MCP server with --allow-capture to enable capture mutation",
+            )

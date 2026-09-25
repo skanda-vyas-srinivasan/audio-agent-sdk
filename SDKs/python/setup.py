@@ -11,9 +11,12 @@ setup(
     package_data={"sonexis": ["py.typed"]},
     python_requires=">=3.9",
     extras_require={
-        "openai": ["openai[realtime]"],
-        "gemini": ["google-genai"],
+        "openai": ["openai[realtime]>=2; python_version >= '3.10'"],
+        "gemini": ["google-genai>=1; python_version >= '3.10'"],
         "mcp": ["mcp>=2,<3; python_version >= '3.10'"],
-        "ai": ["openai[realtime]", "google-genai"],
+        "ai": [
+            "openai[realtime]>=2; python_version >= '3.10'",
+            "google-genai>=1; python_version >= '3.10'",
+        ],
     },
 )

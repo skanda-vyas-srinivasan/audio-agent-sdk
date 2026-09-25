@@ -39,10 +39,14 @@ class ReplayStream(AsyncIterator[AudioFrame]):
         self.session_id = str(uuid.uuid4())
         self.stream_id = str(uuid.uuid4())
         self._closed = False
+        self._closed_event = asyncio.Event()
+        self._read_task: Optional[asyncio.Task] = None
+        self._close_task: Optional[asyncio.Task] = None
 
     @classmethod
     def from_wav(cls, path: Union[str, Path], *, chunk_frames: int = 1_600,
                  realtime: bool = False) -> "ReplayStream":
+        """Open an uncompressed PCM16 WAV as a deterministic audio source."""
         value = Path(path)
         reader = wave.open(str(value), "rb")
         if reader.getcomptype() != "NONE" or reader.getsampwidth() != 2:
@@ -55,6 +59,7 @@ class ReplayStream(AsyncIterator[AudioFrame]):
     @classmethod
     def from_pcm(cls, path: Union[str, Path], *, format: AudioFormat,
                  chunk_frames: int = 1_600, realtime: bool = False) -> "ReplayStream":
+        """Open headerless PCM using the caller-supplied format."""
         value = Path(path)
         return cls(value.open("rb"), format=format, source_name=value.name,
                    chunk_frames=chunk_frames, realtime=realtime)
@@ -71,12 +76,23 @@ class ReplayStream(AsyncIterator[AudioFrame]):
     async def __anext__(self) -> AudioFrame:
         if self._closed:
             raise StopAsyncIteration
+        if self._read_task is not None and not self._read_task.done():
+            raise RuntimeError("ReplayStream supports one consumer")
         if self._wave_reader is not None:
-            data = await asyncio.to_thread(self._wave_reader.readframes, self.chunk_frames)
+            task = asyncio.create_task(
+                asyncio.to_thread(self._wave_reader.readframes, self.chunk_frames),
+                name="sonexis-replay-read")
         else:
             assert self._handle is not None
             size = self.chunk_frames * self.format.channels * self.format.sample_format.bytes_per_sample
-            data = await asyncio.to_thread(self._handle.read, size)
+            task = asyncio.create_task(
+                asyncio.to_thread(self._handle.read, size), name="sonexis-replay-read")
+        self._read_task = task
+        try:
+            data = await asyncio.shield(task)
+        finally:
+            if task.done() and self._read_task is task:
+                self._read_task = None
         if not data:
             await self.aclose()
             raise StopAsyncIteration
@@ -90,7 +106,12 @@ class ReplayStream(AsyncIterator[AudioFrame]):
             target = self._started_at_ns + timestamp_ns
             delay = (target - time.monotonic_ns()) / 1_000_000_000
             if delay > 0:
-                await asyncio.sleep(delay)
+                try:
+                    await asyncio.wait_for(self._closed_event.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+        if self._closed:
+            raise StopAsyncIteration
         frame = AudioFrame(
             stream_id=self.stream_id,
             sequence=self._sequence,
@@ -108,9 +129,19 @@ class ReplayStream(AsyncIterator[AudioFrame]):
         return frame
 
     async def aclose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        if self._close_task is None:
+            self._closed = True
+            self._closed_event.set()
+            self._close_task = asyncio.create_task(
+                self._finish_close(), name="sonexis-replay-cleanup")
+        await asyncio.shield(self._close_task)
+
+    async def _finish_close(self) -> None:
+        read_task = self._read_task
+        if read_task is not None:
+            await asyncio.gather(read_task, return_exceptions=True)
+            if self._read_task is read_task:
+                self._read_task = None
         if self._wave_reader is not None:
             await asyncio.to_thread(self._wave_reader.close)
         else:

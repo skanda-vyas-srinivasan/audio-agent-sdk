@@ -4,6 +4,7 @@
 import argparse
 import asyncio
 import signal
+import sys
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -60,7 +61,7 @@ async def select_two(client: Sonexis, first: Optional[str], second: Optional[str
     for index, source in enumerate(sources, 1):
         print(f"  [{index}] {source.name} ({source.id})")
     if not first:
-        first = (await asyncio.to_thread(input, "Conversation source number: ")).strip()
+        first = (await console_input("Conversation source number: ")).strip()
         try:
             conversation = sources[int(first) - 1]
         except (ValueError, IndexError) as error:
@@ -68,7 +69,7 @@ async def select_two(client: Sonexis, first: Optional[str], second: Optional[str
     else:
         conversation = await client.get_source(first)
     if not second:
-        second = (await asyncio.to_thread(input, "Media source number: ")).strip()
+        second = (await console_input("Media source number: ")).strip()
         try:
             media = sources[int(second) - 1]
         except (ValueError, IndexError) as error:
@@ -78,6 +79,25 @@ async def select_two(client: Sonexis, first: Optional[str], second: Optional[str
     if conversation.id == media.id:
         raise RuntimeError("Choose two different sources to demonstrate source identity")
     return conversation, media
+
+
+async def console_input(prompt: str) -> str:
+    """Read without leaving an uncancellable executor thread during shutdown."""
+    print(prompt, end="", flush=True)
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    descriptor = sys.stdin.fileno()
+
+    def readable() -> None:
+        loop.remove_reader(descriptor)
+        if not future.done():
+            future.set_result(sys.stdin.readline())
+
+    loop.add_reader(descriptor, readable)
+    try:
+        return await future
+    finally:
+        loop.remove_reader(descriptor)
 
 
 async def reporter(stats: Dict[str, SourceStats], session, done: asyncio.Event) -> None:

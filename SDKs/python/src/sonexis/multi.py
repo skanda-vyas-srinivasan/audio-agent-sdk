@@ -1,8 +1,9 @@
 """Bounded orchestration for independent labeled Sonexis capture streams."""
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
-from typing import AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Deque, Dict, Optional, Set
 
 from .client import CaptureSession, Sonexis, SourceSelector
 from .models import AudioFormat, AudioFrame, AudioSource
@@ -14,6 +15,7 @@ class LabeledAudioFrame:
 
     label: str
     frame: AudioFrame
+    local_dropped_frames_before: int = 0
 
     @property
     def source(self) -> Optional[AudioSource]:
@@ -31,6 +33,10 @@ class LabeledAudioFrame:
     def timestamp_ns(self) -> int:
         return self.frame.timestamp_ns
 
+    @property
+    def discontinuity(self) -> bool:
+        return self.frame.discontinuity or self.local_dropped_frames_before > 0
+
 
 @dataclass(frozen=True)
 class _StreamEnded:
@@ -47,10 +53,16 @@ class MultiSourceSession:
         self.client = client
         self.max_queue_frames = max_queue_frames
         self.dropped_frames = 0
-        self._queue: "asyncio.Queue[object]" = asyncio.Queue(max_queue_frames)
+        self.dropped_frames_by_label: Dict[str, int] = {}
+        self._queues: Dict[str, Deque[LabeledAudioFrame]] = {}
+        self._pending_drops: Dict[str, int] = {}
+        self._terminals: Dict[str, _StreamEnded] = {}
+        self._available = asyncio.Event()
         self._captures: Dict[str, CaptureSession] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
+        self._pending_labels: Set[str] = set()
         self._closed = False
+        self._iterator_active = False
         self._close_task: Optional[asyncio.Task] = None
 
     async def __aenter__(self) -> "MultiSourceSession":
@@ -65,15 +77,26 @@ class MultiSourceSession:
 
     async def add(self, label: str, source: SourceSelector, *,
                   format: AudioFormat = AudioFormat()) -> CaptureSession:
+        """Start one independently buffered capture under a unique application label."""
         if self._closed:
             raise RuntimeError("multi-source session is closed")
-        if not label or label in self._captures:
+        if not label or label in self._captures or label in self._pending_labels:
             raise ValueError(f"capture label must be non-empty and unique: {label!r}")
-        capture = await self.client.capture(source, format=format)
-        self._captures[label] = capture
-        self._tasks[label] = asyncio.create_task(
-            self._pump(label, capture), name=f"sonexis-multi-{label}")
-        return capture
+        self._pending_labels.add(label)
+        try:
+            capture = await self.client.capture(source, format=format)
+            if self._closed:
+                await capture.aclose()
+                raise RuntimeError("multi-source session closed while capture was starting")
+            self._queues[label] = deque()
+            self._pending_drops[label] = 0
+            self.dropped_frames_by_label[label] = 0
+            self._captures[label] = capture
+            self._tasks[label] = asyncio.create_task(
+                self._pump(label, capture), name=f"sonexis-multi-{label}")
+            return capture
+        finally:
+            self._pending_labels.discard(label)
 
     async def remove(self, label: str) -> None:
         capture = self._captures.pop(label, None)
@@ -84,36 +107,67 @@ class MultiSourceSession:
             await capture.aclose()
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+        self._queues.pop(label, None)
+        self._pending_drops.pop(label, None)
+        self._terminals.pop(label, None)
 
     async def _pump(self, label: str, capture: CaptureSession) -> None:
         error: Optional[BaseException] = None
         try:
             async for frame in capture:
-                try:
-                    self._queue.put_nowait(LabeledAudioFrame(label, frame))
-                except asyncio.QueueFull:
+                queue = self._queues.get(label)
+                if queue is None:
+                    return
+                if len(queue) >= self.max_queue_frames:
                     self.dropped_frames += frame.frame_count
+                    self.dropped_frames_by_label[label] += frame.frame_count
+                    self._pending_drops[label] += frame.frame_count
+                    continue
+                dropped = self._pending_drops[label]
+                self._pending_drops[label] = 0
+                queue.append(LabeledAudioFrame(label, frame, dropped))
+                self._available.set()
         except asyncio.CancelledError:
             raise
         except BaseException as caught:
             error = caught
         finally:
-            await self._queue.put(_StreamEnded(label, error))
+            self._terminals[label] = _StreamEnded(label, error)
+            self._available.set()
 
     async def frames(self) -> AsyncIterator[LabeledAudioFrame]:
         """Yield labeled frames until all members end or the session is closed."""
-        while not self._closed:
-            if not self._tasks:
-                return
-            item = await self._queue.get()
-            if isinstance(item, _StreamEnded):
-                self._tasks.pop(item.label, None)
-                self._captures.pop(item.label, None)
-                if item.error is not None:
-                    raise item.error
-                continue
-            assert isinstance(item, LabeledAudioFrame)
-            yield item
+        if self._iterator_active:
+            raise RuntimeError("multi-source frames already have a consumer")
+        self._iterator_active = True
+        try:
+            while not self._closed:
+                if not self._tasks:
+                    return
+                for label in tuple(self._tasks):
+                    queue = self._queues.get(label)
+                    if queue:
+                        yield queue.popleft()
+
+                finished = [label for label in self._terminals
+                            if not self._queues.get(label)]
+                for label in finished:
+                    terminal = self._terminals.pop(label)
+                    self._tasks.pop(label, None)
+                    self._captures.pop(label, None)
+                    self._queues.pop(label, None)
+                    self._pending_drops.pop(label, None)
+                    if terminal.error is not None:
+                        raise terminal.error
+                if not self._tasks:
+                    return
+
+                self._available.clear()
+                if any(self._queues.get(label) for label in self._tasks) or self._terminals:
+                    continue
+                await self._available.wait()
+        finally:
+            self._iterator_active = False
 
     async def aclose(self) -> None:
         if self._close_task is None:

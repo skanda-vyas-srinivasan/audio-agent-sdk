@@ -30,6 +30,7 @@ class Sonexis:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._reader_task: Optional[asyncio.Task] = None
+        self._connect_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
         self._pending: Dict[str, asyncio.Future] = {}
         self._discarded_request_ids: Set[str] = set()
@@ -45,6 +46,19 @@ class Sonexis:
         await self.close()
 
     async def connect(self, *, reconnect_attempts: int = 0) -> Handshake:
+        if self._writer is not None and self.handshake is not None:
+            return self.handshake
+        if self._connect_task is None:
+            self._connect_task = asyncio.create_task(
+                self._finish_connect(reconnect_attempts), name="sonexis-connect")
+        task = self._connect_task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._connect_task is task:
+                self._connect_task = None
+
+    async def _finish_connect(self, reconnect_attempts: int) -> Handshake:
         if self._close_task is not None:
             await asyncio.shield(self._close_task)
             self._close_task = None
@@ -68,7 +82,8 @@ class Sonexis:
                 self.handshake = handshake
                 return handshake
             except asyncio.CancelledError:
-                await self.close()
+                if self._close_task is None:
+                    await self.close()
                 raise
             except BaseException as error:
                 if isinstance(error, (OSError, SonexisError)):
@@ -89,6 +104,11 @@ class Sonexis:
         return await self.connect(reconnect_attempts=attempts)
 
     async def close(self) -> None:
+        connect_task = self._connect_task
+        if (connect_task is not None and connect_task is not asyncio.current_task()
+                and not connect_task.done()):
+            connect_task.cancel()
+            await asyncio.gather(connect_task, return_exceptions=True)
         if self._close_task is None:
             self._close_task = asyncio.create_task(
                 self._finish_close(), name="sonexis-client-cleanup")
@@ -127,6 +147,7 @@ class Sonexis:
         self.handshake = None
 
     async def sources(self) -> List[AudioSource]:
+        """Return the Runtime's current application-source snapshot."""
         response = await self._request("list_sources")
         try:
             return [AudioSource.from_wire(value) for value in response["sources"]]
@@ -267,6 +288,7 @@ class Sonexis:
 
     async def capture(self, source: SourceSelector, *,
                       format: AudioFormat = AudioFormat()) -> "CaptureSession":
+        """Resolve one source, start capture, and attach its binary PCM stream."""
         resolved = await self.get_source(source)
         response = await self._request("start_capture", source_id=resolved.id,
                                        format=format.to_wire())
@@ -296,6 +318,7 @@ class Sonexis:
             raise SonexisProtocolError("invalid_session", "Runtime sent a malformed session") from error
 
     async def events(self, event_types: Optional[Iterable[str]] = None) -> "EventSubscription":
+        """Subscribe to a bounded Runtime lifecycle event stream."""
         params: Dict[str, Any] = {}
         if event_types is not None:
             params["event_types"] = list(event_types)
@@ -452,29 +475,27 @@ class CaptureSession(AsyncIterator[AudioFrame]):
             raise StopAsyncIteration
         try:
             frame = await read_frame(self._reader, uuid.UUID(self.info.stream_id), self._previous_sequence)
-        except BaseException:
+        except BaseException as error:
+            intentional_close = self._closed
             await self.aclose()
+            if intentional_close and not isinstance(error, asyncio.CancelledError):
+                raise StopAsyncIteration
             raise
         self._previous_sequence = frame.sequence
         if frame.frame_count == 0:
             await self.aclose(stop_runtime=False)
-            try:
-                status = await self.client.status(self.info.id)
-                assert isinstance(status, CaptureInfo)
-                self.terminal_info = status
-                if status.state == "failed":
-                    failure = status.error
-                    self.terminal_error = CaptureFailedError(
-                        failure.code if failure else "capture_failed",
-                        failure.message if failure else "Capture failed",
-                        retryable=failure.retryable if failure else False,
-                        details=failure.details if failure else None,
-                    )
-                    raise self.terminal_error
-            except (SonexisConnectionError, SonexisProtocolError):
-                # EOS itself remains authoritative when terminal status cannot
-                # be queried. Abrupt sockets still fail in read_frame().
-                pass
+            status = await self.client.status(self.info.id)
+            assert isinstance(status, CaptureInfo)
+            self.terminal_info = status
+            if status.state == "failed":
+                failure = status.error
+                self.terminal_error = CaptureFailedError(
+                    failure.code if failure else "capture_failed",
+                    failure.message if failure else "Capture failed",
+                    retryable=failure.retryable if failure else False,
+                    details=failure.details if failure else None,
+                )
+                raise self.terminal_error
             raise StopAsyncIteration
         return replace(
             frame,
@@ -539,12 +560,20 @@ class EventSubscription(AsyncIterator[RuntimeEvent]):
             raise StopAsyncIteration
         try:
             line = await self._reader.readline()
+        except (ValueError, asyncio.LimitOverrunError) as error:
+            await self.aclose()
+            raise SonexisProtocolError(
+                "invalid_event", "Event exceeded the 64 KiB framing limit") from error
         except BaseException:
             await self.aclose()
             raise
         if not line:
+            if self._closed:
+                raise StopAsyncIteration
             await self.aclose()
-            raise StopAsyncIteration
+            raise SonexisConnectionError(
+                "event_stream_closed", "Runtime event stream closed unexpectedly",
+                retryable=True)
         if len(line) > MAX_CONTROL_BYTES or not line.endswith(b"\n"):
             await self.aclose()
             raise SonexisProtocolError("invalid_event", "Invalid event framing")

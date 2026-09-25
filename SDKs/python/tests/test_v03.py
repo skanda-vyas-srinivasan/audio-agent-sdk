@@ -1,17 +1,22 @@
 import asyncio
+import importlib.util
 import os
 import struct
 import sys
 import tempfile
+import threading
 import unittest
 import wave
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from sonexis import (AmbiguousSourceError, AudioFormat, AudioFrame, AudioSource,
-                     LatencyTracker, ReplayStream, SampleFormat, SourceNotFoundError,
-                     measure_activity)
+                     CaptureInfo, CaptureSession, EventSubscription, LatencyTracker,
+                     MultiSourceSession, ReplayStream, SampleFormat, SessionMetrics,
+                     SonexisProtocolError, SourceNotFoundError, measure_activity)
 from sonexis.diagnostics import send_receipt
 from sonexis.mcp_control import SonexisControlTools
 from sonexis.providers import GeminiLiveSink, OpenAIRealtimeSink
@@ -55,6 +60,12 @@ class V03SDKTests(unittest.IsolatedAsyncioTestCase):
                              {"app.chat.one", "app.chat.two"})
             with self.assertRaises(SourceNotFoundError):
                 await client.get_source("missing")
+
+    async def test_concurrent_connect_calls_share_one_handshake(self):
+        client = Sonexis(self.runtime.control_path)
+        first, second = await asyncio.gather(client.connect(), client.connect())
+        self.assertIs(first, second)
+        await client.close()
 
     async def test_wait_for_source_uses_fresh_snapshot_and_times_out(self):
         async with Sonexis(self.runtime.control_path) as client:
@@ -125,6 +136,158 @@ class ReplayAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await replay.__anext__()
 
+    async def test_cancelled_replay_read_finishes_before_file_close(self):
+        class BlockingHandle:
+            def __init__(self):
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.closed = False
+
+            def read(self, _size):
+                self.started.set()
+                self.release.wait()
+                return b""
+
+            def close(self):
+                self.closed = True
+
+        handle = BlockingHandle()
+        replay = ReplayStream(handle, format=AudioFormat.speech_16k(),
+                              source_name="blocking")
+        read = asyncio.create_task(replay.__anext__())
+        self.assertTrue(await asyncio.to_thread(handle.started.wait, 0.2))
+        read.cancel()
+        await asyncio.gather(read, return_exceptions=True)
+        closing = asyncio.create_task(replay.aclose())
+        await asyncio.sleep(0.01)
+        self.assertFalse(handle.closed)
+        handle.release.set()
+        await closing
+        self.assertTrue(handle.closed)
+
+    async def test_close_wakes_realtime_replay_pacing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paced.pcm"
+            path.write_bytes(b"\0\0" * 32_000)
+            replay = ReplayStream.from_pcm(
+                path, format=AudioFormat.speech_16k(), chunk_frames=16_000, realtime=True)
+            await replay.__anext__()
+            pending = asyncio.create_task(replay.__anext__())
+            await asyncio.sleep(0.01)
+            await replay.aclose()
+            with self.assertRaises(StopAsyncIteration):
+                await asyncio.wait_for(pending, timeout=0.1)
+
+
+class DelayedCapture:
+    def __init__(self):
+        self.closed = False
+
+    async def aclose(self):
+        self.closed = True
+
+
+class DelayedCaptureClient:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.captures = []
+
+    async def capture(self, _source, *, format):
+        capture = DelayedCapture()
+        self.captures.append(capture)
+        self.started.set()
+        await self.release.wait()
+        return capture
+
+
+class MultiSourceRaceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_duplicate_label_is_rejected_before_second_capture(self):
+        client = DelayedCaptureClient()
+        group = MultiSourceSession(client)
+        first = asyncio.create_task(group.add("media", "one"))
+        await client.started.wait()
+        with self.assertRaises(ValueError):
+            await group.add("media", "two")
+        self.assertEqual(len(client.captures), 1)
+        client.release.set()
+        capture = await first
+        await group.aclose()
+        self.assertTrue(capture.closed)
+
+    async def test_close_racing_capture_start_closes_late_capture(self):
+        client = DelayedCaptureClient()
+        group = MultiSourceSession(client)
+        add = asyncio.create_task(group.add("media", "one"))
+        await client.started.wait()
+        await group.aclose()
+        client.release.set()
+        with self.assertRaises(RuntimeError):
+            await add
+        self.assertTrue(client.captures[0].closed)
+        self.assertEqual(group.labels, ())
+
+
+class StreamShutdownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_close_wakes_blocked_capture_and_event_iterators(self):
+        with tempfile.TemporaryDirectory() as directory:
+            async def hold(reader, writer):
+                await reader.read()
+                writer.close()
+                await writer.wait_closed()
+
+            capture_path = str(Path(directory) / "capture.sock")
+            event_path = str(Path(directory) / "event.sock")
+            capture_server = await asyncio.start_unix_server(hold, capture_path)
+            event_server = await asyncio.start_unix_server(hold, event_path)
+            client = Sonexis("/unused")
+            source_value = AudioSource("app.test", "Test", "application", [1],
+                                       "test", "running", True, True, None)
+            info = CaptureInfo("session", "00112233-4455-6677-8899-aabbccddeeff",
+                               source_value.id, "capturing", AudioFormat.speech_16k(),
+                               capture_path, 0, SessionMetrics())
+            capture = CaptureSession(client, info, source_value)
+            await capture._open()
+            capture_read = asyncio.create_task(capture.__anext__())
+            await asyncio.sleep(0)
+            await capture.aclose(stop_runtime=False)
+            with self.assertRaises(StopAsyncIteration):
+                await capture_read
+
+            events = EventSubscription(client, {
+                "id": "events", "event_socket_path": event_path, "event_types": []})
+            await events._open()
+            event_read = asyncio.create_task(events.__anext__())
+            await asyncio.sleep(0)
+            await events.aclose(unsubscribe=False)
+            with self.assertRaises(StopAsyncIteration):
+                await event_read
+
+            capture_server.close()
+            event_server.close()
+            await capture_server.wait_closed()
+            await event_server.wait_closed()
+
+    async def test_oversized_event_is_structured_protocol_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "events.sock")
+
+            async def oversized(_reader, writer):
+                writer.write(b"x" * 70_000)
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_unix_server(oversized, path)
+            events = EventSubscription(Sonexis("/unused"), {
+                "id": "events", "event_socket_path": path, "event_types": []})
+            await events._open()
+            with self.assertRaises(SonexisProtocolError) as error:
+                await events.__anext__()
+            self.assertEqual(error.exception.code, "invalid_event")
+            server.close()
+            await server.wait_closed()
+
 
 class FakeOpenAIInput:
     def __init__(self):
@@ -157,14 +320,15 @@ class FakeOpenAIConnection:
 class FakeGeminiSession:
     def __init__(self):
         self.values = []
+        self.received = []
 
     async def send_realtime_input(self, **value):
         self.values.append(value)
 
     def receive(self):
         async def values():
-            if False:
-                yield None
+            for value in self.received:
+                yield value
         return values()
 
 
@@ -182,6 +346,9 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         receipt = await sink.send_audio(self.frame(AudioFormat.openai_realtime()))
         self.assertEqual(receipt.provider, "openai")
         self.assertEqual(len(connection.session.input_audio.values), 1)
+        with self.assertRaises(Exception) as sequence:
+            await sink.send_audio(self.frame(AudioFormat.openai_realtime()))
+        self.assertEqual(sequence.exception.code, "provider_sequence_error")
         with self.assertRaises(Exception) as invalid:
             await sink.send_audio(self.frame(AudioFormat.gemini_live()))
         self.assertEqual(invalid.exception.code, "unsupported_provider_format")
@@ -193,8 +360,51 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         sink = GeminiLiveSink(session, blob_factory=lambda **value: value)
         await sink.send_audio(self.frame(AudioFormat.gemini_live()))
         self.assertEqual(session.values[0]["audio"]["mime_type"], "audio/pcm;rate=16000")
+        session.received.append(SimpleNamespace(server_content=SimpleNamespace(
+            output_transcription=SimpleNamespace(text="hello"), model_turn=None)))
+        event = await sink.events().__anext__()
+        self.assertEqual((event.type, event.text), ("output_transcription", "hello"))
         await sink.aclose()
         self.assertTrue(session.values[-1]["audio_stream_end"])
+
+    async def test_provider_stream_affinity_and_bounded_close(self):
+        connection = FakeOpenAIConnection()
+
+        async def never_close():
+            await asyncio.Event().wait()
+
+        connection.session.close = never_close
+        sink = OpenAIRealtimeSink(connection, close_timeout=0.01)
+        first = self.frame(AudioFormat.openai_realtime())
+        await sink.send_audio(first)
+        with self.assertRaises(Exception) as mismatch:
+            await sink.send_audio(replace(first, stream_id="another", sequence=2))
+        self.assertEqual(mismatch.exception.code, "provider_stream_mismatch")
+        await asyncio.wait_for(sink.aclose(), timeout=0.1)
+
+    async def test_provider_rejects_bad_payload_and_close_racing_send(self):
+        connection = FakeOpenAIConnection()
+        sink = OpenAIRealtimeSink(connection)
+        good = self.frame(AudioFormat.openai_realtime())
+        with self.assertRaises(Exception) as invalid:
+            await sink.send_audio(replace(good, data=b"\0\0"))
+        self.assertEqual(invalid.exception.code, "invalid_audio")
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_append(*, audio):
+            started.set()
+            await release.wait()
+
+        connection.session.input_audio.append = blocked_append
+        sending = asyncio.create_task(sink.send_audio(good))
+        await started.wait()
+        await sink.aclose()
+        release.set()
+        with self.assertRaises(Exception) as closed:
+            await sending
+        self.assertEqual(closed.exception.code, "provider_closed")
 
 
 class FakeControlClient:
@@ -230,11 +440,40 @@ class MCPControlTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception) as disabled:
             await tools.start_capture("Test")
         self.assertEqual(disabled.exception.code, "capture_control_disabled")
+        with self.assertRaises(Exception) as stop_disabled:
+            await tools.stop_capture("session")
+        self.assertEqual(stop_disabled.exception.code, "capture_control_disabled")
         enabled = SonexisControlTools(client, allow_capture=True)
         result = await enabled.start_capture("Test", "openai_realtime")
         self.assertEqual(client.created[1], AudioFormat.openai_realtime())
         self.assertIn("binary data plane", result["audio_delivery"])
         self.assertNotIn("pcm", result["session"])
+
+
+class OutputSecurityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).parents[3] / "Examples/audio-agent/audio_agent.py"
+        spec = importlib.util.spec_from_file_location("sonexis_audio_agent", path)
+        assert spec is not None and spec.loader is not None
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def test_recording_is_private_and_symlinks_are_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "capture.pcm"
+            writer = self.module.OutputWriter(output, AudioFormat.speech_16k())
+            writer.write(b"\0\0")
+            writer.close()
+            self.assertEqual(os.stat(output).st_mode & 0o777, 0o600)
+
+            target = Path(directory) / "target.pcm"
+            target.write_bytes(b"private")
+            link = Path(directory) / "link.pcm"
+            link.symlink_to(target)
+            with self.assertRaises(OSError):
+                self.module.OutputWriter(link, AudioFormat.speech_16k())
+            self.assertEqual(target.read_bytes(), b"private")
 
 
 if __name__ == "__main__":

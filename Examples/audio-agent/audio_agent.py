@@ -3,6 +3,8 @@
 
 import argparse
 import asyncio
+import os
+import stat
 import signal
 import sys
 import time
@@ -80,15 +82,29 @@ class OutputWriter:
         self._wav = None
         if path is None:
             return
+        flags = os.O_WRONLY | os.O_CREAT
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_uid != os.geteuid():
+            os.close(descriptor)
+            raise ValueError("Output must be a regular file owned by the current user")
+        os.fchmod(descriptor, 0o600)
+        os.ftruncate(descriptor, 0)
+        output = os.fdopen(descriptor, "wb")
         if path.suffix.lower() == ".wav":
             if audio_format.sample_format is not SampleFormat.PCM_S16LE:
+                output.close()
                 raise ValueError("WAV output requires PCM16 audio")
-            self._wav = wave.open(str(path), "wb")
+            self._wav = wave.open(output, "wb")
             self._wav.setnchannels(audio_format.channels)
             self._wav.setsampwidth(2)
             self._wav.setframerate(audio_format.sample_rate)
         else:
-            self._raw = path.open("wb")
+            self._raw = output
 
     def write(self, data: bytes) -> None:
         if self._wav is not None:
@@ -126,7 +142,7 @@ class StreamStats:
         if latency is not None:
             timing = (f"latency_ms(p50/p95/p99)={latency.p50_ms:.2f}/"
                       f"{latency.p95_ms:.2f}/{latency.p99_ms:.2f}")
-        return (f"duration={elapsed:.1f}s packets={self.packets} frames={self.frames} "
+        return (f"wall_seconds={elapsed:.1f} packets={self.packets} frames={self.frames} "
                 f"bytes={self.bytes} dropped={self.dropped} {timing}")
 
 
@@ -182,6 +198,8 @@ async def print_provider_events(sink: RealtimeAudioSink, done: asyncio.Event) ->
         async for event in sink.events():
             if event.text:
                 print(f"\nAgent ({event.provider}): {event.text}")
+            elif event.audio:
+                print(f"\nAgent ({event.provider}): received {len(event.audio)} audio bytes")
             elif event.type not in {"session.started", "session.updated"}:
                 print(f"\nProvider event: {event.type}")
     except ProviderError as error:
@@ -255,7 +273,7 @@ async def consume(
             if done.is_set():
                 return "quit"
             stats.observe(frame)
-            output.write(frame.data)
+            await asyncio.to_thread(output.write, frame.data)
             await sink.send_audio(frame)
     except asyncio.CancelledError:
         raise
@@ -348,19 +366,21 @@ async def main() -> None:
         loop.add_signal_handler(sig, done.set)
 
     sink = await create_sink(args)
-    output = OutputWriter(args.output, sink.required_format)
-    provider_events = asyncio.create_task(print_provider_events(sink, done))
     try:
-        if args.replay:
-            await run_replay(args, sink, output, done)
-        else:
-            await run_live(args, sink, output, done)
+        output = OutputWriter(args.output, sink.required_format)
+        provider_events = asyncio.create_task(print_provider_events(sink, done))
+        try:
+            if args.replay:
+                await run_replay(args, sink, output, done)
+            else:
+                await run_live(args, sink, output, done)
+        finally:
+            done.set()
+            provider_events.cancel()
+            await asyncio.gather(provider_events, return_exceptions=True)
+            output.close()
     finally:
-        done.set()
         await sink.aclose()
-        provider_events.cancel()
-        await asyncio.gather(provider_events, return_exceptions=True)
-        output.close()
 
 
 if __name__ == "__main__":

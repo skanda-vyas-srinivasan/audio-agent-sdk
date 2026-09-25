@@ -36,11 +36,13 @@ class LatencyTracker:
         self._samples: Deque[int] = deque(maxlen=max_samples)
 
     def observe(self, frame: AudioFrame) -> None:
+        """Add one frame's estimated local Sonexis latency, when available."""
         value = frame.estimated_sonexis_latency_ns
         if value is not None:
             self._samples.append(value)
 
     def summary(self) -> Optional[LatencySummary]:
+        """Return nearest-rank percentiles for the bounded sample window."""
         if not self._samples:
             return None
         ordered = sorted(self._samples)

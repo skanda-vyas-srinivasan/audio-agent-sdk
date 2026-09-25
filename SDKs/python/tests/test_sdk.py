@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from sonexis import (AudioFormat, CaptureInfo, CaptureSession, EventSubscription,
-                     SampleFormat, SessionMetrics, Sonexis, SonexisError,
+                     SampleFormat, SessionMetrics, Sonexis, SonexisConnectionError, SonexisError,
                      SonexisProtocolError)
 from sonexis.protocol import FLAG_DISCONTINUITY, FLAG_EOS, PCM_HEADER, PCM_MAGIC, read_frame
 
@@ -181,8 +181,9 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
                 event = await events.__anext__()
                 self.assertEqual(event.type, "runtime_warning")
                 self.assertEqual(event.message, "synthetic")
-                with self.assertRaises(StopAsyncIteration):
+                with self.assertRaises(SonexisConnectionError) as ended:
                     await events.__anext__()
+                self.assertEqual(ended.exception.code, "event_stream_closed")
             self.assertEqual(self.runtime.commands.count("unsubscribe_events"), 1)
 
     async def test_concurrent_requests_are_correlated(self):

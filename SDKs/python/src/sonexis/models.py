@@ -205,6 +205,11 @@ class RuntimeEvent:
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "RuntimeEvent":
+        if (value.get("protocol_version") != 2
+                or not isinstance(value.get("event_id"), str)
+                or not isinstance(value.get("type"), str)
+                or not isinstance(value.get("timestamp_nanoseconds"), int)):
+            raise ValueError("invalid Runtime event envelope")
         return cls(
             str(value["event_id"]), str(value["type"]),
             int(value["timestamp_nanoseconds"]), value.get("source_id"),

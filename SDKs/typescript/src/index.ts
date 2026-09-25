@@ -91,6 +91,7 @@ export interface DecodedAudioFrame {
   data: Buffer;
   discontinuity: boolean;
   droppedFramesBefore: number;
+  endOfStream: boolean;
 }
 
 /** A decoded PCM frame enriched with capture-session and source identity. */
@@ -166,6 +167,14 @@ export class AmbiguousSourceError extends SonexisError {
   }
 }
 
+export class CaptureFailedError extends SonexisError {
+  constructor(message: string, code = "capture_failed", retryable = false,
+              details: Record<string, string> = {}) {
+    super(code, message, retryable, details);
+    this.name = "CaptureFailedError";
+  }
+}
+
 /** Filter an already-fetched source snapshot without another Runtime request. */
 export function filterSources(sources: readonly AudioSource[], filter: SourceFilter = {}): AudioSource[] {
   const availableOnly = filter.availableOnly ?? true;
@@ -235,17 +244,27 @@ function openSocket(path: string): Promise<Socket> {
   });
 }
 
+function defaultSocketPath(): string {
+  const configured = process.env.SONEXIS_RUNTIME_SOCKET;
+  if (configured) return configured;
+  if (typeof process.getuid !== "function") {
+    throw new SonexisError("unsupported_platform", "Sonexis Runtime requires macOS/Unix sockets");
+  }
+  return `/tmp/sonexis-runtime-${process.getuid()}/control.sock`;
+}
+
 export class Sonexis extends EventEmitter {
   readonly socketPath: string;
   handshake?: Handshake;
   private socket?: Socket;
   private controlBuffer = Buffer.alloc(0);
+  private connectPromise?: Promise<Handshake>;
+  private readonly discardedRequestIds = new Set<string>();
   private readonly pending = new Map<string, {
     resolve: (value: WireResponse) => void; reject: (error: Error) => void;
   }>();
 
-  constructor(socketPath = process.env.SONEXIS_RUNTIME_SOCKET
-      ?? `/tmp/sonexis-runtime-${process.getuid()}/control.sock`) {
+  constructor(socketPath = defaultSocketPath()) {
     super();
     this.socketPath = socketPath;
   }
@@ -258,6 +277,12 @@ export class Sonexis extends EventEmitter {
 
   async connect(): Promise<Handshake> {
     if (this.socket && this.handshake) return this.handshake;
+    this.connectPromise ??= this.finishConnect();
+    try { return await this.connectPromise; }
+    finally { this.connectPromise = undefined; }
+  }
+
+  private async finishConnect(): Promise<Handshake> {
     const socket = await openSocket(this.socketPath);
     this.socket = socket;
     socket.on("data", (chunk) => this.consumeControl(chunk));
@@ -285,6 +310,7 @@ export class Sonexis extends EventEmitter {
     this.socket = undefined;
     this.handshake = undefined;
     this.controlBuffer = Buffer.alloc(0);
+    this.discardedRequestIds.clear();
     this.failPending(new SonexisError("disconnected", "Client closed", true));
     if (socket && !socket.destroyed) await new Promise<void>((resolve) => {
       socket.once("close", resolve);
@@ -377,7 +403,8 @@ export class Sonexis extends EventEmitter {
     return new MultiSourceSession(this, options.maxQueueFrames ?? 128);
   }
 
-  private async request(command: string, fields: Record<string, unknown> = {}): Promise<WireResponse> {
+  private async request(command: string, fields: Record<string, unknown> = {},
+                        timeoutMs = 10_000): Promise<WireResponse> {
     if (!this.socket) throw new SonexisError("not_connected", "Connect first");
     const requestId = randomUUID();
     const request = { message_type: "request", protocol_version: 2,
@@ -385,7 +412,19 @@ export class Sonexis extends EventEmitter {
     const payload = Buffer.from(`${JSON.stringify(request)}\n`);
     if (payload.length > 65536) throw new SonexisError("message_too_large", "Request exceeds 64 KiB");
     const response = new Promise<WireResponse>((resolve, reject) => {
-      this.pending.set(requestId, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(requestId)) return;
+        this.discardedRequestIds.add(requestId);
+        if (this.discardedRequestIds.size > 1024) {
+          const oldest = this.discardedRequestIds.values().next().value as string | undefined;
+          if (oldest !== undefined) this.discardedRequestIds.delete(oldest);
+        }
+        reject(new SonexisError("request_timeout", `${command} timed out`, true));
+      }, timeoutMs);
+      this.pending.set(requestId, {
+        resolve: (value) => { clearTimeout(timer); resolve(value); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
     });
     this.socket.write(payload);
     return response;
@@ -421,7 +460,12 @@ export class Sonexis extends EventEmitter {
         this.socket?.destroy(); return;
       }
       const pending = this.pending.get(response.request_id);
-      if (!pending) { this.failPending(new SonexisError("unknown_response", "Unknown response ID")); return; }
+      if (!pending && this.discardedRequestIds.delete(response.request_id)) continue;
+      if (!pending) {
+        this.failPending(new SonexisError("unknown_response", "Unknown response ID"));
+        this.socket?.destroy();
+        return;
+      }
       this.pending.delete(response.request_id);
       if (!response.ok) {
         const error = response.error;
@@ -442,6 +486,7 @@ export class Sonexis extends EventEmitter {
     this.socket = undefined;
     this.handshake = undefined;
     this.controlBuffer = Buffer.alloc(0);
+    this.discardedRequestIds.clear();
     this.failPending(error);
   }
 
@@ -464,11 +509,12 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
   private waiters: Array<{ resolve: (value: IteratorResult<AudioFrame>) => void;
     reject: (error: Error) => void }> = [];
   private ended = false;
-  private cleaned = false;
+  private cleanupPromise?: Promise<void>;
   private terminalError?: Error;
   private closing = false;
   private sawEndOfStream = false;
   private previousSequence?: bigint;
+  private iteratorActive = false;
 
   private constructor(private readonly client: Sonexis, readonly info: CaptureInfo,
                       readonly source: AudioSource, private readonly socket: Socket) { super(); }
@@ -482,7 +528,10 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
       const truncated = !stream.closing && !stream.sawEndOfStream
         ? new SonexisError("truncated_pcm_stream", "Audio stream closed without EOS") : undefined;
       if (truncated) stream.emit("streamError", truncated);
-      stream.finish(truncated); void stream.cleanupRuntime();
+      if (!stream.sawEndOfStream) {
+        stream.finish(truncated);
+        void stream.cleanupRuntime();
+      }
     });
     socket.on("error", (error) => { stream.emit("streamError", error); stream.finish(error); });
     return stream;
@@ -497,11 +546,18 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
 
 
   async *[Symbol.asyncIterator](): AsyncIterator<AudioFrame> {
+    if (this.iteratorActive) {
+      throw new SonexisError("consumer_exists", "Audio stream already has an iterator");
+    }
+    this.iteratorActive = true;
     try {
       while (true) {
         if (this.queue.length) {
           const frame = this.queue.shift()!;
-          if (this.queue.length < 32) this.socket.resume();
+          if (this.queue.length < 32) {
+            this.socket.resume();
+            this.consume(Buffer.alloc(0));
+          }
           yield frame;
         }
         else if (this.ended) {
@@ -516,6 +572,7 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
         }
       }
     } finally {
+      this.iteratorActive = false;
       await this.close();
     }
   }
@@ -523,6 +580,10 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
   private consume(chunk: Buffer): void {
     this.buffer = Buffer.concat([this.buffer, chunk]);
     while (this.buffer.length >= 64) {
+      if (this.queue.length >= 64 && this.waiters.length === 0) {
+        this.socket.pause();
+        return;
+      }
       const payloadSize = this.buffer.readUInt32BE(12);
       if (payloadSize > 512 * 1024) {
         const error = new SonexisError("invalid_pcm", "Payload too large");
@@ -549,14 +610,35 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
         receivedAtNs: process.hrtime.bigint(),
       };
       this.previousSequence = frame.sequence;
-      if (frame.frameCount === 0) { this.sawEndOfStream = true; this.finish(); return; }
+      if (frame.endOfStream) {
+        this.sawEndOfStream = true;
+        this.socket.pause();
+        void this.finishFromEndOfStream();
+        return;
+      }
       this.emit("audio", frame);
       const waiter = this.waiters.shift();
       if (waiter) waiter.resolve({ value: frame, done: false });
-      else if (this.listenerCount("audio") === 0) {
+      else if (this.listenerCount("audio") === 0 || this.iteratorActive) {
         this.queue.push(frame);
         if (this.queue.length >= 64) this.socket.pause();
       }
+    }
+  }
+
+  private async finishFromEndOfStream(): Promise<void> {
+    try {
+      const status = await this.client.status(this.info.id);
+      if (status.state === "failed") {
+        const failure = status.error;
+        this.finish(new CaptureFailedError(
+          failure?.message ?? "Capture failed", failure?.code ?? "capture_failed",
+          failure?.retryable ?? false, failure?.details ?? {}));
+      } else this.finish();
+    } catch (error) {
+      this.finish(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      void this.cleanupRuntime();
     }
   }
 
@@ -570,10 +652,12 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
     }
   }
 
-  private async cleanupRuntime(): Promise<void> {
-    if (this.cleaned) return;
-    this.cleaned = true;
-    try { await this.client.cleanupCapture(this.info.id); } catch { /* control teardown is authoritative */ }
+  private cleanupRuntime(): Promise<void> {
+    this.cleanupPromise ??= (async () => {
+      try { await this.client.cleanupCapture(this.info.id); }
+      catch { /* control teardown is authoritative */ }
+    })();
+    return this.cleanupPromise;
   }
 }
 
@@ -584,6 +668,8 @@ export interface LabeledAudioFrame {
   sessionId: string;
   streamId: string;
   timestampNs: bigint;
+  localDroppedFramesBefore: number;
+  discontinuity: boolean;
 }
 
 interface MultiSourceEnd {
@@ -595,11 +681,13 @@ interface MultiSourceEnd {
 export class MultiSourceSession {
   readonly maxQueueFrames: number;
   droppedFrames = 0;
+  readonly droppedFramesByLabel = new Map<string, number>();
   private readonly captures = new Map<string, CaptureStream>();
   private readonly pumps = new Map<string, Promise<void>>();
   private readonly pendingLabels = new Set<string>();
-  private readonly queue: LabeledAudioFrame[] = [];
-  private readonly ends: MultiSourceEnd[] = [];
+  private readonly queues = new Map<string, LabeledAudioFrame[]>();
+  private readonly pendingDrops = new Map<string, number>();
+  private readonly ends = new Map<string, MultiSourceEnd>();
   private readonly waiters: Array<() => void> = [];
   private closed = false;
   private iteratorActive = false;
@@ -629,6 +717,9 @@ export class MultiSourceSession {
         await capture.close();
         throw new SonexisError("session_closed", "Multi-source session closed during capture");
       }
+      this.queues.set(label, []);
+      this.pendingDrops.set(label, 0);
+      this.droppedFramesByLabel.set(label, 0);
       this.captures.set(label, capture);
       const pump = this.pump(label, capture);
       this.pumps.set(label, pump);
@@ -645,6 +736,9 @@ export class MultiSourceSession {
     this.pumps.delete(label);
     if (capture) await capture.close();
     if (pump) await pump;
+    this.queues.delete(label);
+    this.pendingDrops.delete(label);
+    this.ends.delete(label);
     this.wake();
   }
 
@@ -655,15 +749,25 @@ export class MultiSourceSession {
     this.iteratorActive = true;
     try {
       while (!this.closed) {
-        const frame = this.queue.shift();
-        if (frame) {
-          yield frame;
-          continue;
+        for (const [label] of this.captures) {
+          const frame = this.queues.get(label)?.shift();
+          if (frame) yield frame;
         }
-        const end = this.ends.shift();
-        if (end?.error) throw end.error;
+
+        for (const [label, end] of [...this.ends]) {
+          if (this.queues.get(label)?.length) continue;
+          this.ends.delete(label);
+          this.captures.delete(label);
+          this.pumps.delete(label);
+          this.queues.delete(label);
+          this.pendingDrops.delete(label);
+          if (end.error) throw end.error;
+        }
         if (!this.captures.size) return;
-        await new Promise<void>((resolve) => this.waiters.push(resolve));
+        await new Promise<void>((resolve) => {
+          this.waiters.push(resolve);
+          if (this.hasReadyItem()) this.wake();
+        });
       }
     } finally {
       this.iteratorActive = false;
@@ -684,6 +788,9 @@ export class MultiSourceSession {
     await Promise.allSettled(captures.map((capture) => capture.close()));
     await Promise.allSettled([...this.pumps.values()]);
     this.pumps.clear();
+    this.queues.clear();
+    this.pendingDrops.clear();
+    this.ends.clear();
     for (const waiter of this.waiters.splice(0)) waiter();
   }
 
@@ -692,26 +799,38 @@ export class MultiSourceSession {
     try {
       for await (const frame of capture) {
         if (this.closed || this.captures.get(label) !== capture) break;
-        if (this.queue.length >= this.maxQueueFrames) {
-          const dropped = this.queue.shift();
-          this.droppedFrames += dropped?.frame.frameCount ?? 0;
+        const queue = this.queues.get(label);
+        if (!queue) break;
+        if (queue.length >= this.maxQueueFrames) {
+          this.droppedFrames += frame.frameCount;
+          this.droppedFramesByLabel.set(
+            label, (this.droppedFramesByLabel.get(label) ?? 0) + frame.frameCount);
+          this.pendingDrops.set(label, (this.pendingDrops.get(label) ?? 0) + frame.frameCount);
+          continue;
         }
-        this.queue.push({ label, frame, source: frame.source, sessionId: frame.sessionId,
-          streamId: frame.streamId, timestampNs: frame.timestampNs });
+        const localDroppedFramesBefore = this.pendingDrops.get(label) ?? 0;
+        this.pendingDrops.set(label, 0);
+        queue.push({ label, frame, source: frame.source, sessionId: frame.sessionId,
+          streamId: frame.streamId, timestampNs: frame.timestampNs,
+          localDroppedFramesBefore,
+          discontinuity: frame.discontinuity || localDroppedFramesBefore > 0 });
         this.wake();
       }
     } catch (caught) {
       error = caught instanceof Error ? caught : new Error(String(caught));
     } finally {
-      if (this.captures.get(label) === capture) this.captures.delete(label);
-      this.pumps.delete(label);
-      this.ends.push({ label, error });
+      if (this.captures.get(label) === capture) this.ends.set(label, { label, error });
       this.wake();
     }
   }
 
   private wake(): void {
     this.waiters.shift()?.();
+  }
+
+  private hasReadyItem(): boolean {
+    return this.closed || !this.captures.size || this.ends.size > 0
+      || [...this.queues.values()].some((queue) => queue.length > 0);
   }
 }
 
@@ -721,9 +840,10 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
   private waiters: Array<{ resolve: (value: IteratorResult<RuntimeEvent>) => void;
     reject: (error: Error) => void }> = [];
   private ended = false;
-  private cleaned = false;
+  private cleanupPromise?: Promise<void>;
   private terminalError?: Error;
   private closing = false;
+  private iteratorActive = false;
 
   private constructor(private readonly client: Sonexis, readonly id: string,
                       private readonly socket: Socket) { super(); }
@@ -732,10 +852,15 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
     const events = new EventStream(client, value.id, socket);
     socket.on("data", (chunk) => events.consume(chunk));
     socket.on("close", () => {
-      const truncated = !events.closing && events.buffer.length > 0
-        ? new SonexisError("truncated_event_stream", "Event stream closed mid-message") : undefined;
-      if (truncated) events.emit("streamError", truncated);
-      events.finish(truncated); void events.cleanupRuntime();
+      const error = !events.closing
+        ? new SonexisError(
+          events.buffer.length > 0 ? "truncated_event_stream" : "event_stream_closed",
+          events.buffer.length > 0
+            ? "Event stream closed mid-message" : "Runtime event stream closed unexpectedly",
+          true)
+        : undefined;
+      if (error) events.emit("streamError", error);
+      events.finish(error); void events.cleanupRuntime();
     });
     socket.on("error", (error) => { events.emit("streamError", error); events.finish(error); });
     return events;
@@ -746,11 +871,18 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
     await this.cleanupRuntime();
   }
   async *[Symbol.asyncIterator](): AsyncIterator<RuntimeEvent> {
+    if (this.iteratorActive) {
+      throw new SonexisError("consumer_exists", "Event stream already has an iterator");
+    }
+    this.iteratorActive = true;
     try {
       while (true) {
         if (this.queue.length) {
           const event = this.queue.shift()!;
-          if (this.queue.length < 128) this.socket.resume();
+          if (this.queue.length < 128) {
+            this.socket.resume();
+            this.consume(Buffer.alloc(0));
+          }
           yield event;
         }
         else if (this.ended) {
@@ -765,6 +897,7 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
         }
       }
     } finally {
+      this.iteratorActive = false;
       await this.close();
     }
   }
@@ -776,12 +909,16 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
     }
     let newline: number;
     while ((newline = this.buffer.indexOf(0x0a)) >= 0) {
+      if (this.queue.length >= 256 && this.waiters.length === 0) {
+        this.socket.pause();
+        return;
+      }
       let event: RuntimeEvent;
       if (newline + 1 > 65536) {
         const error = new SonexisError("message_too_large", "Event exceeds 64 KiB");
         this.emit("streamError", error); this.socket.destroy(); this.finish(error); return;
       }
-      try { event = JSON.parse(this.buffer.subarray(0, newline).toString("utf8")) as RuntimeEvent; }
+      try { event = decodeEvent(this.buffer.subarray(0, newline)); }
       catch (error) {
         this.emit("streamError", error);
         this.socket.destroy();
@@ -792,7 +929,7 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
       this.emit("event", event);
       const waiter = this.waiters.shift();
       if (waiter) waiter.resolve({ value: event, done: false });
-      else if (this.listenerCount("event") === 0) {
+      else if (this.listenerCount("event") === 0 || this.iteratorActive) {
         this.queue.push(event);
         if (this.queue.length >= 256) this.socket.pause();
       }
@@ -807,10 +944,11 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
       else waiter.resolve({ value: undefined, done: true });
     }
   }
-  private async cleanupRuntime(): Promise<void> {
-    if (this.cleaned) return;
-    this.cleaned = true;
-    try { await this.client.cleanupSubscription(this.id); } catch { }
+  private cleanupRuntime(): Promise<void> {
+    this.cleanupPromise ??= (async () => {
+      try { await this.client.cleanupSubscription(this.id); } catch { }
+    })();
+    return this.cleanupPromise;
   }
 }
 
@@ -823,6 +961,9 @@ export function decodeFrame(packet: Buffer, expectedStreamId: string,
   const flags = packet.readUInt16BE(6);
   if (flags & ~3) throw new SonexisError("invalid_pcm_header", "Unknown PCM flags");
   const payloadSize = packet.readUInt32BE(12);
+  if (payloadSize > 512 * 1024) {
+    throw new SonexisError("invalid_pcm_payload", "PCM payload exceeds 512 KiB");
+  }
   const streamId = uuidFromBytes(packet.subarray(16, 32));
   if (streamId !== expectedStreamId.toLowerCase()) {
     throw new SonexisError("stream_id_mismatch", "PCM frame belongs to another stream");
@@ -840,14 +981,38 @@ export function decodeFrame(packet: Buffer, expectedStreamId: string,
   const sampleFormat: SampleFormat = formatCode === 1 ? "pcm_s16le" : formatCode === 2
     ? "float32_le" : (() => { throw new SonexisError("invalid_pcm_header", "Unknown format"); })();
   const expected = frameCount * channels * (formatCode === 1 ? 2 : 4);
-  if (flags & 2 ? payloadSize !== 0 || frameCount !== 0 : payloadSize !== expected) {
+  const endOfStream = !!(flags & 2);
+  if (endOfStream
+    ? payloadSize !== 0 || frameCount !== 0 || sampleRate !== 0 || channels !== 0
+    : payloadSize !== expected || frameCount === 0 || sampleRate === 0 || channels === 0) {
     throw new SonexisError("invalid_pcm_payload", "PCM payload and format are inconsistent");
   }
   if (packet.length !== 64 + payloadSize) throw new SonexisError("truncated_pcm_stream", "Truncated PCM packet");
   return { streamId, sequence, timestampNs, frameCount,
     format: { sample_rate: sampleRate, channel_count: channels, sample_format: sampleFormat,
       interleaved: true }, data: packet.subarray(64), discontinuity: !!(flags & 1),
-    droppedFramesBefore: packet.readUInt32BE(60) };
+    droppedFramesBefore: packet.readUInt32BE(60), endOfStream };
+}
+
+export function decodeEvent(line: Buffer): RuntimeEvent {
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(line)); }
+  catch { throw new SonexisError("invalid_event", "Runtime sent invalid event JSON"); }
+  if (!value || typeof value !== "object") {
+    throw new SonexisError("invalid_event", "Runtime event must be an object");
+  }
+  const event = value as Record<string, unknown>;
+  if (event.protocol_version !== 2 || typeof event.event_id !== "string"
+      || typeof event.type !== "string" || typeof event.timestamp_nanoseconds !== "number"
+      || !Number.isFinite(event.timestamp_nanoseconds)
+      || event.timestamp_nanoseconds < 0) {
+    throw new SonexisError("invalid_event", "Runtime sent an invalid event envelope");
+  }
+  if (event.event_sequence !== undefined && (typeof event.event_sequence !== "number"
+      || !Number.isFinite(event.event_sequence) || event.event_sequence < 0)) {
+    throw new SonexisError("invalid_event", "Runtime sent an invalid event sequence");
+  }
+  return event as unknown as RuntimeEvent;
 }
 
 function uuidFromBytes(bytes: Buffer): string {

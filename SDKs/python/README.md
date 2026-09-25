@@ -35,8 +35,9 @@ async def main():
 asyncio.run(main())
 ```
 
-`capture` accepts a Runtime source ID, bundle identifier, PID, exact application
-name, or `AudioSource`. A name must resolve uniquely; the SDK raises
+`capture` accepts a Runtime source ID, bundle identifier, PID passed as a Python
+`int`, exact application name, or `AudioSource`. A numeric string remains a
+string selector. A name must resolve uniquely; the SDK raises
 `AmbiguousSourceError` rather than guessing. Use `find_sources`, `get_source`,
 or `wait_for_source` for discovery and applications that launch later.
 
@@ -57,9 +58,10 @@ async with Sonexis() as sx:
             print(item.label, item.source.name, item.timestamp_ns)
 ```
 
-Captures remain independent and are never mixed. The fan-in queue is bounded;
-`group.dropped_frames` reports local loss when the application does not consume
-quickly enough. Independent Process Taps do not promise sample-accurate
+Captures remain independent and are never mixed. Every label has a fair queue
+bounded to `max_queue_frames` `AudioFrame` packets. `group.dropped_frames` and
+`dropped_frames_by_label` count lost PCM sample frames; the next retained frame
+reports a local discontinuity. Independent Process Taps do not promise sample-accurate
 cross-application synchronization.
 
 ## Format presets
@@ -78,6 +80,16 @@ supported formats.
 ## Optional realtime providers
 
 Provider adapters are isolated above the SDK and require opt-in dependencies:
+
+The dependency-free core supports Python 3.9. Provider and MCP extras require
+Python 3.10 or newer because their official upstream SDKs do. Create a separate
+environment with any installed 3.10+ interpreter before installing an extra:
+
+```sh
+python3.10 -m venv .venv-ai
+. .venv-ai/bin/activate
+python -m pip install -e 'SDKs/python[openai]'
+```
 
 ```sh
 python -m pip install -e 'SDKs/python[openai]'
@@ -98,7 +110,8 @@ async with Sonexis() as sx:
 ```
 
 OpenAI reads `OPENAI_API_KEY`; Gemini reads `GEMINI_API_KEY` and optionally
-`GEMINI_LIVE_MODEL`. No adapter logs or persists audio or credentials. Network
+`GEMINI_LIVE_MODEL`. Each sink accepts one ordered Sonexis stream; create one
+sink per source label. No adapter logs or persists audio or credentials. Network
 behavior must be validated with the developer's own provider account.
 
 ## Replay, activity, and diagnostics
@@ -122,10 +135,19 @@ python -m pip install -e 'SDKs/python[mcp]'
 python -m sonexis.mcp_server
 ```
 
-Source/session/diagnostic tools are local and low-bandwidth. Starting capture is
-disabled unless the server is launched with `--allow-capture`. MCP never carries
-PCM; use `Sonexis.attach_capture(session_id)` to consume an MCP-created session
-through the binary data plane.
+Source/session/diagnostic tools are local and low-bandwidth. Starting or stopping
+capture is disabled unless the server is launched with `--allow-capture`. MCP
+never carries PCM. Attach an audio process through the binary data plane:
+
+```python
+async with Sonexis() as sx:
+    async with await sx.attach_capture(session_id) as stream:
+        async for frame in stream:
+            ...
+```
+
+The MCP process owns sessions it creates and must remain running; closing its
+Runtime control connection stops those captures.
 
 ## Failure and reconnect behavior
 

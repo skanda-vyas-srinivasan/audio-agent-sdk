@@ -120,7 +120,7 @@ public final class RuntimeDataPlane: @unchecked Sendable {
                     self.transmittedBytes &+= UInt64(encoded.count * successfulWrites)
                 } else {
                     self.noSubscriber &+= UInt64(frame.frameCount)
-                    self.pendingDroppedFrames &+= UInt64(frame.frameCount)
+                    self.pendingDroppedFrames &+= pendingDrops &+ UInt64(frame.frameCount)
                 }
                 self.metricsLock.unlock()
                 if !dead.isEmpty { self.warningHandler(dead.count) }
