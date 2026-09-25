@@ -1,8 +1,8 @@
-# Sonexis Runtime v0.2
+# Sonexis Runtime v0.3
 
 ## Purpose
 
-Sonexis Runtime is a local macOS audio service for developer tools. A separate process can discover running application sources, negotiate an output format, start independent capture sessions, receive framed realtime PCM, observe lifecycle events and diagnostics, and stop cleanly without using Core Audio.
+Sonexis Runtime is a local macOS audio service for developer and AI tools. A separate process can discover running application sources, negotiate an output format, start independent capture sessions, receive framed realtime PCM, observe lifecycle events and diagnostics, and stop cleanly without using Core Audio. v0.3 adds source-aware SDK streams, ergonomic source resolution, labeled multi-source sessions, deterministic replay, optional provider adapters, and control-only MCP integration above the unchanged protocol-v2 audio transport.
 
 The Runtime is audio infrastructure. It does not provide transcription, models, cloud transport, authentication, accounts, or virtual devices, and it never opens a TCP port.
 
@@ -11,28 +11,28 @@ The Runtime is audio infrastructure. It does not provide transcription, models, 
 ```sh
 xcodebuild -project Sonexis.xcodeproj -scheme sonexis-runtime \
   -configuration Debug -destination 'platform=macOS' \
-  -derivedDataPath .build/DerivedData CODE_SIGNING_ALLOWED=NO build
+  -derivedDataPath .build/RuntimeSigning build
 xcodebuild -project Sonexis.xcodeproj -scheme sonexisctl \
   -configuration Debug -destination 'platform=macOS' \
-  -derivedDataPath .build/DerivedData CODE_SIGNING_ALLOWED=NO build
+  -derivedDataPath .build/RuntimeSigning build
 
-.build/DerivedData/Build/Products/Debug/sonexis-runtime
+.build/RuntimeSigning/Build/Products/Debug/sonexis-runtime
 ```
 
 In another terminal:
 
 ```sh
-.build/DerivedData/Build/Products/Debug/sonexisctl sources
-.build/DerivedData/Build/Products/Debug/sonexisctl status
-.build/DerivedData/Build/Products/Debug/sonexisctl watch
-.build/DerivedData/Build/Products/Debug/sonexisctl capture app.com.example.audio \
+.build/RuntimeSigning/Build/Products/Debug/sonexisctl sources
+.build/RuntimeSigning/Build/Products/Debug/sonexisctl status
+.build/RuntimeSigning/Build/Products/Debug/sonexisctl watch
+.build/RuntimeSigning/Build/Products/Debug/sonexisctl capture app.com.example.audio \
   --sample-rate 24000 --channels 1 --sample-format pcm_s16le \
   --output /tmp/example.pcm --debug
 ```
 
 Append `--socket PATH` to a CLI command or set `SONEXIS_RUNTIME_SOCKET`. Set `SONEXIS_RUNTIME_DIR` when starting the Runtime to move all of its sockets.
 
-The Runtime executable has its own Screen & System Audio Recording permission identity. An unsigned command-line build can enumerate applications and run synthetic tests, but live capture needs macOS permission and normally a stable signed identity.
+The Runtime executable embeds `NSAudioCaptureUsageDescription`, uses the stable identifier `com.sonexis.runtime`, and is development-signed by Xcode. Live capture uses that identity for macOS Screen & System Audio Recording permission.
 
 ## Architecture
 
@@ -80,7 +80,7 @@ A successful response includes a distinct response ID and the negotiated platfor
   "ok": true,
   "handshake": {
     "protocol_version": 2,
-    "runtime_version": "0.2.0",
+    "runtime_version": "0.3.0",
     "runtime_instance_id": "UUID",
     "capabilities": ["application_sources", "capture_sessions", "event_stream", "format_negotiation", "multiple_sessions", "pcm_v2", "runtime_diagnostics"],
     "supported_formats": [
@@ -99,7 +99,7 @@ A successful response includes a distinct response ID and the negotiated platfor
 }
 ```
 
-Protocol version 2 is mandatory in v0.2. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
+Protocol version 2 remains mandatory in v0.3. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
 
 Supported commands:
 
@@ -149,6 +149,11 @@ Implemented event types:
 
 Permission-change and signal-level audio-start/stop events are deliberately not advertised because the Runtime cannot determine those transitions reliably. Each delivered event includes an event UUID, monotonic timestamp, per-subscription `event_sequence`, and relevant typed source/session/error data. `dropped_events_before` reports events lost before that delivery, including the subscribe-to-data-socket attach window. Subscriptions are capped, owned by their control connection, and disappear on disconnect.
 
+Ordering is defined only within a plane: control responses follow request IDs on
+one control connection, and event sequence is monotonic within one subscription.
+No wire-order guarantee exists between a control response and a related event on
+its separate socket; correlate source/session/stream IDs instead.
+
 ## PCM v2 framing
 
 Every packet begins with this fixed 64-byte, network-byte-order header. PCM payload samples are little-endian.
@@ -189,7 +194,7 @@ The next successful PCM packet after a known drop carries discontinuity and drop
 
 ## Python SDK
 
-The supported public package is under `SDKs/python`, requires Python 3.9+, and has no runtime dependencies:
+The primary public package is under `SDKs/python`, requires Python 3.9+, and has no core runtime dependencies:
 
 ```sh
 /usr/bin/python3 -m venv --system-site-packages .venv
@@ -198,18 +203,19 @@ python -m pip install --no-deps --no-build-isolation -e SDKs/python
 ```
 
 ```python
-from sonexis import AudioFormat, Sonexis
+from sonexis import Sonexis
 
 async with Sonexis() as sx:
-    sources = await sx.sources()
-    async with await sx.capture(
-        sources[0], format=AudioFormat(sample_rate=24_000, channels=1)
-    ) as stream:
+    async with await sx.capture("Discord") as stream:
         async for frame in stream:
-            print(frame.sequence, frame.timestamp_ns, len(frame.data))
+            print(frame.source.name, frame.session_id, frame.timestamp_ns)
 ```
 
-Public types include `Sonexis`/`SonexisClient`, `AudioSource`, `AudioFormat`, `CaptureSession`, `CaptureInfo`, `AudioFrame`, `RuntimeEvent`, `RuntimeStatus`, `SessionMetrics`, `RuntimeErrorInfo`, and structured `SonexisError` subclasses. Control requests are correlated by ID through one reader task, so concurrent requests are safe. Capture and event streams are async iterators/context managers. Cancellation discards late responses without corrupting the connection. Failed data-socket attachment rolls the Runtime resource back. `reconnect()` creates a fresh control connection; it never pretends that terminated captures resumed.
+Strings resolve exactly by Runtime ID, bundle ID, or application name; integers resolve PIDs. Ambiguous names fail explicitly. `find_sources`, `get_source`, and `wait_for_source` support discovery and delayed launch. Frames carry their immutable source snapshot and session identity without enlarging the binary wire frame.
+
+`sx.session()` combines independent captures into a bounded labeled iterator without mixing their audio. `AudioFormat.speech_16k()`, `.openai_realtime()`, and `.gemini_live()` prevent repetitive format mistakes. `ReplayStream`, `measure_activity`, and `LatencyTracker` support deterministic development and diagnostics. Optional OpenAI/Gemini adapters and the reference audio agent remain outside Runtime core; see [AI integration](ai-integration.md).
+
+Control requests are correlated by ID through one reader task, so concurrent requests are safe. Capture and event streams are async iterators/context managers. Cancellation discards late responses without corrupting the connection. Failed data-socket attachment rolls the Runtime resource back. `reconnect()` creates a fresh control connection; it never pretends that terminated captures resumed.
 
 Run SDK tests with `Scripts/test-python-sdk.sh`. `Examples/python-runtime-monitor.py` is the SDK-only reference application; it selects a source, watches lifecycle events, displays statistics, and optionally writes PCM or PCM16 WAV. `Examples/python-runtime-client.py` is a smaller compatibility example that also uses only public SDK APIs.
 
@@ -224,7 +230,11 @@ npm run build
 npm test
 ```
 
-The current validation host has no Node, npm, or TypeScript compiler. The source and shared byte fixtures are reviewed, but this milestone does not claim an executed TypeScript build.
+The TypeScript v0.3 client mirrors exact source resolution, source-aware frames, presets, and fairly buffered labeled sessions. It was compiled and its eight tests passed with a checksum-verified temporary Node 22.23.0 toolchain; Node was not installed system-wide.
+
+## MCP control
+
+The optional Python MCP server exposes source lookup and Runtime/session diagnostics. Capture mutation (start and stop) is disabled by default and requires `--allow-capture`. An MCP-started session can be consumed with `Sonexis.attach_capture(session_id)` over the existing binary socket. The MCP control connection owns that session and must remain alive. MCP never transports PCM. The server uses the official `mcp` Python package and requires Python 3.10+.
 
 ## CLI and diagnostics
 
@@ -246,7 +256,8 @@ Runtime status reports version/instance, uptime, active clients/sessions/event s
 - Accepted peers must have the same effective UID (`getpeereid`). Descriptors use `FD_CLOEXEC`.
 - Existing live sockets are never replaced. Stale sockets are removed only for the same owner, and shutdown unlinks only the device/inode originally bound by that listener.
 - Control messages, PCM packets, clients, sessions, event subscriptions, stream subscribers, and in-process queues have explicit limits.
-- v0.2 trusts the local macOS account. Any accepted same-UID client may query or stop a session by ID; the creating connection owns automatic cleanup and quota accounting. This intentional account-wide management policy keeps `sonexisctl stop SESSION` usable. Any unsandboxed process running as the same user is within the trust boundary and can use the Runtime’s granted audio permission. Do not run the Runtime privileged or place its sockets in a shared multi-user directory.
+- v0.3 trusts the local macOS account. Any accepted same-UID client may query or stop a session by ID; the creating connection owns automatic cleanup and quota accounting. This intentional account-wide management policy keeps `sonexisctl stop SESSION` usable. Any unsandboxed process running as the same user is within the trust boundary and can use the Runtime’s granted audio permission. Do not run the Runtime privileged or place its sockets in a shared multi-user directory.
+- MCP capture mutation is opt-in. Provider credentials come only from process configuration, and examples do not persist audio unless an output path is explicitly supplied. CLI/example recordings are private `0600` regular files, reject symbolic-link targets, and should still be treated as sensitive artifacts that may be committed accidentally.
 
 ## Troubleshooting
 
@@ -260,14 +271,14 @@ Runtime status reports version/instance, uptime, active clients/sessions/event s
 
 ## Known limitations
 
-- Signed live Process Tap/TCC, target termination/restart, and physical output-device switching still require manual macOS acceptance testing.
+- Signed Process Tap capture has been manually validated with real Spotify audio. Target termination/restart, physical output-device switching, simultaneous live multi-application capture, and provider network calls still require v0.3 acceptance testing on representative systems.
 - Source/audio activity is a HAL-registration heuristic, not level detection.
 - Timestamps are stream-relative sample time, not preserved HAL host time; live end-to-end latency is not yet measurable from frames alone.
 - Same-source captures use independent Process Taps and are not deduplicated.
 - Event sockets and data sockets rely on private per-user filesystem paths rather than a separate attach-token preface.
 - The server uses one bounded blocking worker per control client; limits prevent exhaustion, but a future service transport should use nonblocking connection state machines.
 - The existing app shares low-level capture infrastructure but does not use the capture-only Runtime session owner.
-- SDK packages are repository-local and unpublished. The TypeScript package was not executable-tested on this host.
+- SDK packages are repository-local and unpublished. Provider network calls were not exercised; the official MCP dependency was imported and its tool schemas were validated, but no third-party MCP host was used end to end.
 - JSON event/control nanoseconds and large counters are JavaScript `number`s and lose integer precision after `2^53`; binary PCM timestamps are `bigint`. A later protocol should encode JSON `u64` fields as decimal strings.
 - Protocol v2 is the first developer-preview contract. Fields were finalized within this milestone; future incompatible changes require a new protocol version rather than adding required v2 fields.
 

@@ -1,4 +1,42 @@
-# Sonexis Runtime v0.2 benchmarks
+# Sonexis Runtime benchmarks
+
+## v0.3 AI pipeline benchmark
+
+The v0.3 benchmark was collected on 2026-09-25 on the same Apple M4 host
+described below, using the system Python 3.9.6. Run it with:
+
+```sh
+Scripts/benchmark-runtime-v03.sh
+```
+
+It sends 4,000 PCM16 mono chunks of 160 samples through deterministic replay
+and injected provider transports. OpenAI uses 24 kHz input (26.667 seconds of
+audio) and base64 encoding; Gemini and replay use 16 kHz (40 seconds). No
+provider network, model processing, Core Audio, or Process Tap is involved.
+
+| v0.3 path | Audio | Wall time | Raw throughput | Transport bytes |
+| --- | ---: | ---: | ---: | ---: |
+| replay frame generation | 40.000 s | 488.355 ms | 2.500 MiB/s | 1,280,000 |
+| OpenAI adapter/base64 | 26.667 s | 543.414 ms | 2.246 MiB/s | 1,712,000 encoded |
+| Gemini adapter/blob | 40.000 s | 582.016 ms | 2.097 MiB/s | 1,280,000 |
+
+All three offline paths ran more than 45 times faster than their represented
+audio duration. This is a transport/serialization microbenchmark, not a claim
+about cloud response latency.
+
+The bounded slow-consumer case offered 4,000 chunks to an eight-chunk queue
+while deliberately delaying the consumer. The high-water mark stayed at eight;
+2,326 chunks were consumed and 1,674 were accounted as dropped. Process peak
+RSS was 22,544,384 bytes and Python `tracemalloc` peak was 1,300,045 bytes for
+the complete benchmark. Peak RSS is a process high-water value, not retained
+heap after cleanup.
+
+The deterministic AI-consumer soak (`Scripts/test-runtime-v03.sh`) separately
+uses two protocol-v2 streams, deliberate provider pauses, 30
+cancel/reconnect cycles, task/descriptor/session assertions, and bounded queue
+loss accounting. It is a correctness test rather than a throughput result.
+
+## v0.2 Runtime baseline
 
 ## Scope and methodology
 
