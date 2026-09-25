@@ -10,7 +10,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from sonexis import AudioFormat, SampleFormat, Sonexis, SonexisError, SonexisProtocolError
+from sonexis import (AudioFormat, CaptureInfo, CaptureSession, EventSubscription,
+                     SampleFormat, SessionMetrics, Sonexis, SonexisError,
+                     SonexisProtocolError)
 from sonexis.protocol import FLAG_DISCONTINUITY, FLAG_EOS, PCM_HEADER, PCM_MAGIC, read_frame
 
 
@@ -168,6 +170,9 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
                 event = await events.__anext__()
                 self.assertEqual(event.type, "runtime_warning")
                 self.assertEqual(event.message, "synthetic")
+                with self.assertRaises(StopAsyncIteration):
+                    await events.__anext__()
+            self.assertEqual(self.runtime.commands.count("unsubscribe_events"), 1)
 
     async def test_concurrent_requests_are_correlated(self):
         async with Sonexis(self.runtime.control_path) as client:
@@ -225,6 +230,50 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
             await client.connect()
         self.assertIsNone(client.handshake)
         self.assertIsNone(client._writer)
+
+    async def test_cancelled_stream_cleanup_finishes_and_is_retryable(self):
+        class BlockingWriter:
+            def __init__(self):
+                self.release = asyncio.Event()
+
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                await self.release.wait()
+
+        async with Sonexis(self.runtime.control_path) as client:
+            info = CaptureInfo("cancel-session", str(self.runtime.stream_id), "app.test",
+                "capturing", AudioFormat(), self.runtime.stream_path, 0, SessionMetrics())
+            capture = CaptureSession(client, info)
+            capture_writer = BlockingWriter()
+            capture._writer = capture_writer
+            client._captures.add(capture)
+            closing = asyncio.create_task(capture.aclose())
+            await asyncio.sleep(0)
+            closing.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await closing
+            capture_writer.release.set()
+            await capture.aclose()
+            self.assertNotIn(capture, client._captures)
+            self.assertIn("stop_capture", self.runtime.commands)
+
+            subscription = EventSubscription(client, {"id": "cancel-events",
+                "event_socket_path": self.runtime.event_path,
+                "event_types": ["runtime_warning"]})
+            event_writer = BlockingWriter()
+            subscription._writer = event_writer
+            client._events.add(subscription)
+            closing = asyncio.create_task(subscription.aclose())
+            await asyncio.sleep(0)
+            closing.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await closing
+            event_writer.release.set()
+            await subscription.aclose()
+            self.assertNotIn(subscription, client._events)
+            self.assertIn("unsubscribe_events", self.runtime.commands)
 
 
 if __name__ == "__main__":

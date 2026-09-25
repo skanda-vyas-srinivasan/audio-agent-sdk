@@ -252,9 +252,10 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
     public func stopAll() {
         prepareForShutdown()
         queue.sync {
-            records.values.filter { $0.state == .starting || $0.state == .capturing }
+            let existing = Array(records.values)
+            existing.filter { $0.state == .starting || $0.state == .capturing }
                 .forEach { stop($0, state: .stopped, error: nil) }
-            records.removeAll()
+            existing.forEach(archiveAndRemove)
         }
     }
 

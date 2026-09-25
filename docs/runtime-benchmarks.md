@@ -38,7 +38,7 @@ It runs a real Runtime server over Unix sockets with a synthetic capture backend
 
 PCM v2 framing completed 100,000 encode/header-decode iterations in 0.195959 seconds: approximately 510,311 packets/s and 196.0 MB/s including the 64-byte header.
 
-The final lifecycle stress run completed in 1.561 seconds. It reported one additional descriptor while the test Runtime was still inside its deferred shutdown scope, 10,190,848 bytes peak RSS, and no active sessions after churn. The process baseline peak RSS was 6,373,376 bytes. Peak RSS is a high-water measurement and does not prove that every allocator returned pages to the OS; the bounded session history and descriptor assertion are the stronger invariants.
+The final lifecycle stress run completed in 0.840 seconds. It reported one additional descriptor while the test Runtime was still inside its deferred shutdown scope, 10,223,616 bytes peak RSS, and no active sessions after churn. The process baseline peak RSS was 6,356,992 bytes. Peak RSS is a high-water measurement and does not prove that every allocator returned pages to the OS; the bounded session history and descriptor assertion are the stronger invariants.
 
 The integration slow-consumer test offered 500 maximum-size synthetic packets to a non-reading subscriber. It verified that the 64-packet application queue bound was never exceeded and that saturation caused accounted queue drops or subscriber disconnection rather than unbounded allocation.
 

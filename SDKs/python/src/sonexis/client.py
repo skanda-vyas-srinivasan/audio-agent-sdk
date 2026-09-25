@@ -30,6 +30,7 @@ class Sonexis:
         self._discarded_request_ids: Set[str] = set()
         self._captures: Set["CaptureSession"] = set()
         self._events: Set["EventSubscription"] = set()
+        self._close_task: Optional[asyncio.Task] = None
 
     async def __aenter__(self) -> "Sonexis":
         await self.connect()
@@ -39,6 +40,9 @@ class Sonexis:
         await self.close()
 
     async def connect(self, *, reconnect_attempts: int = 0) -> Handshake:
+        if self._close_task is not None:
+            await asyncio.shield(self._close_task)
+            self._close_task = None
         if self._writer is not None:
             assert self.handshake is not None
             return self.handshake
@@ -80,6 +84,17 @@ class Sonexis:
         return await self.connect(reconnect_attempts=attempts)
 
     async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(
+                self._finish_close(), name="sonexis-client-cleanup")
+        task = self._close_task
+        try:
+            await asyncio.shield(task)
+        finally:
+            if task.done() and self._close_task is task:
+                self._close_task = None
+
+    async def _finish_close(self) -> None:
         captures = list(self._captures)
         events = list(self._events)
         for capture in captures:
@@ -280,6 +295,7 @@ class CaptureSession(AsyncIterator[AudioFrame]):
         self._writer: Optional[asyncio.StreamWriter] = None
         self._previous_sequence: Optional[int] = None
         self._closed = False
+        self._cleanup_task: Optional[asyncio.Task] = None
 
     def __repr__(self) -> str:
         return f"CaptureSession(id={self.info.id!r}, source={self.info.source_id!r}, format={self.info.format!r})"
@@ -299,7 +315,11 @@ class CaptureSession(AsyncIterator[AudioFrame]):
     async def __anext__(self) -> AudioFrame:
         if self._closed or self._reader is None:
             raise StopAsyncIteration
-        frame = await read_frame(self._reader, uuid.UUID(self.info.stream_id), self._previous_sequence)
+        try:
+            frame = await read_frame(self._reader, uuid.UUID(self.info.stream_id), self._previous_sequence)
+        except BaseException:
+            await self.aclose()
+            raise
         self._previous_sequence = frame.sequence
         if frame.frame_count == 0:
             await self.aclose(stop_runtime=False)
@@ -307,20 +327,27 @@ class CaptureSession(AsyncIterator[AudioFrame]):
         return frame
 
     async def aclose(self, *, stop_runtime: bool = True) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        writer, self._writer = self._writer, None
-        self._reader = None
-        if writer is not None:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except (OSError, ConnectionError):
-                pass
-        self.client._captures.discard(self)
-        if stop_runtime:
-            await self.client._cleanup_request("stop_capture", session_id=self.info.id)
+        if self._cleanup_task is None:
+            self._closed = True
+            writer, self._writer = self._writer, None
+            self._reader = None
+            self._cleanup_task = asyncio.create_task(
+                self._finish_cleanup(writer, stop_runtime), name="sonexis-capture-cleanup")
+        await asyncio.shield(self._cleanup_task)
+
+    async def _finish_cleanup(self, writer: Optional[asyncio.StreamWriter],
+                              stop_runtime: bool) -> None:
+        try:
+            if writer is not None:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except (OSError, ConnectionError, asyncio.TimeoutError):
+                    pass
+        finally:
+            self.client._captures.discard(self)
+            if stop_runtime:
+                await self.client._cleanup_request("stop_capture", session_id=self.info.id)
 
 
 class EventSubscription(AsyncIterator[RuntimeEvent]):
@@ -334,6 +361,7 @@ class EventSubscription(AsyncIterator[RuntimeEvent]):
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._closed = False
+        self._cleanup_task: Optional[asyncio.Task] = None
 
     async def _open(self) -> None:
         self._reader, self._writer = await asyncio.open_unix_connection(
@@ -351,29 +379,42 @@ class EventSubscription(AsyncIterator[RuntimeEvent]):
     async def __anext__(self) -> RuntimeEvent:
         if self._closed or self._reader is None:
             raise StopAsyncIteration
-        line = await self._reader.readline()
+        try:
+            line = await self._reader.readline()
+        except BaseException:
+            await self.aclose()
+            raise
         if not line:
-            await self.aclose(unsubscribe=False)
+            await self.aclose()
             raise StopAsyncIteration
         if len(line) > MAX_CONTROL_BYTES or not line.endswith(b"\n"):
+            await self.aclose()
             raise SonexisProtocolError("invalid_event", "Invalid event framing")
         try:
             return RuntimeEvent.from_wire(json.loads(line))
         except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            await self.aclose()
             raise SonexisProtocolError("invalid_event", "Runtime sent a malformed event") from error
 
     async def aclose(self, *, unsubscribe: bool = True) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        writer, self._writer = self._writer, None
-        self._reader = None
-        if writer is not None:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except (OSError, ConnectionError):
-                pass
-        self.client._events.discard(self)
-        if unsubscribe:
-            await self.client._cleanup_request("unsubscribe_events", subscription_id=self.id)
+        if self._cleanup_task is None:
+            self._closed = True
+            writer, self._writer = self._writer, None
+            self._reader = None
+            self._cleanup_task = asyncio.create_task(
+                self._finish_cleanup(writer, unsubscribe), name="sonexis-event-cleanup")
+        await asyncio.shield(self._cleanup_task)
+
+    async def _finish_cleanup(self, writer: Optional[asyncio.StreamWriter],
+                              unsubscribe: bool) -> None:
+        try:
+            if writer is not None:
+                writer.close()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except (OSError, ConnectionError, asyncio.TimeoutError):
+                    pass
+        finally:
+            self.client._events.discard(self)
+            if unsubscribe:
+                await self.client._cleanup_request("unsubscribe_events", subscription_id=self.id)

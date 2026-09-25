@@ -133,7 +133,7 @@ The final synthetic run completed:
 - 200 full connect/handshake/disconnect cycles;
 - 16 simultaneous sessions across four clients;
 - descriptor growth of 1 while still inside deferred Runtime shutdown scope;
-- 10,190,848-byte peak RSS versus 6,373,376-byte process baseline peak;
+- 10,223,616-byte peak RSS versus 6,356,992-byte process baseline peak;
 - no active sessions after churn.
 
 Integration/adversarial coverage includes multiple formats and clients, same-source independent sessions, same-UID cross-process stop, owner-disconnect cleanup, duplicate stop, terminal-history pruning, event subscription limits/loss, non-reading data consumers, invalid sources/formats/versions/commands/IDs, oversized/malformed UTF-8/JSON, fragmented/truncated/corrupt PCM, source absence, and repeated server start/stop.
@@ -163,6 +163,8 @@ Realtime/concurrency review confirmed the HAL callback path and SPSC ring invari
 Adversarial review reproduced cross-client management, 300-subscription descriptor growth before limits, stale socket nodes, reversed synchronous-end events, decreasing totals, backward EOS acceptance, and SDK/parser failure paths. Post-fix probes confirmed four-per-client subscription enforcement, clean socket unlink, single correctly ordered failure events, monotonic totals, 1,000 immediate server restart cycles, backward-EOS rejection, and passing protocol/integration/stress suites.
 
 The cross-client result was retained intentionally under the same-UID trust model rather than presented as connection-scoped authorization. A future stronger boundary needs explicit management/attach tokens, not a change that silently makes standalone CLI stop unusable.
+
+The final post-fix review found and closed one last Python cancellation/EOF cleanup leak. Shielded persistent cleanup tasks now provide exactly-once stop/unsubscribe even if `aclose()` is cancelled, retries await the same cleanup, event EOF unsubscribes, and reconnect waits for client cleanup. The final reviewer reran all nine Python SDK tests with and without `PYTHONASYNCIODEBUG=1`, Runtime integration, and Runtime stress, and reported no remaining realtime/concurrency release blocker.
 
 ## Known limitations
 
@@ -194,7 +196,8 @@ No live capture was initiated during automated work, so the report does not clai
 - `c361727` — feat: evolve Sonexis Runtime protocol v2
 - `2c25a0e` — feat: add Sonexis Python and TypeScript SDKs
 - `bf12a1c` — fix: harden Runtime v0.2 lifecycle and SDKs
-- Final documentation/report commit: recorded by the commit containing this file.
+- `0d80d1a` — docs: complete Runtime v0.2 milestone
+- Final cancellation-safety/report refresh — the commit containing this version of the report.
 
 ## Next milestone
 
