@@ -192,6 +192,112 @@ export interface AudioFrame extends DecodedAudioFrame {
   /** Local monotonic receipt time, separate from the Runtime stream timestamp. */
   receivedAtNs: bigint;
 }
+
+export interface AudioActivity {
+  rms: number;
+  peak: number;
+  active: boolean;
+}
+
+export interface ActivityDetectionOptions {
+  activityStartThreshold?: number;
+  activityEndThreshold?: number;
+  minimumActivityMs?: number;
+  silenceDurationMs?: number;
+}
+
+export interface ActivityEvent {
+  type: "activity_started" | "activity_ended";
+  timestampNs: bigint;
+  sequence: bigint;
+  sourceId: string;
+  sessionId: string;
+  streamId: string;
+}
+
+/** Measure signal energy. Active means non-silent signal, not necessarily speech. */
+export function measureActivity(frame: AudioFrame, threshold = 0.01): AudioActivity {
+  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    throw new RangeError("threshold must be finite and between zero and one");
+  }
+  let sum = 0;
+  let peak = 0;
+  const samples = frame.frameCount * frame.format.channel_count;
+  if (samples < 1 || frame.data.length === 0) return { rms: 0, peak: 0, active: false };
+  for (let index = 0; index < samples; index++) {
+    const value = frame.format.sample_format === "pcm_s16le"
+      ? frame.data.readInt16LE(index * 2) / 32768
+      : frame.data.readFloatLE(index * 4);
+    const finite = Number.isFinite(value) ? value : 0;
+    peak = Math.max(peak, Math.abs(finite));
+    sum += finite * finite;
+  }
+  const rms = Math.sqrt(sum / samples);
+  return { rms, peak, active: rms >= threshold };
+}
+
+/** Consumer-side hysteresis/debounce for provider-neutral signal activity. */
+export class AudioActivityDetector {
+  readonly options: Required<ActivityDetectionOptions>;
+  private state: "idle" | "starting" | "active" = "idle";
+  private candidateMs = 0;
+  private silenceMs = 0;
+
+  constructor(options: ActivityDetectionOptions = {}) {
+    this.options = {
+      activityStartThreshold: options.activityStartThreshold ?? 0.015,
+      activityEndThreshold: options.activityEndThreshold ?? 0.008,
+      minimumActivityMs: options.minimumActivityMs ?? 250,
+      silenceDurationMs: options.silenceDurationMs ?? 1200,
+    };
+    const o = this.options;
+    if (![o.activityStartThreshold, o.activityEndThreshold,
+      o.minimumActivityMs, o.silenceDurationMs].every(Number.isFinite)
+      || o.activityEndThreshold < 0
+      || o.activityEndThreshold > o.activityStartThreshold
+      || o.activityStartThreshold > 1
+      || o.minimumActivityMs <= 0 || o.minimumActivityMs > 5000
+      || o.silenceDurationMs <= 0 || o.silenceDurationMs > 30000) {
+      throw new RangeError("invalid activity detection options");
+    }
+  }
+
+  get active(): boolean { return this.state === "active"; }
+
+  reset(): void {
+    this.state = "idle";
+    this.candidateMs = 0;
+    this.silenceMs = 0;
+  }
+
+  observe(frame: AudioFrame): ActivityEvent | undefined {
+    if (frame.discontinuity) this.reset();
+    const durationMs = frame.frameCount * 1000 / frame.format.sample_rate;
+    const threshold = this.active
+      ? this.options.activityEndThreshold : this.options.activityStartThreshold;
+    const frameActive = measureActivity(frame, threshold).active;
+    if (!this.active) {
+      if (!frameActive) { this.reset(); return undefined; }
+      this.state = "starting";
+      this.candidateMs += durationMs;
+      if (this.candidateMs < this.options.minimumActivityMs) return undefined;
+      this.state = "active";
+      this.candidateMs = 0;
+      this.silenceMs = 0;
+      return this.event("activity_started", frame);
+    }
+    if (frameActive) { this.silenceMs = 0; return undefined; }
+    this.silenceMs += durationMs;
+    if (this.silenceMs < this.options.silenceDurationMs) return undefined;
+    this.reset();
+    return this.event("activity_ended", frame);
+  }
+
+  private event(type: ActivityEvent["type"], frame: AudioFrame): ActivityEvent {
+    return { type, timestampNs: frame.timestampNs, sequence: frame.sequence,
+      sourceId: frame.sourceId, sessionId: frame.sessionId, streamId: frame.streamId };
+  }
+}
 export interface RuntimeEvent {
   protocol_version: 2;
   event_id: string;
@@ -707,8 +813,9 @@ export class Sonexis extends EventEmitter {
   }
 
   /** Own multiple independent captures while preserving a stable label for each frame. */
-  session(options: { maxQueueFrames?: number } = {}): MultiSourceSession {
-    return new MultiSourceSession(this, options.maxQueueFrames ?? 128);
+  session(options: { maxQueueFrames?: number; failFast?: boolean } = {}): MultiSourceSession {
+    return new MultiSourceSession(this, options.maxQueueFrames ?? 128,
+      options.failFast ?? true);
   }
 
   private async request(command: string, fields: Record<string, unknown> = {},
@@ -1586,9 +1693,13 @@ export class DuplexSession {
 
   static async open(client: Sonexis, source: SourceSelector,
                     options: DuplexOptions = {}): Promise<DuplexSession> {
-    const input = await client.capture(source, options.inputFormat ?? AudioFormats.speech16k());
+    const inputFormat = options.inputFormat ?? AudioFormats.speech16k();
+    const input = await client.capture(source, inputFormat);
     try {
-      const output = await client.playback(options.output ?? {});
+      const output = await client.playback({
+        ...options.output,
+        format: options.output?.format ?? inputFormat,
+      });
       return new DuplexSession(input, output);
     } catch (error) {
       await input.close();
@@ -1620,6 +1731,7 @@ export class MultiSourceSession {
   readonly maxQueueFrames: number;
   droppedFrames = 0;
   readonly droppedFramesByLabel = new Map<string, number>();
+  readonly errorsByLabel = new Map<string, Error>();
   private readonly captures = new Map<string, CaptureStream>();
   private readonly pumps = new Map<string, Promise<void>>();
   private readonly pendingLabels = new Set<string>();
@@ -1631,7 +1743,8 @@ export class MultiSourceSession {
   private iteratorActive = false;
   private closePromise?: Promise<void>;
 
-  constructor(private readonly client: Sonexis, maxQueueFrames = 128) {
+  constructor(private readonly client: Sonexis, maxQueueFrames = 128,
+              readonly failFast = true) {
     if (!Number.isInteger(maxQueueFrames) || maxQueueFrames < 1) {
       throw new RangeError("maxQueueFrames must be a positive integer");
     }
@@ -1699,7 +1812,10 @@ export class MultiSourceSession {
           this.pumps.delete(label);
           this.queues.delete(label);
           this.pendingDrops.delete(label);
-          if (end.error) throw end.error;
+          if (end.error) {
+            this.errorsByLabel.set(label, end.error);
+            if (this.failFast) throw end.error;
+          }
         }
         if (!this.captures.size) return;
         await new Promise<void>((resolve) => {

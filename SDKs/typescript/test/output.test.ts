@@ -7,6 +7,7 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import {
   AmbiguousOutputDestinationError,
+  AudioFormat,
   AudioFormats,
   AudioOutput,
   AudioOutputDestination,
@@ -404,6 +405,28 @@ test("duplex composes capture and output and closes both sides", async () => {
   assert.equal(inputClosed, 1);
   assert.equal(outputClosed, 1);
   assert.equal(drained, false);
+});
+
+test("duplex defaults output format to its input format", async () => {
+  let outputFormat: AudioFormat | undefined;
+  const input = { close: async () => {} } as unknown as CaptureStream;
+  const output = {
+    destination: { id: "default", kind: "playback", name: "Default",
+      is_available: true, is_default: true, follows_system_default: true,
+      supported_formats: [] },
+    close: async () => {},
+  } as unknown as AudioOutput;
+  const client = {
+    capture: async () => input,
+    playback: async (options: { format?: AudioFormat }) => {
+      outputFormat = options.format;
+      return output;
+    },
+  } as unknown as Sonexis;
+  const format = AudioFormats.geminiLive();
+  const duplex = await DuplexSession.open(client, "Chrome", { inputFormat: format });
+  assert.deepEqual(outputFormat, format);
+  await duplex.close();
 });
 
 async function startRuntime(context: test.TestContext,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AmbiguousSourceError,
+  AudioActivityDetector,
   AudioFrame,
   AudioFormats,
   AudioSource,
@@ -15,6 +16,30 @@ import {
   SonexisError,
   SourceNotFoundError,
 } from "../src/index.js";
+
+function activityFrame(sequence: number, amplitude: number): AudioFrame {
+  const format = AudioFormats.speech16k();
+  const data = Buffer.alloc(1600 * 2);
+  const sample = Math.round(amplitude * 32767);
+  for (let index = 0; index < 1600; index++) data.writeInt16LE(sample, index * 2);
+  const value = source("app.test", "Test", "test", 1);
+  return { streamId: "stream", sequence: BigInt(sequence),
+    timestampNs: BigInt(sequence * 100_000_000), frameCount: 1600, format, data,
+    discontinuity: false, droppedFramesBefore: 0, endOfStream: false,
+    source: value, sourceId: value.id, sourceName: value.name,
+    sessionId: "session", receivedAtNs: BigInt(sequence) };
+}
+
+test("activity detector emits debounced provider-neutral edges", () => {
+  const detector = new AudioActivityDetector({
+    activityStartThreshold: 0.02, activityEndThreshold: 0.01,
+    minimumActivityMs: 200, silenceDurationMs: 300,
+  });
+  const edges = [0.2, 0.2, 0, 0, 0.2, 0, 0, 0]
+    .map((value, index) => detector.observe(activityFrame(index + 1, value)))
+    .filter((value) => value !== undefined);
+  assert.deepEqual(edges.map((edge) => edge.type), ["activity_started", "activity_ended"]);
+});
 
 function source(id: string, name: string, bundle: string, pid: number,
                 available = true): AudioSource {
