@@ -165,7 +165,8 @@ chmod 644 "$STAGING/$WHEEL_NAME" "$STAGING/$SDIST_NAME" \
 
 [ ! -e "$DESTINATION" ] && [ ! -L "$DESTINATION" ] || \
     error "destination appeared during build: $DESTINATION"
-"$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$STAGING"
+SONEXIS_EXPECTED_TEAM_ID="$TEAM" SONEXIS_EXPECTED_SOURCE_COMMIT="$COMMIT" \
+    "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$STAGING"
 mv "$STAGING" "$DESTINATION"
 STAGING=
 echo "Created Sonexis Runtime $VERSION artifacts at $DESTINATION"

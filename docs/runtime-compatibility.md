@@ -3,9 +3,8 @@
 ## Versioning
 
 Runtime, CLI, Python, and TypeScript packages share one semantic version in this
-repository. Before 1.0, minor versions may refine experimental integrations;
-the surfaces marked “stable candidate” in `runtime-api-stability.md` are already
-treated as compatibility-sensitive. At 1.0:
+repository. The surfaces marked “stable” in `runtime-api-stability.md` are
+covered by the 1.0 compatibility policy:
 
 - patch: compatible fixes, diagnostics, and performance work;
 - minor: backward-compatible additions and deprecations;
@@ -28,7 +27,7 @@ version, capabilities, formats, limits, and instance ID. SDKs must:
 
 Protocol v2 changes are additive: optional fields, new capabilities, commands,
 events, error codes, and supported formats may be added. Existing required
-fields, binary layout, meanings, and ordering guarantees are frozen candidates.
+fields, binary layout, meanings, and ordering guarantees are frozen.
 A protocol v3 requires a change impossible to express additively and explicit
 dual-version migration analysis.
 
@@ -42,7 +41,7 @@ compatibility contracts; JSON keys/codes are.
 
 ## Supported platform matrix
 
-| Component | Candidate minimum |
+| Component | Supported minimum |
 |---|---|
 | Runtime and CLI | macOS 14.4, Apple Silicon or Intel x86_64 |
 | Build | Xcode 16 with macOS 14.4 SDK or newer |

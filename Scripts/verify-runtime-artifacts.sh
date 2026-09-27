@@ -31,11 +31,15 @@ import stat
 from pathlib import Path
 
 root = Path(os.environ["ARTIFACT_DIR"])
+maximum_metadata_bytes = 1024 * 1024
+maximum_artifact_bytes = 512 * 1024 * 1024
 
 def fail(message: str) -> None:
     raise SystemExit(f"runtime-artifacts: {message}")
 
 try:
+    if (root / "manifest.json").stat().st_size > maximum_metadata_bytes:
+        fail("manifest.json exceeds 1 MiB")
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
 except (OSError, UnicodeError, json.JSONDecodeError) as error:
     fail(f"invalid manifest.json: {error}")
@@ -55,6 +59,9 @@ if not isinstance(manifest["source_commit"], str) or not re.fullmatch(
     r"[0-9a-f]{40}", manifest["source_commit"]
 ):
     fail("source_commit must be a full lowercase Git object ID")
+expected_commit = os.environ.get("SONEXIS_EXPECTED_SOURCE_COMMIT")
+if expected_commit and manifest["source_commit"] != expected_commit:
+    fail("source_commit differs from the trusted expected commit")
 if manifest["platform"] != "macos" or manifest["minimum_macos"] != "14.4":
     fail("unexpected platform or deployment target")
 if manifest["architectures"] != ["arm64", "x86_64"]:
@@ -75,6 +82,9 @@ if not isinstance(signing["team_identifier"], str) or not re.fullmatch(
     r"[A-Z0-9]{10}", signing["team_identifier"]
 ):
     fail("invalid signing team identifier")
+expected_team = os.environ.get("SONEXIS_EXPECTED_TEAM_ID")
+if expected_team and signing["team_identifier"] != expected_team:
+    fail("signing team differs from the trusted expected team")
 
 expected_artifacts = {
     f"sonexis-runtime-{version}-macos-universal",
@@ -94,7 +104,7 @@ for item in items:
     if name in listed or name not in expected_artifacts:
         fail(f"duplicate or unexpected artifact: {name!r}")
     if not isinstance(item["size_bytes"], int) or isinstance(item["size_bytes"], bool) \
-            or item["size_bytes"] <= 0:
+            or item["size_bytes"] <= 0 or item["size_bytes"] > maximum_artifact_bytes:
         fail(f"invalid size for artifact: {name}")
     if not isinstance(item["sha256"], str) or not re.fullmatch(
         r"[0-9a-f]{64}", item["sha256"]
@@ -114,17 +124,26 @@ def require_regular_file(path: Path) -> None:
     if not stat.S_ISREG(mode):
         fail(f"artifact is not a regular file: {path.name}")
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
 for name, item in listed.items():
     path = root / name
     require_regular_file(path)
     if path.stat().st_size != item["size_bytes"]:
         fail(f"artifact size differs: {name}")
-    if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+    if sha256_file(path) != item["sha256"]:
         fail(f"artifact digest differs: {name}")
 
 checksum_path = root / "SHA256SUMS"
 require_regular_file(checksum_path)
 try:
+    if checksum_path.stat().st_size > maximum_metadata_bytes:
+        fail("SHA256SUMS exceeds 1 MiB")
     checksum_lines = checksum_path.read_text(encoding="ascii").splitlines()
 except (OSError, UnicodeError) as error:
     fail(f"invalid SHA256SUMS: {error}")
@@ -142,7 +161,7 @@ if sorted(checksums) != expected_checksum_names:
 for name, expected in checksums.items():
     path = root / name
     require_regular_file(path)
-    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+    if sha256_file(path) != expected:
         fail(f"SHA256SUMS digest differs: {name}")
 
 print(version)
@@ -154,6 +173,10 @@ CTL="$ARTIFACT_DIR/sonexisctl-$VERSION-macos-universal"
 MANIFEST_TEAM=$(/usr/bin/python3 -c \
     'import json,sys; print(json.load(open(sys.argv[1]))["signing"]["team_identifier"])' \
     "$ARTIFACT_DIR/manifest.json")
+EXPECTED_TEAM=${SONEXIS_EXPECTED_TEAM_ID:-}
+if [ -n "$EXPECTED_TEAM" ] && [ "$MANIFEST_TEAM" != "$EXPECTED_TEAM" ]; then
+    error "signing team differs from trusted SONEXIS_EXPECTED_TEAM_ID"
+fi
 
 verify_product() {
     product=$1
@@ -182,10 +205,11 @@ verify_product() {
 
 verify_product "$RUNTIME" com.sonexis.runtime
 verify_product "$CTL" com.sonexis.ctl
-[ "$("$RUNTIME" --version)" = "sonexis-runtime $VERSION (protocol 2)" ] || \
-    error "Runtime executable version differs from manifest"
-[ "$("$CTL" version)" = "sonexisctl $VERSION (protocol 2)" ] || \
-    error "CLI executable version differs from manifest"
+plutil -p "$RUNTIME" | grep -F \
+    '"CFBundleShortVersionString" => "'"$VERSION"'"' >/dev/null || \
+    error "Runtime embedded version differs from manifest"
+strings "$CTL" | grep -Fx "$VERSION" >/dev/null || \
+    error "CLI embedded version differs from manifest"
 strings "$RUNTIME" | grep -F '<key>NSAudioCaptureUsageDescription</key>' >/dev/null || \
     error "Runtime is missing NSAudioCaptureUsageDescription"
 
@@ -201,6 +225,9 @@ import zipfile
 
 root = pathlib.Path(os.environ["ARTIFACT_DIR"])
 version = os.environ["VERSION"]
+maximum_entries = 10_000
+maximum_uncompressed_bytes = 256 * 1024 * 1024
+maximum_metadata_bytes = 1024 * 1024
 
 def fail(message: str) -> None:
     raise SystemExit(f"runtime-artifacts: {message}")
@@ -212,7 +239,12 @@ def safe_archive_name(name: str) -> bool:
 wheel = root / f"sonexis-{version}-py3-none-any.whl"
 try:
     with zipfile.ZipFile(wheel) as archive:
-        names = archive.namelist()
+        entries = archive.infolist()
+        if len(entries) > maximum_entries:
+            fail("Python wheel has too many entries")
+        if sum(entry.file_size for entry in entries) > maximum_uncompressed_bytes:
+            fail("Python wheel expands beyond 256 MiB")
+        names = [entry.filename for entry in entries]
         if any(not safe_archive_name(name) for name in names):
             fail("Python wheel contains an unsafe path")
         required = {"sonexis/__init__.py", "sonexis/py.typed"}
@@ -222,6 +254,8 @@ try:
         license_names = [name for name in names if name.endswith(".dist-info/LICENSE")]
         if len(metadata_names) != 1 or len(license_names) != 1:
             fail("Python wheel has unexpected distribution metadata")
+        if archive.getinfo(metadata_names[0]).file_size > maximum_metadata_bytes:
+            fail("Python wheel metadata exceeds 1 MiB")
         metadata = email.parser.BytesParser().parsebytes(archive.read(metadata_names[0]))
         if metadata.get("Name") != "sonexis" or metadata.get("Version") != version:
             fail("Python wheel name/version differs from manifest")
@@ -232,6 +266,10 @@ sdist = root / f"sonexis-{version}.tar.gz"
 try:
     with tarfile.open(sdist, "r:gz") as archive:
         members = archive.getmembers()
+        if len(members) > maximum_entries:
+            fail("Python sdist has too many entries")
+        if sum(member.size for member in members) > maximum_uncompressed_bytes:
+            fail("Python sdist expands beyond 256 MiB")
         if any(not safe_archive_name(member.name) for member in members):
             fail("Python sdist contains an unsafe path")
         if any(member.issym() or member.islnk() or member.isdev() for member in members):
@@ -247,6 +285,10 @@ npm_package = root / f"sonexis-runtime-{version}.tgz"
 try:
     with tarfile.open(npm_package, "r:gz") as archive:
         members = archive.getmembers()
+        if len(members) > maximum_entries:
+            fail("TypeScript package has too many entries")
+        if sum(member.size for member in members) > maximum_uncompressed_bytes:
+            fail("TypeScript package expands beyond 256 MiB")
         if any(not safe_archive_name(member.name) for member in members):
             fail("TypeScript package contains an unsafe path")
         if any(member.issym() or member.islnk() or member.isdev() for member in members):
@@ -264,6 +306,9 @@ try:
         package_member = archive.extractfile("package/package.json")
         if package_member is None:
             fail("TypeScript package.json is not a regular file")
+        package_info = archive.getmember("package/package.json")
+        if package_info.size > maximum_metadata_bytes:
+            fail("TypeScript package metadata exceeds 1 MiB")
         package = json.load(io.TextIOWrapper(package_member, encoding="utf-8"))
         if package.get("name") != "@sonexis/runtime" or package.get("version") != version:
             fail("TypeScript package name/version differs from manifest")

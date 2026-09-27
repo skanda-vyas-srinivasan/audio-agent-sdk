@@ -196,8 +196,8 @@ The TypeScript `findOutputDestinations`, `getOutputDestination`, and
 
 ```sh
 sonexisctl outputs
-sonexisctl play response.wav --destination default --debug
-sonexisctl play response.wav --destination 'coreaudio:BlackHole2ch_UID' --debug
+sonexisctl play /path/to/response.wav --destination default --debug
+sonexisctl play /path/to/response.wav --destination 'coreaudio:BlackHole2ch_UID' --debug
 sonexisctl output-status SESSION --json
 sonexisctl output-stop SESSION
 ```

@@ -65,11 +65,21 @@ if tar -tzf "$TYPESCRIPT_PACKAGE" | grep -E '^package/(src|test|node_modules|dis
     echo "TypeScript package leaked development-only files" >&2
     exit 1
 fi
+tar -xOf "$TYPESCRIPT_PACKAGE" package/dist/index.d.ts > "$TEST_DIR/index.d.ts"
+if grep -E '^[[:space:]]+(unsubscribe|cleanupCapture|cleanupSubscription|flushOutput|cleanupOutput|untrackOutput|trackCapture|untrackCapture|trackEventStream|untrackEventStream)\(' "$TEST_DIR/index.d.ts" >/dev/null; then
+    echo "TypeScript declaration leaked internal lifecycle hooks" >&2
+    exit 1
+fi
 mkdir "$TEST_DIR/typescript-consumer"
 (
     cd "$TEST_DIR/typescript-consumer"
     npm init -y >/dev/null
     npm install --ignore-scripts "$TYPESCRIPT_PACKAGE" >/dev/null
+    cp "$ROOT_DIR/Examples/typescript-duplex.mts" ./typescript-duplex.mts
+    "$TEST_DIR/typescript-src/node_modules/.bin/tsc" --strict --noEmit \
+        --module NodeNext --moduleResolution NodeNext --target ES2022 \
+        --typeRoots "$TEST_DIR/typescript-src/node_modules/@types" \
+        ./typescript-duplex.mts
     node --input-type=module -e \
         'import { Sonexis, AudioFormats } from "@sonexis/runtime"; const sx = new Sonexis("/tmp/not-running.sock"); if (AudioFormats.speech16k().sample_rate !== 16000 || sx.socketPath !== "/tmp/not-running.sock") process.exit(1);'
 )

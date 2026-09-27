@@ -94,6 +94,8 @@ class SonexisControlTools:
 
     async def start_capture(self, source: str, format_profile: str = "speech_16k") -> Dict[str, Any]:
         self._require_capture_control()
+        self._require_bounded_text("source", source, 512)
+        self._require_bounded_text("format_profile", format_profile, 64)
         profiles = {
             "speech_16k": AudioFormat.speech_16k,
             "openai_realtime": AudioFormat.openai_realtime,
@@ -135,11 +137,18 @@ class SonexisControlTools:
         return {"session": _capture_json(stopped)}
 
     def _require_owned_session(self, session_id: str) -> None:
+        self._require_bounded_text("session_id", session_id, 128)
         if session_id not in self._owned_capture_ids:
             raise SonexisError(
                 "mcp_session_not_owned",
                 "This MCP process can only inspect or stop captures it started",
             )
+
+    @staticmethod
+    def _require_bounded_text(name: str, value: str, maximum: int) -> None:
+        if not isinstance(value, str) or not value or len(value) > maximum:
+            raise SonexisError(
+                "invalid_argument", f"{name} must contain 1-{maximum} characters")
 
     def _require_capture_control(self) -> None:
         if not self.allow_capture:

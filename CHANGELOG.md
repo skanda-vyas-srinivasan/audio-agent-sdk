@@ -4,6 +4,20 @@ This changelog summarizes developer-visible Runtime and SDK milestones. It is
 not a dump of repository commits. Sonexis Runtime versions are independent of
 the native Sonexis application's 2.x release line.
 
+## 1.0.0 — Production release candidate
+
+- Promoted the provider-neutral protocol v2, Python/TypeScript capture,
+  playback, duplex, events, diagnostics, and documented CLI JSON surfaces from
+  stable candidates to the 1.0 compatibility policy.
+- Retained provider adapters and MCP as explicitly experimental integrations;
+  no protocol or realtime data-plane redesign was introduced at the freeze.
+- Added final release-blocker, security/privacy, and external-developer review,
+  a complete manual-validation matrix, and an autonomous release handoff.
+- Reverified clean SDK packages, signed universal local-development binaries,
+  1,000-cycle stress, fuzz, TSan, application regressions, and adversarial
+  artifact validation. Public distribution still requires Developer ID signing
+  and notarization.
+
 ## 0.9.0 — Public beta / API-freeze candidate
 
 - Classified protocol, Python, TypeScript, CLI, and MCP surfaces as stable

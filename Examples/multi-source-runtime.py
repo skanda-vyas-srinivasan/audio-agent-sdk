@@ -149,7 +149,7 @@ async def main() -> None:
         audio_format = AudioFormat.speech_16k()
         stats: Dict[str, SourceStats] = {}
         started = time.monotonic()
-        async with client.session(max_queue_frames=128, fail_fast=False) as session:
+        async with client.session(max_queue_packets=128, fail_fast=False) as session:
             conversation_capture = await session.add(
                 "conversation", conversation, format=audio_format)
             media_capture = await session.add("media", media, format=audio_format)

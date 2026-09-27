@@ -1,7 +1,7 @@
 # Sonexis TypeScript SDK
 
-The dependency-free `@sonexis/runtime` client targets Node.js 18+ and Sonexis
-Runtime protocol v2. Version 0.9 is locally packageable for external consumers
+The dependency-free ESM-only `@sonexis/runtime` client targets Node.js 18+ and Sonexis
+Runtime protocol v2. Version 1.0 is locally packageable for external consumers
 and includes typed, bounded client-to-Runtime audio output, source-aware capture,
 AI format presets, and labeled multi-source APIs.
 
@@ -28,9 +28,11 @@ npm pack
 ```
 
 For a clean external project, install the resulting `.tgz` with
-`npm install /absolute/path/to/sonexis-runtime-0.9.0.tgz`. During repository
-development, `npm install /absolute/path/to/SDKs/typescript` is also supported.
-The package is not published to npm in v0.9.
+`npm install /absolute/path/to/sonexis-runtime-1.0.0.tgz`. During repository
+development, run `npm ci && npm run build` in `SDKs/typescript` before
+`npm install /absolute/path/to/SDKs/typescript`; a clean source directory does
+not contain generated `dist` files.
+The package is not currently published to npm.
 
 ```ts
 import { Sonexis } from "@sonexis/runtime";
@@ -101,12 +103,12 @@ changing one request cannot modify a later request.
 
 `MultiSourceSession` owns independent Runtime captures. It does not mix them: every frame keeps its
 source, stream, session, timestamp, and caller-assigned label. Every label has a fairly drained
-queue bounded to `maxQueueFrames` packets. A full label queue drops new frames;
+queue bounded to `maxQueuePackets` packets. A full label queue drops new frames;
 `droppedFrames` and `droppedFramesByLabel` report lost PCM sample frames, and the next retained
 labeled frame reports a local discontinuity.
 
 ```ts
-const group = sx.session({ maxQueueFrames: 128 });
+const group = sx.session({ maxQueuePackets: 128 });
 try {
   await group.add("conversation", "Discord");
   await group.add("media", "Spotify", AudioFormats.pcm48kStereo());
@@ -121,6 +123,9 @@ try {
 
 Timestamps remain independent Runtime stream clocks. The helper provides arrival-order
 multiplexing, not sample-accurate synchronization across applications.
+`failFast` defaults to `true`, so one member failure throws from `frames()` and
+closes the group. Set `failFast: false` to keep other members alive and inspect
+`errorsByLabel` for independently ended sources.
 
 ## Realtime playback
 
@@ -154,7 +159,8 @@ try {
 }
 ```
 
-`write()` validates complete interleaved sample frames, serializes concurrent callers, splits large
+`write()` validates complete interleaved sample frames; each nonempty call must
+contain at least 1 ms of audio, so coalesce smaller model fragments. It serializes concurrent callers and splits large
 chunks into packets no longer than 200 ms, and awaits Node's Unix-socket `drain` signal. The SDK
 does not add an unbounded queue. Optional `timestampNs`, `discontinuity`, and `signal` values can be
 passed with each write:
@@ -229,7 +235,10 @@ counters. The SDK validates and exposes those mirrors for conversion to
 an older Runtime, feature-detect the mirror and do not use a JSON `number`
 above `Number.MAX_SAFE_INTEGER` for long-running sample-accurate arithmetic.
 
-`PermissionDeniedError` indicates that the signed Runtime identity lacks
-capture permission. Enable `sonexis-runtime` in **System Settings > Privacy &
-Security > Screen & System Audio Recording**, restart Runtime, and retry a live
-capture; source enumeration alone does not exercise Process Tap permission.
+`PermissionDeniedError` maps an explicit `permission_denied` Runtime response.
+Core Audio does not consistently distinguish a denied Process Tap from other
+initialization failures, so missing permission may instead produce
+`CaptureFailedError` with code `capture_initialization_failed` and actionable
+permission guidance. In either case, enable `sonexis-runtime` in **System
+Settings > Privacy & Security > Screen & System Audio Recording**, restart the
+Runtime, and retry live capture; source enumeration alone does not exercise it.

@@ -31,6 +31,13 @@ validate_state_directory() {
             echo "Runtime state directory belongs to another user: $STATE_DIR" >&2
             exit 1
         }
+        STATE_MODE=$(stat -f %Lp "$STATE_DIR")
+        case "$STATE_MODE" in
+            *[2367][0-7]|*[0-7][2367])
+                echo "Runtime state directory must not be group- or world-writable: $STATE_DIR" >&2
+                exit 1
+                ;;
+        esac
     fi
     [ ! -L "$PID_FILE" ] || {
         echo "Refusing symbolic-link PID file: $PID_FILE" >&2
@@ -114,7 +121,7 @@ case "$COMMAND" in
         while [ "$ATTEMPTS" -lt 50 ]; do
             if STATUS=$(runtime_status); then
                 MANAGED_INSTANCE=$(status_instance "$STATUS")
-                PID_TEMP="$STATE_DIR/.runtime.pid.$$"
+                PID_TEMP=$(mktemp "$STATE_DIR/.runtime.pid.XXXXXX")
                 printf '%s\n%s\n' "$MANAGED_PID" "$MANAGED_INSTANCE" > "$PID_TEMP"
                 chmod 600 "$PID_TEMP"
                 mv "$PID_TEMP" "$PID_FILE"

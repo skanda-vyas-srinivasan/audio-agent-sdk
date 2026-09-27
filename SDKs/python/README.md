@@ -1,6 +1,6 @@
 # Sonexis Python SDK
 
-The source-aware, bidirectional async SDK for Sonexis Runtime v0.9. It connects
+The source-aware, bidirectional async SDK for Sonexis Runtime v1.0. It connects
 only to the local Unix-domain Runtime and keeps Core Audio details out of
 application code. The core package has no runtime dependencies and supports
 Python 3.9+.
@@ -18,7 +18,7 @@ python -c 'import sonexis; print(sonexis.__version__)'
 The editable install is the normal repository-development path. Release
 engineering also builds a wheel and source distribution locally; install the
 wheel into a clean environment with `python -m pip install PATH_TO_WHEEL`.
-Sonexis packages are not published to PyPI in v0.9.
+Sonexis packages are not currently published to PyPI.
 
 For completely offline testing, installation is unnecessary:
 
@@ -96,7 +96,8 @@ async def play(model_audio):
 ```
 
 `write()` accepts `bytes`, `bytearray`, or `memoryview` containing whole,
-interleaved PCM sample frames. It serializes concurrent callers and splits
+interleaved PCM sample frames. Each nonempty write must contain at least 1 ms
+of audio; coalesce smaller model fragments first. It serializes concurrent callers and splits
 large chunks into protocol packets no longer than 200 ms. Awaiting `write()`
 applies Unix-socket backpressure; the SDK does not add an unbounded queue.
 Supply `timestamp_ns=` when a producer has a stream-relative presentation
@@ -188,10 +189,14 @@ async with Sonexis() as sx:
 ```
 
 Captures remain independent and are never mixed. Every label has a fair queue
-bounded to `max_queue_frames` `AudioFrame` packets. `group.dropped_frames` and
+bounded to `max_queue_packets` complete `AudioFrame` packets. `group.dropped_frames` and
 `dropped_frames_by_label` count lost PCM sample frames; the next retained frame
 reports a local discontinuity. Independent Process Taps do not promise sample-accurate
 cross-application synchronization.
+
+`fail_fast=True` is the default: one member failure raises from `frames()` and
+the context manager closes the group. Use `fail_fast=False` for independent
+long-running members and inspect `errors_by_label` when one source ends.
 
 ## Format presets
 
@@ -306,7 +311,10 @@ formats, session limits, slow consumers, protocol failures, connection failures,
 capture failures, and provider failures. `reconnect()` creates a fresh control
 connection but never silently recreates captures or binds to a relaunched app.
 
-`PermissionDeniedError` means the signed Runtime identity lacks macOS capture
-permission. Enable `sonexis-runtime` in **System Settings > Privacy & Security
-> Screen & System Audio Recording**, restart the Runtime process, and retry a
-live capture; source enumeration by itself does not verify permission.
+`PermissionDeniedError` maps an explicit `permission_denied` Runtime response.
+Core Audio does not consistently distinguish a denied Process Tap from other
+initialization failures, so missing permission may instead raise
+`CaptureFailedError` with code `capture_initialization_failed` and actionable
+permission guidance. In either case, enable `sonexis-runtime` in **System
+Settings > Privacy & Security > Screen & System Audio Recording**, restart the
+Runtime, and retry live capture; source enumeration alone does not verify it.

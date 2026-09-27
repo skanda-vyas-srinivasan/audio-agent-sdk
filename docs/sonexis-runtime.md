@@ -1,4 +1,4 @@
-# Sonexis Runtime v0.9
+# Sonexis Runtime v1.0
 
 ## Purpose
 
@@ -20,9 +20,10 @@ an otherwise healthy output session. v0.7 adds provider-neutral activity edges,
 source-correlated provider responses, resilient labeled multi-source
 consumption, and a safer structured MCP control surface without changing
 protocol v2 or either PCM data plane. v0.8 hardens lifecycle, diagnostics,
-socket migration, cancellation, and long-running resource accounting. v0.9 is
-the public-beta/API-freeze candidate: it inventories the supported surface,
-documents compatibility, and produces verifiable local release artifacts.
+socket migration, cancellation, and long-running resource accounting. v0.9
+inventoried and froze the public surface; 1.0 promotes that provider-neutral
+surface to the documented compatibility policy and retains reproducible local
+release artifacts with bounded integrity and metadata verification.
 
 The Runtime is audio infrastructure. It does not provide transcription, models,
 cloud transport, authentication, accounts, or acoustic echo cancellation, and
@@ -128,8 +129,10 @@ capture uses that identity for macOS Screen & System Audio Recording
 permission. The Sonexis application and Runtime have separate permission
 identities.
 
-The first `capture` may trigger the macOS prompt. If it does not, or capture
-returns `permission_denied`, open **System Settings > Privacy & Security >
+The first `capture` may trigger the macOS prompt. Core Audio does not provide a
+reliable permission-specific status for every Process Tap failure, so a denied
+grant can surface as the actionable `capture_initialization_failed` error (or
+as `permission_denied` when the platform identifies it). Open **System Settings > Privacy & Security >
 Screen & System Audio Recording**, enable the signed `sonexis-runtime` entry,
 then restart it with `Scripts/runtime-dev.sh stop` and `start`. Verify with an
 audible source and `sonexisctl capture SOURCE --debug`; `sources` alone proves
@@ -195,7 +198,7 @@ A successful response includes a distinct response ID and the negotiated platfor
   "ok": true,
   "handshake": {
     "protocol_version": 2,
-    "runtime_version": "0.9.0",
+    "runtime_version": "1.0.0",
     "runtime_instance_id": "UUID",
     "capabilities": ["application_sources", "capture_sessions", "event_stream", "format_negotiation", "multiple_sessions", "pcm_v2", "runtime_diagnostics", "runtime_diagnostics_v2", "output_sessions", "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush", "default_device_playback", "output_destination_events"],
     "supported_formats": [
@@ -221,7 +224,7 @@ A successful response includes a distinct response ID and the negotiated platfor
 }
 ```
 
-Protocol version 2 remains mandatory in v0.9. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
+Protocol version 2 remains mandatory in 1.0. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
 
 Supported commands:
 
@@ -530,6 +533,13 @@ sampled off the realtime callback.
 - Detailed Process Tap lifecycle logging is opt-in through
   `SONEXIS_AUDIO_DEBUG=1`; normal Runtime operation does not persist device UIDs
   or per-session audio metadata.
+- `verify-runtime-artifacts.sh` verifies bounded package inventory, hashes,
+  signatures, identifiers, versions, and architectures without executing the
+  candidate binaries. Bundle hashes are self-consistency evidence, not publisher
+  authenticity: for a copied bundle, set trusted
+  `SONEXIS_EXPECTED_TEAM_ID` and `SONEXIS_EXPECTED_SOURCE_COMMIT` values obtained
+  outside that bundle. Apple Development signatures are local engineering
+  identity, not a substitute for Developer ID and notarization.
 
 ## Troubleshooting
 
@@ -570,7 +580,9 @@ sampled off the realtime callback.
   nanosecond/counter field that can exceed JavaScript's safe integer range now
   has a decimal-string exact mirror. TypeScript uses those mirrors for
   `bigint`; binary PCM timestamps are already `bigint`.
-- Protocol v2 is the first developer-preview contract. Fields were finalized within this milestone; future incompatible changes require a new protocol version rather than adding required v2 fields.
+- Protocol v2 began as the developer-preview contract and is now the stable
+  1.0 wire contract. Future incompatible changes require a new protocol version
+  rather than adding required v2 fields.
 - The current Runtime has generic loopback-device routing but no bundled `Sonexis Agent Input`
   driver. See [virtual device design](virtual-audio-device-design.md).
 - Sonexis prevents an internal digital loop for process-specific capture but

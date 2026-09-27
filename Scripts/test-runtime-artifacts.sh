@@ -26,6 +26,18 @@ expect_failure() {
 VERSION=$(/usr/bin/python3 -c \
     'import json,sys; print(json.load(open(sys.argv[1]))["runtime_version"])' \
     "$SOURCE/manifest.json")
+TEAM=$(/usr/bin/python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1]))["signing"]["team_identifier"])' \
+    "$SOURCE/manifest.json")
+COMMIT=$(/usr/bin/python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' \
+    "$SOURCE/manifest.json")
+SONEXIS_EXPECTED_TEAM_ID="$TEAM" SONEXIS_EXPECTED_SOURCE_COMMIT="$COMMIT" \
+    "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$SOURCE" >/dev/null
+expect_failure env SONEXIS_EXPECTED_TEAM_ID=AAAAAAAAAA \
+    "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$SOURCE"
+expect_failure env SONEXIS_EXPECTED_SOURCE_COMMIT=0000000000000000000000000000000000000000 \
+    "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$SOURCE"
 
 copy_fixture() {
     [ ! -L "$TEST_DIR/candidate" ] || {
@@ -37,8 +49,7 @@ copy_fixture() {
     cp "$SOURCE"/* "$TEST_DIR/candidate/"
 }
 
-# Payload tampering must fail the manifest digest before an executable is run or
-# a package is unpacked.
+# Payload tampering must fail the manifest digest before a package is unpacked.
 copy_fixture
 printf '\000' >>"$TEST_DIR/candidate/sonexis-runtime-$VERSION.tgz"
 expect_failure "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$TEST_DIR/candidate"

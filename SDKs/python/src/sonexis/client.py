@@ -48,7 +48,7 @@ class Sonexis:
     """A reusable asynchronous connection to the local Sonexis Runtime."""
 
     def __init__(self, socket_path: Optional[str] = None, *, client_name: str = "sonexis-python",
-                 client_version: str = "0.9.0") -> None:
+                 client_version: str = "1.0.0") -> None:
         configured = socket_path or os.environ.get("SONEXIS_RUNTIME_SOCKET")
         current = os.path.join(tempfile.gettempdir(), f"sx-{os.getuid()}", "control.sock")
         legacy = f"/tmp/sonexis-runtime-{os.getuid()}/control.sock"

@@ -52,7 +52,7 @@ do {
            "output metrics omitted exact counter")
 
     let largeCounter = UInt64(9_007_199_254_740_993)
-    let preciseStatus = RuntimeStatusDTO(runtimeVersion: "0.9.0",
+    let preciseStatus = RuntimeStatusDTO(runtimeVersion: "1.0.0",
         runtimeInstanceID: "instance", uptimeNanoseconds: largeCounter,
         activeClients: 1, activeSessions: 0, eventSubscribers: 0,
         totalSessionsStarted: largeCounter, totalFramesForwarded: largeCounter,

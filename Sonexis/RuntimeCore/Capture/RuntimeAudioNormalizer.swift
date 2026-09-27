@@ -24,6 +24,18 @@ enum AudioNormalizationError: Error, CustomStringConvertible {
 /// Stateful AVAudioConverter wrapper. It is confined to a capture worker queue;
 /// none of its allocation or conversion work is reachable from the HAL callback.
 final class RuntimeAudioNormalizer {
+    static let supportedInputSampleRates = 8_000.0...192_000.0
+    static let supportedInputChannels: ClosedRange<UInt32> = 1...8
+
+    static func validateInputFormat(sampleRate: Double, channels: UInt32) throws {
+        guard sampleRate.isFinite,
+              supportedInputSampleRates.contains(sampleRate),
+              supportedInputChannels.contains(channels) else {
+            throw AudioNormalizationError.unsupportedInputFormat(
+                sampleRate: sampleRate, channels: channels)
+        }
+    }
+
     private let inputFormat: AVAudioFormat
     private let outputFormat: AVAudioFormat
     private let converter: AVAudioConverter
@@ -34,9 +46,7 @@ final class RuntimeAudioNormalizer {
     init(sampleRate: Double, channels: UInt32,
          output: RuntimePCMFormat = .pcm16Mono16kHz,
          maxInputFrames: AVAudioFrameCount = 2_048) throws {
-        guard sampleRate > 0, channels > 0 else {
-            throw AudioNormalizationError.unsupportedInputFormat(sampleRate: sampleRate, channels: channels)
-        }
+        try Self.validateInputFormat(sampleRate: sampleRate, channels: channels)
         let outputCommonFormat: AVAudioCommonFormat = output.sampleFormat == .pcmS16LE
             ? .pcmFormatInt16 : .pcmFormatFloat32
         guard let inputFormat = AVAudioFormat(

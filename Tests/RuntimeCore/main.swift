@@ -13,6 +13,21 @@ do {
     expect(first.id == restarted.id, "application source identity changed with PID")
     expect(first.processIdentifiers == [200, 400], "source PIDs were not normalized")
 
+    for (sampleRate, channels) in [
+        (Double.nan, UInt32(2)), (Double.infinity, UInt32(2)),
+        (7_999.0, UInt32(2)), (192_001.0, UInt32(2)),
+        (48_000.0, UInt32(0)), (48_000.0, UInt32(9)),
+    ] {
+        do {
+            _ = try RuntimeAudioNormalizer(sampleRate: sampleRate, channels: channels)
+            fatalError("unsafe native capture format was accepted: \(sampleRate)/\(channels)")
+        } catch AudioNormalizationError.unsupportedInputFormat {
+            // Expected: reject before AVAudioConverter or ring allocation.
+        }
+    }
+    try RuntimeAudioNormalizer.validateInputFormat(sampleRate: 8_000, channels: 1)
+    try RuntimeAudioNormalizer.validateInputFormat(sampleRate: 192_000, channels: 8)
+
     let nativeFrames: UInt32 = 4_800
     var samples = [Float](repeating: 0, count: Int(nativeFrames) * 2)
     for frame in 0..<Int(nativeFrames) {

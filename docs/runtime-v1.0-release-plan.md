@@ -91,8 +91,9 @@ The final candidate must pass from a clean committed state:
   smoke tests;
 - signed universal Runtime/CLI Release builds and development
   install/start/status/restart/stop/uninstall;
-- reproducible artifact creation, independent verification, and adversarial
-  tamper/inventory/manifest/symlink rejection;
+- reproducible artifact creation, bounded integrity verification anchored to an
+  expected team/source commit, and adversarial tamper/inventory/manifest/symlink
+  rejection;
 - documentation link/version consistency and `git diff --check`.
 
 P0/P1 correctness or security findings block the candidate. Manual physical

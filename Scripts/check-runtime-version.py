@@ -53,8 +53,16 @@ def main() -> None:
     require_version("SDKs/python/setup.py", r'version="([^"]+)"', 1)
     require_version("SDKs/python/src/sonexis/client.py", r'client_version: str = "([^"]+)"', 1)
     require_version("SDKs/python/src/sonexis/mcp_server.py", r'client_version="([^"]+)"', 1)
+    require_version("SDKs/python/src/sonexis/mcp_server.py", r'^\s*version="([^"]+)"', 1)
     require_version("SDKs/python/src/sonexis/__init__.py", r'__version__ = "([^"]+)"', 1)
     require_version("SDKs/typescript/src/index.ts", r'client_version: "([^"]+)"', 1)
+
+    if int(EXPECTED.split(".", 1)[0]) >= 1:
+        stable_classifier = "Development Status :: 5 - Production/Stable"
+        for path in ("SDKs/python/pyproject.toml", "SDKs/python/setup.py"):
+            text = (ROOT / path).read_text(encoding="utf-8")
+            if stable_classifier not in text or "Development Status :: 4 - Beta" in text:
+                raise AssertionError(f"{path}: 1.x package must declare Production/Stable")
 
     package = json.loads((ROOT / "SDKs/typescript/package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "SDKs/typescript/package-lock.json").read_text(encoding="utf-8"))

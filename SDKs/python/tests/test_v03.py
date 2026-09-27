@@ -849,6 +849,17 @@ class MCPControlTests(unittest.IsolatedAsyncioTestCase):
             await tools.get_source("Test", 1)
         self.assertEqual(error.exception.code, "invalid_argument")
 
+    async def test_mcp_bounds_mutating_arguments(self):
+        tools = SonexisControlTools(FakeControlClient(), allow_capture=True)
+        for source, profile in (("x" * 513, "speech_16k"),
+                                ("Test", "x" * 65), ("", "speech_16k")):
+            with self.assertRaises(SonexisError) as error:
+                await tools.start_capture(source, profile)
+            self.assertEqual(error.exception.code, "invalid_argument")
+        with self.assertRaises(SonexisError) as error:
+            await tools.get_session("x" * 129)
+        self.assertEqual(error.exception.code, "invalid_argument")
+
     async def test_mcp_capture_ownership_survives_cancellation_and_stop_error(self):
         class SlowClient(FakeControlClient):
             def __init__(self):

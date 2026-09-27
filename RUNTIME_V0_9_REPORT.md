@@ -6,7 +6,7 @@ Sonexis Runtime v0.9 is the public-beta and API-freeze candidate. It preserves
 the v0.8 capture, playback, duplex, event, diagnostics, provider-adapter, CLI,
 and MCP behavior while making the supported surface explicit, closing
 cross-language precision and developer-experience gaps, and producing
-independently verifiable local release artifacts.
+locally verifiable release artifacts.
 
 The Runtime and CLI remain local macOS developer products. This release does
 not claim Developer ID distribution, notarization, or an installer suitable for
@@ -80,9 +80,11 @@ build and creates a versioned local directory containing:
   and SHA-256 metadata;
 - `SHA256SUMS`.
 
-`Scripts/verify-runtime-artifacts.sh` independently checks hashes, manifest
-membership, versions, architectures, signatures, bundle identifiers, capture
-permission metadata, and SDK package contents. Artifacts are generated below
+`Scripts/verify-runtime-artifacts.sh` checks hashes, manifest membership,
+versions, architectures, signatures, bundle identifiers, capture permission
+metadata, and SDK package contents. These checks establish internal integrity,
+not publisher authenticity; current verification can additionally require a
+trusted expected signing team and source commit. Artifacts are generated below
 ignored `.build/` paths and are not committed or published.
 
 ## Documentation
@@ -115,7 +117,7 @@ source commit `fae764c268257a22f20b59c27ccfd48232054af4` and passed:
 - signed universal Runtime and CLI Release builds, stable bundle identifiers,
   `NSAudioCaptureUsageDescription`, deployment target 14.4, and version checks;
 - development install/start/status/restart/stop/uninstall lifecycle;
-- reproducible local artifact creation and independent verification;
+- reproducible local artifact creation and bounded integrity verification;
 - intentional hash tampering, unexpected inventory, dishonest manifest, and
   symlink attacks were all rejected by the verifier.
 

@@ -210,7 +210,14 @@ final class AudioCaptureSession: @unchecked Sendable {
         let isFloat32 = tapFormat.mFormatID == kAudioFormatLinearPCM
             && (tapFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0
             && tapFormat.mBitsPerChannel == 32
-        guard isFloat32, tapFormat.mChannelsPerFrame > 0, tapFormat.mSampleRate > 0 else {
+        guard isFloat32 else {
+            throw AudioCaptureError.invalidTapFormat(tapFormat.formatSummary)
+        }
+        do {
+            try RuntimeAudioNormalizer.validateInputFormat(
+                sampleRate: tapFormat.mSampleRate,
+                channels: tapFormat.mChannelsPerFrame)
+        } catch {
             throw AudioCaptureError.invalidTapFormat(tapFormat.formatSummary)
         }
 

@@ -2,7 +2,7 @@ import Foundation
 
 public enum RuntimeProtocolInfo {
     public static let protocolVersion = 2
-    public static let runtimeVersion = "0.9.0"
+    public static let runtimeVersion = "1.0.0"
     public static let capabilities = [
         "application_sources", "capture_sessions", "event_stream", "format_negotiation",
         "multiple_sessions", "pcm_v2", "runtime_diagnostics", "runtime_diagnostics_v2",
@@ -985,7 +985,10 @@ public enum RuntimeProtocolCodec {
     private static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .custom { path in
-            let snake = path.last!.stringValue
+            guard let codingKey = path.last else {
+                return RuntimeCodingKey("value")
+            }
+            let snake = codingKey.stringValue
             let pieces = snake.split(separator: "_")
             var camel = pieces.first.map(String.init) ?? snake
             for piece in pieces.dropFirst() {
@@ -998,7 +1001,7 @@ public enum RuntimeProtocolCodec {
                 camel.removeLast(2)
                 camel += "ID"
             }
-            return RuntimeCodingKey(stringValue: camel)!
+            return RuntimeCodingKey(camel)
         }
         return decoder
     }
@@ -1030,7 +1033,8 @@ public enum RuntimeProtocolCodec {
 private struct RuntimeCodingKey: CodingKey {
     let stringValue: String
     let intValue: Int?
-    init?(stringValue: String) { self.stringValue = stringValue; intValue = nil }
+    init(_ stringValue: String) { self.stringValue = stringValue; intValue = nil }
+    init?(stringValue: String) { self.init(stringValue) }
     init?(intValue: Int) { stringValue = String(intValue); self.intValue = intValue }
 }
 

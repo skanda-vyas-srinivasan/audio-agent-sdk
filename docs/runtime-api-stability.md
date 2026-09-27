@@ -1,22 +1,22 @@
 # Runtime Public API and Stability
 
-This inventory defines the Sonexis Runtime v0.9 API-freeze candidate. Anything
-not listed here is internal even when its source declaration is visible in this
-monorepo. “Stable candidate” means intended for the 1.0 compatibility promise;
-v0.9 itself remains a public beta.
+This inventory defines the Sonexis Runtime 1.0 public API. Anything not listed
+here is internal even when its source declaration is visible in this monorepo.
+“Stable” means covered by the compatibility policy; experimental integrations
+remain explicitly outside that promise.
 
 ## Protocol v2
 
 | Surface | Classification | Notes |
 |---|---|---|
-| NDJSON envelope, request/response IDs, `hello`, `ping` | Stable candidate | Unknown commands and unsupported versions return structured errors. |
-| `list_sources`, `start_capture`, `stop_capture`, `session_status` | Stable candidate | Capture identity is source/session/stream ID, never Core Audio object ID. |
-| `runtime_status` | Stable candidate | New fields remain additive and capability-gated. Exact UInt64 mirrors are decimal strings. |
-| `subscribe_events`, `unsubscribe_events` | Stable candidate | Events are ordered per subscription; loss is explicit, global cross-stream ordering is not promised. |
-| `list_output_destinations`, `start_output`, `output_status`, `flush_output`, `stop_output` | Stable candidate | Flush rotates stream epoch; stop is terminal. |
-| SXPC v2 input/output binary frame header | Stable candidate | Magic/version/header size, byte order, IDs, sequence, timestamps, format, drop/discontinuity/EOS semantics are frozen candidates. |
-| Capability strings and resource limits | Stable candidate | Clients must ignore unknown capabilities and fields. |
-| Error envelope (`code`, `message`, `retryable`, `details`) | Stable candidate | Codes may be added; existing meanings will not be silently repurposed. Human messages are not machine contracts. |
+| NDJSON envelope, request/response IDs, `hello`, `ping` | Stable | Unknown commands and unsupported versions return structured errors. |
+| `list_sources`, `start_capture`, `stop_capture`, `session_status` | Stable | Capture identity is source/session/stream ID, never Core Audio object ID. |
+| `runtime_status` | Stable | New fields remain additive and capability-gated. Exact UInt64 mirrors are decimal strings. |
+| `subscribe_events`, `unsubscribe_events` | Stable | Events are ordered per subscription; loss is explicit, global cross-stream ordering is not promised. |
+| `list_output_destinations`, `start_output`, `output_status`, `flush_output`, `stop_output` | Stable | Flush rotates stream epoch; stop is terminal. |
+| SXPC v2 input/output binary frame header | Stable | Magic/version/header size, byte order, IDs, sequence, timestamps, format, drop/discontinuity/EOS semantics are frozen. |
+| Capability strings and resource limits | Stable | Clients must ignore unknown capabilities and fields. |
+| Error envelope (`code`, `message`, `retryable`, `details`) | Stable | Codes may be added; existing meanings will not be silently repurposed. Human messages are not machine contracts. |
 | Unix-socket filenames and compatibility alias | Compatibility bridge | Discover through SDK/default configuration; do not parse private data-socket names. The `/tmp` alias is transitional. |
 | Core Audio IDs, Process Tap objects, aggregate devices, IOProc details | Internal | Never public protocol. |
 
@@ -28,7 +28,7 @@ guaranteed Runtime event.
 ## Python
 
 The names in `sonexis.__all__` are the public package surface. The 1.0 stable
-candidate core is:
+core is:
 
 - `Sonexis` / compatibility alias `SonexisClient`;
 - `AudioSource`, `CaptureSession`, `AudioFrame`, `CaptureInfo`, `SessionMetrics`;
@@ -54,17 +54,17 @@ implementation, or provider client's private object.
 Exported capture/output/source/event/status/format/error types, `Sonexis`,
 `CaptureStream`, `AudioOutput`, `DuplexSession`, `MultiSourceSession`, activity
 primitives, selector helpers, `AudioFormats`, and async iteration/EventEmitter
-behavior are stable candidates. Low-level `encodeOutputFrame`, `decodeFrame`,
-and `decodeEvent` are **advanced stable candidates** for transport testing and
+behavior are stable. Low-level `encodeOutputFrame`, `decodeFrame`,
+and `decodeEvent` are **advanced stable APIs** for transport testing and
 custom SDK work; callers remain responsible for stream correlation and limits.
 
 No package-private method, pending map, socket object, queue, or wire-only helper
-is public even if present in generated JavaScript. Node 18+ is the candidate
+is public even if present in generated JavaScript. Node 18+ is the supported
 minimum.
 
 ## CLI
 
-Stable-candidate commands are `sources`, `status`, `diagnostics`, `capture`,
+Stable commands are `sources`, `status`, `diagnostics`, `capture`,
 `stop`, `watch`, `outputs`, `play`, `output-status`, `output-stop`, `version`,
 and `help`. `--json` is the machine-readable surface; human table/text layout is
 not frozen. Exit zero means success. Failures are nonzero, and JSON mode emits a
@@ -92,4 +92,4 @@ replacement for a Python/TypeScript data-plane client.
   canonical default.
 
 Removal of a compatibility bridge requires a documented deprecation spanning at
-least one minor release after 1.0. No bridge is removed in v0.9.
+least one minor release after 1.0. No bridge is removed in 1.0.

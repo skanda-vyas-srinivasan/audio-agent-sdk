@@ -60,7 +60,7 @@ not guaranteed to be sample-accurately synchronized.
 
 ```python
 async with Sonexis() as sx:
-    async with sx.session(max_queue_frames=128) as group:
+    async with sx.session(max_queue_packets=128) as group:
         await group.add("conversation", "Discord")
         await group.add("media", "Spotify")
         async for item in group.frames():

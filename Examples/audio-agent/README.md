@@ -17,6 +17,8 @@ python Examples/audio-agent/audio_agent.py --provider mock
 ```
 
 Choose a source by number. While capturing, enter `s` to switch sources or `q` to stop. The application prints stream/drop/latency statistics, watches for source removal and Runtime shutdown, and cleans up its capture on exit. `--output capture.wav` writes PCM16 audio for inspection.
+The mock provider emits its deterministic response after five seconds of input
+audio, so a shorter replay or capture intentionally produces no response.
 
 Provider modes are optional and keep credentials in the environment:
 
@@ -76,7 +78,7 @@ For deterministic offline development, replay a matching PCM16 WAV:
 ```sh
 python Examples/audio-agent/audio_agent.py \
   --provider mock \
-  --replay sample-16k-mono.wav \
+  --replay /path/to/pcm16-mono-16khz.wav \
   --realtime-replay \
   --non-interactive
 ```

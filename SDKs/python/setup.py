@@ -4,7 +4,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="sonexis",
-    version="0.9.0",
+    version="1.0.0",
     description="Source-aware bidirectional Python SDK for the local Sonexis audio Runtime",
     author="Sonexis contributors",
     url="https://github.com/skanda-vyas-srinivasan/Sonexis",
@@ -21,7 +21,7 @@ setup(
     python_requires=">=3.9",
     keywords=["audio", "coreaudio", "macos", "realtime", "sdk"],
     classifiers=[
-        "Development Status :: 4 - Beta",
+        "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.9",
