@@ -1,6 +1,7 @@
 """Bounded orchestration for independent labeled Sonexis capture streams."""
 
 import asyncio
+import warnings
 from collections import deque
 from dataclasses import dataclass
 from typing import AsyncIterator, Deque, Dict, Mapping, Optional, Set
@@ -51,12 +52,25 @@ class _StreamEnded:
 class MultiSourceSession:
     """Own independent captures while yielding their frames with stable labels."""
 
-    def __init__(self, client: Sonexis, *, max_queue_frames: int = 128,
-                 fail_fast: bool = True) -> None:
-        if max_queue_frames < 1:
-            raise ValueError("max_queue_frames must be positive")
+    def __init__(self, client: Sonexis, *, max_queue_packets: int = 128,
+                 fail_fast: bool = True,
+                 max_queue_frames: Optional[int] = None) -> None:
+        if max_queue_frames is not None:
+            if max_queue_packets != 128:
+                raise TypeError(
+                    "max_queue_packets and max_queue_frames cannot both be specified")
+            warnings.warn(
+                "max_queue_frames is deprecated; use max_queue_packets",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            max_queue_packets = max_queue_frames
+        if max_queue_packets < 1:
+            raise ValueError("max_queue_packets must be positive")
         self.client = client
-        self.max_queue_frames = max_queue_frames
+        self.max_queue_packets = max_queue_packets
+        # Compatibility mirror. The queue has always counted packets.
+        self.max_queue_frames = max_queue_packets
         self.fail_fast = fail_fast
         self.dropped_frames = 0
         self.dropped_frames_by_label: Dict[str, int] = {}
@@ -130,7 +144,7 @@ class MultiSourceSession:
                 queue = self._queues.get(label)
                 if queue is None:
                     return
-                if len(queue) >= self.max_queue_frames:
+                if len(queue) >= self.max_queue_packets:
                     self.dropped_frames += frame.frame_count
                     self.dropped_frames_by_label[label] += frame.frame_count
                     self._pending_drops[label] += frame.frame_count

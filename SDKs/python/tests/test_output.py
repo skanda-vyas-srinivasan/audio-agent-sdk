@@ -192,6 +192,14 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status.metrics.buffered_milliseconds, 10.0)
             await output.cancel()
 
+    async def test_generic_playback_default_matches_generic_capture_format(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            output = await client.playback()
+            request = next(value for value in self.runtime.requests
+                           if value["command"] == "start_output")
+            self.assertEqual(request["format"], AudioFormat().to_wire())
+            await output.cancel()
+
     async def test_write_splits_at_200ms_sequences_timestamps_and_eos(self):
         audio_format = AudioFormat.openai_realtime()
         frame_count = 12_000  # 500 ms at 24 kHz -> 200, 200, 100 ms.

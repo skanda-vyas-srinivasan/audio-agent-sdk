@@ -224,7 +224,8 @@ Binary audio sequence/timestamp fields and local frame receipt timestamps are
 `bigint`. Protocol-v2 keeps numeric JSON fields for compatibility, but v0.9
 also sends decimal-string exact mirrors for session start times and metrics,
 event timestamp/sequence/drop values, frame-drop totals, and Runtime status
-counters. The SDK prefers those mirrors for `bigint` values. When connected to
+counters. The SDK validates and exposes those mirrors for conversion to
+`bigint`. When connected to
 an older Runtime, feature-detect the mirror and do not use a JSON `number`
 above `Number.MAX_SAFE_INTEGER` for long-running sample-accurate arithmetic.
 

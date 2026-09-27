@@ -8,6 +8,7 @@ import os
 import tempfile
 import time
 import uuid
+import warnings
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, TYPE_CHECKING, Union
 
 from .errors import (AmbiguousOutputDestinationError, AmbiguousSourceError,
@@ -350,11 +351,27 @@ class Sonexis:
         self._captures.add(capture)
         return capture
 
-    def session(self, *, max_queue_frames: int = 128,
-                fail_fast: bool = True) -> "MultiSourceSession":
-        """Create a labeled multi-source capture session."""
+    def session(self, *, max_queue_packets: int = 128,
+                fail_fast: bool = True,
+                max_queue_frames: Optional[int] = None) -> "MultiSourceSession":
+        """Create a labeled multi-source capture session.
+
+        ``max_queue_packets`` bounds complete :class:`AudioFrame` packets, not
+        individual PCM sample frames. ``max_queue_frames`` remains as a
+        deprecated compatibility alias through the 0.x series.
+        """
+        if max_queue_frames is not None:
+            if max_queue_packets != 128:
+                raise TypeError(
+                    "max_queue_packets and max_queue_frames cannot both be specified")
+            warnings.warn(
+                "max_queue_frames is deprecated; use max_queue_packets",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            max_queue_packets = max_queue_frames
         from .multi import MultiSourceSession
-        return MultiSourceSession(self, max_queue_frames=max_queue_frames,
+        return MultiSourceSession(self, max_queue_packets=max_queue_packets,
                                   fail_fast=fail_fast)
 
     def duplex(self, input_source: SourceSelector, *,
@@ -524,7 +541,7 @@ class Sonexis:
         self,
         *,
         destination: OutputDestinationSelector = "default",
-        format: AudioFormat = AudioFormat.openai_realtime_output(),
+        format: AudioFormat = AudioFormat(),
         target_buffer_milliseconds: int = 60,
     ) -> "AudioOutput":
         """Create and attach a bounded client-to-Runtime PCM output stream."""
@@ -564,7 +581,7 @@ class Sonexis:
         self,
         *,
         destination: OutputDestinationSelector = "default",
-        format: AudioFormat = AudioFormat.openai_realtime_output(),
+        format: AudioFormat = AudioFormat(),
         target_buffer_milliseconds: int = 60,
     ) -> "AudioOutput":
         """Convenience alias for :meth:`create_output`."""

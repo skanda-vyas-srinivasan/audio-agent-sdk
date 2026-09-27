@@ -10,15 +10,26 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
 authors = [{name = "Sonexis contributors"}]
+keywords = ["audio", "coreaudio", "macos", "realtime", "sdk"]
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Operating System :: MacOS",
+  "Topic :: Multimedia :: Sound/Audio",
+  "Topic :: Software Development :: Libraries",
   "Typing :: Typed",
 ]
 
 [project.urls]
 Homepage = "https://sonexis.ink"
 Repository = "https://github.com/skanda-vyas-srinivasan/Sonexis"
+Issues = "https://github.com/skanda-vyas-srinivasan/Sonexis/issues"
 
 [project.optional-dependencies]
 openai = ["openai[realtime]>=2; python_version >= '3.10'"]

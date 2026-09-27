@@ -13,6 +13,7 @@ import {
   MultiSourceSession,
   resolveSource,
   Sonexis,
+  SonexisConnectionError,
   SonexisError,
   SourceNotFoundError,
 } from "../src/index.js";
@@ -96,11 +97,32 @@ test("strictly validates Runtime event envelopes and UTF-8", () => {
     event_id: "event-1",
     type: "capture_started",
     timestamp_nanoseconds: 123,
+    timestamp_nanoseconds_exact: "9007199254740993",
     event_sequence: 1,
+    event_sequence_exact: "9007199254740994",
+    dropped_events_before_exact: "9007199254740995",
+    dropped_frames_exact: "9007199254740996",
+    session: {
+      id: "capture", stream_id: "00112233-4455-6677-8899-aabbccddeeff",
+      source_id: "app.test", state: "capturing", format: AudioFormats.speech16k(),
+      data_socket_path: "/tmp/data.sock", started_at_nanoseconds: 1,
+      started_at_nanoseconds_exact: "9007199254740997",
+      metrics: { capture_callbacks: 1,
+        exact_counters: { capture_callbacks: "9007199254740998" } },
+    },
   })));
   assert.equal(event.type, "capture_started");
+  assert.equal(event.timestamp_nanoseconds_exact, "9007199254740993");
+  assert.equal(event.event_sequence_exact, "9007199254740994");
+  assert.equal(event.session?.started_at_nanoseconds_exact, "9007199254740997");
+  assert.equal(event.session?.metrics.exact_counters?.capture_callbacks,
+    "9007199254740998");
   assert.throws(() => decodeEvent(Buffer.from("{}")), SonexisError);
   assert.throws(() => decodeEvent(Buffer.from([0xff])), SonexisError);
+  assert.throws(() => decodeEvent(Buffer.from(JSON.stringify({
+    protocol_version: 2, event_id: "event-bad", type: "capture_started",
+    timestamp_nanoseconds: 1, timestamp_nanoseconds_exact: "01",
+  }))), SonexisError);
   const destination = {
     id: "coreaudio:a", kind: "playback", name: "Speakers", is_available: true,
     is_default: false, follows_system_default: false, supported_formats: [AudioFormats.speech16k()],
@@ -152,7 +174,7 @@ test("missing Runtime reports an actionable structured connection error", async 
   const path = `/tmp/sonexis-not-running-${process.pid}.sock`;
   const client = new Sonexis(path);
   await assert.rejects(client.connect(), (error: unknown) => {
-    assert.ok(error instanceof SonexisError);
+    assert.ok(error instanceof SonexisConnectionError);
     assert.equal(error.code, "runtime_unavailable");
     assert.match(error.message, /Start the local sonexis-runtime process/);
     assert.equal(error.details.socket_path, path);
@@ -222,6 +244,19 @@ test("multi-source sessions preserve labels and source-aware frame context", asy
   assert.equal(received.get("media")?.sessionId, "session-music");
   assert.equal(received.get("conversation")?.source.id, "app.chat");
   assert.deepEqual(group.labels, []);
+});
+
+test("multi-source queue uses packet name with frame-name compatibility", async () => {
+  const client = new Sonexis("/unused");
+  const canonical = client.session({ maxQueuePackets: 7 });
+  assert.equal(canonical.maxQueuePackets, 7);
+  assert.equal(canonical.maxQueueFrames, 7);
+  await canonical.close();
+
+  const compatibility = client.session({ maxQueueFrames: 5 });
+  assert.equal(compatibility.maxQueuePackets, 5);
+  await compatibility.close();
+  assert.throws(() => client.session({ maxQueuePackets: 4, maxQueueFrames: 4 }), TypeError);
 });
 
 function frame(audioSource: AudioSource, sessionId: string, streamId: string): AudioFrame {

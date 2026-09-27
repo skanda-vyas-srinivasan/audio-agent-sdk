@@ -249,7 +249,7 @@ class AIConsumerSoakTests(unittest.IsolatedAsyncioTestCase):
         labels = set()
         received_frames = 0
         async with Sonexis(self.runtime.control_path) as client:
-            async with client.session(max_queue_frames=3) as group:
+            async with client.session(max_queue_packets=3) as group:
                 await group.add("media", "Music")
                 await group.add("conversation", "Conversation")
                 async for item in group.frames():

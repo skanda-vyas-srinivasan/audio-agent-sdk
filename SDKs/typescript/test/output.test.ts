@@ -21,6 +21,7 @@ import {
   resolveOutputDestination,
   Sonexis,
   SonexisError,
+  UnsupportedFormatError,
 } from "../src/index.js";
 
 test("default event set includes v0.4 output lifecycle events", () => {
@@ -135,6 +136,7 @@ class FakeOutputRuntime {
       format: AudioFormats.openAIRealtime(),
       data_socket_path: this.streamPaths[epoch],
       started_at_nanoseconds: 100,
+      started_at_nanoseconds_exact: "9007199254740993",
       target_buffer_milliseconds: 80,
       metrics: {
         packets_received: this.packets[epoch].length,
@@ -156,6 +158,7 @@ class FakeOutputRuntime {
         conversion_nanoseconds: 1000,
         route_changes: 0,
         producer_connected: this.state === "ready",
+        exact_counters: { input_frames_received: "9007199254740993" },
       },
     };
   }
@@ -189,7 +192,8 @@ class FakeOutputRuntime {
             id: "default", kind: "playback", name: "System Default",
             is_available: true, is_default: true, follows_system_default: true,
             active_device_name: "Test Speakers", native_format: AudioFormats.pcm48kStereo(),
-            supported_formats: [AudioFormats.openAIRealtime(), AudioFormats.pcm48kStereo()],
+            supported_formats: [AudioFormats.speech16k(), AudioFormats.openAIRealtime(),
+              AudioFormats.pcm48kStereo()],
           }];
         } else if (command === "start_output") {
           if (this.options.startError) {
@@ -272,14 +276,26 @@ test("enumerates typed destinations and exposes output metrics", async (context)
   const destination: AudioOutputDestination = destinations[0];
   assert.equal(destination.kind, "playback");
   assert.equal(destination.active_device_name, "Test Speakers");
-  assert.equal(destination.supported_formats[1].channel_count, 2);
+  assert.equal(destination.supported_formats[2].channel_count, 2);
   const output = await client.playback({ destination });
   assert.equal(output.destination.id, "default");
   const status = await output.refresh();
   assert.equal(status.metrics.device_frames_rendered, 240);
   assert.equal(status.metrics.dropped_frames, 3);
   assert.equal(status.metrics.buffered_milliseconds, 10);
+  assert.equal(status.started_at_nanoseconds_exact, "9007199254740993");
+  assert.equal(status.metrics.exact_counters?.input_frames_received, "9007199254740993");
   await output.cancel();
+});
+
+test("generic playback default matches generic capture format", async (context) => {
+  const runtime = await startRuntime(context);
+  const client = await Sonexis.connect(runtime.controlPath);
+  const output = await client.playback();
+  const request = runtime.requests.find((value) => value.command === "start_output");
+  assert.deepEqual(request?.format, AudioFormats.speech16k());
+  await output.cancel();
+  await client.close();
 });
 
 test("splits writes at 200 ms with ordered timestamps and sends one EOS", async (context) => {
@@ -360,8 +376,9 @@ test("reports capability, control, validation, and malformed-session errors", as
   const rejected = await startRuntime(context, { startError: true });
   const rejectedClient = await Sonexis.connect(rejected.controlPath);
   await assert.rejects(rejectedClient.playback(), (error: unknown) => {
-    assert.ok(error instanceof SonexisError);
+    assert.ok(error instanceof UnsupportedFormatError);
     assert.equal(error.code, "unsupported_format");
+    assert.equal(error.requestId === undefined, false);
     return true;
   });
   await rejectedClient.close();
@@ -382,6 +399,17 @@ test("reports capability, control, validation, and malformed-session errors", as
   await assert.rejects(output.write(Buffer.alloc(3)), RangeError);
   await output.cancel();
   await validClient.close();
+});
+
+test("reconnect creates a fresh control connection without resuming streams", async (context) => {
+  const runtime = await startRuntime(context);
+  const client = await Sonexis.connect(runtime.controlPath);
+  const firstInstance = client.handshake?.runtime_instance_id;
+  const handshake = await client.reconnect({ attempts: 0 });
+  assert.equal(handshake.runtime_instance_id, firstInstance);
+  assert.equal(runtime.commands.filter((value) => value === "hello").length, 2);
+  await assert.rejects(client.reconnect({ attempts: -1 }), RangeError);
+  await client.close();
 });
 
 test("duplex composes capture and output and closes both sides", async () => {

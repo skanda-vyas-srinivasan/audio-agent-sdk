@@ -10,6 +10,7 @@ import tempfile
 import threading
 import traceback
 import unittest
+import warnings
 import wave
 from dataclasses import replace
 from pathlib import Path
@@ -102,7 +103,7 @@ class V03SDKTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_labeled_multi_source_session(self):
         async with Sonexis(self.runtime.control_path) as client:
-            async with client.session(max_queue_frames=4) as group:
+            async with client.session(max_queue_packets=4) as group:
                 await group.add("music", "Spotify")
                 await group.add("conversation", "example.chat.one")
                 labels = set()
@@ -110,6 +111,23 @@ class V03SDKTests(unittest.IsolatedAsyncioTestCase):
                     labels.add(item.label)
                 self.assertEqual(labels, {"music", "conversation"})
                 self.assertEqual(group.labels, ())
+
+    async def test_multi_source_queue_uses_packet_name_with_compatibility_alias(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            canonical = client.session(max_queue_packets=7)
+            self.assertEqual(canonical.max_queue_packets, 7)
+            self.assertEqual(canonical.max_queue_frames, 7)
+            await canonical.aclose()
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                compatibility = client.session(max_queue_frames=5)
+            self.assertEqual(compatibility.max_queue_packets, 5)
+            self.assertTrue(any(item.category is DeprecationWarning for item in caught))
+            await compatibility.aclose()
+
+            with self.assertRaises(TypeError):
+                client.session(max_queue_packets=4, max_queue_frames=4)
 
 
 class ReplayAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
