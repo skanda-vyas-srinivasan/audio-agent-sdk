@@ -39,10 +39,11 @@ class FakeOutputRuntime:
         self.stream_closed = []
         self.flush_count = 0
         self.flush_delay = 0.0
-        self.flush_received = asyncio.Event()
+        self.flush_received = None
         self.status_state = "stopped"
 
     async def start(self):
+        self.flush_received = asyncio.Event()
         self.stream_closed = [asyncio.Event(), asyncio.Event()]
         for index, path in enumerate(self.stream_paths):
             server = await asyncio.start_unix_server(
@@ -118,6 +119,7 @@ class FakeOutputRuntime:
                             "message": "device vanished", "retryable": True}
                     response["output_session"] = session
                 elif command == "flush_output":
+                    assert self.flush_received is not None
                     self.flush_received.set()
                     if self.flush_delay:
                         await asyncio.sleep(self.flush_delay)
@@ -258,6 +260,7 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
         output = await client.playback()
         self.runtime.flush_delay = 1.0
         task = asyncio.create_task(output.flush())
+        assert self.runtime.flush_received is not None
         await asyncio.wait_for(self.runtime.flush_received.wait(), timeout=1.0)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
