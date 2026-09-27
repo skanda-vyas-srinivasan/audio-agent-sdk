@@ -263,6 +263,7 @@ public struct RuntimeResourceLimitsDTO: Codable, Equatable, Sendable {
     public let maximumOutputSessions: Int?
     public let maximumOutputSessionsPerClient: Int?
     public let maximumOutputPacketMilliseconds: Int?
+    public let maximumOutputDestinations: Int?
 
     public init(maximumControlClients: Int = 32, maximumSessions: Int = 16,
                 maximumSessionsPerClient: Int = 8, maximumSubscribersPerStream: Int = 4,
@@ -271,7 +272,8 @@ public struct RuntimeResourceLimitsDTO: Codable, Equatable, Sendable {
                 maximumEventSubscriptionsPerClient: Int = 4,
                 maximumOutputSessions: Int? = 8,
                 maximumOutputSessionsPerClient: Int? = 4,
-                maximumOutputPacketMilliseconds: Int? = 200) {
+                maximumOutputPacketMilliseconds: Int? = 200,
+                maximumOutputDestinations: Int? = 32) {
         self.maximumControlClients = maximumControlClients
         self.maximumSessions = maximumSessions
         self.maximumSessionsPerClient = maximumSessionsPerClient
@@ -282,6 +284,7 @@ public struct RuntimeResourceLimitsDTO: Codable, Equatable, Sendable {
         self.maximumOutputSessions = maximumOutputSessions
         self.maximumOutputSessionsPerClient = maximumOutputSessionsPerClient
         self.maximumOutputPacketMilliseconds = maximumOutputPacketMilliseconds
+        self.maximumOutputDestinations = maximumOutputDestinations
     }
 }
 
@@ -602,7 +605,7 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
         self.sourceID = sourceID
         self.sessionID = sessionID
         self.streamID = streamID
-        self.outputDestinationID = outputDestinationID
+        self.outputDestinationID = outputDestination?.id ?? outputDestinationID
         self.source = source
         self.session = session
         self.message = message

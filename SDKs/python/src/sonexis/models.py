@@ -176,17 +176,37 @@ class AudioOutputDestination:
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "AudioOutputDestination":
-        formats = value.get("supported_formats", [])
+        if not isinstance(value, dict):
+            raise TypeError("output destination must be an object")
+        for field in ("id", "name", "kind"):
+            if not isinstance(value.get(field), str) or not value[field]:
+                raise ValueError(f"output destination {field} must be a non-empty string")
+        if value["kind"] not in ("playback", "virtual_input"):
+            raise ValueError("unknown output destination kind")
+        available = value.get("is_available", value.get("available", False))
+        if not isinstance(available, bool):
+            raise TypeError("output destination is_available must be a boolean")
+        for field in ("is_default", "follows_system_default"):
+            if not isinstance(value.get(field), bool):
+                raise TypeError(f"output destination {field} must be a boolean")
+        for field in ("active_device_id", "active_device_name"):
+            if value.get(field) is not None and not isinstance(value[field], str):
+                raise TypeError(f"output destination {field} must be a string or null")
+        formats = value.get("supported_formats")
         native = value.get("native_format")
+        if not isinstance(formats, list):
+            raise TypeError("output destination supported_formats must be an array")
+        if native is not None and not isinstance(native, dict):
+            raise TypeError("output destination native_format must be an object or null")
         return cls(
-            str(value["id"]),
-            str(value["name"]),
-            str(value.get("kind", "device")),
-            bool(value.get("is_available", value.get("available", False))),
-            bool(value.get("is_default", False)),
-            bool(value.get("follows_system_default", False)),
-            str(value["active_device_id"]) if value.get("active_device_id") else None,
-            str(value["active_device_name"]) if value.get("active_device_name") else None,
+            value["id"],
+            value["name"],
+            value["kind"],
+            available,
+            value["is_default"],
+            value["follows_system_default"],
+            value.get("active_device_id"),
+            value.get("active_device_name"),
             AudioFormat.from_wire(native) if native else None,
             [AudioFormat.from_wire(item) for item in formats],
         )
@@ -376,11 +396,20 @@ class RuntimeEvent:
                 or not isinstance(value.get("type"), str)
                 or not isinstance(value.get("timestamp_nanoseconds"), int)):
             raise ValueError("invalid Runtime event envelope")
+        destination = (AudioOutputDestination.from_wire(value["output_destination"])
+                       if value.get("output_destination") is not None else None)
+        destination_id = value.get("output_destination_id")
+        if destination_id is not None and not isinstance(destination_id, str):
+            raise ValueError("invalid Runtime event output destination ID")
+        if destination is not None and destination_id is not None and destination.id != destination_id:
+            raise ValueError("Runtime event output destination ID does not match its snapshot")
+        if destination_id is None and destination is not None:
+            destination_id = destination.id
         return cls(
             str(value["event_id"]), str(value["type"]),
             int(value["timestamp_nanoseconds"]), value.get("source_id"),
             value.get("session_id"), value.get("stream_id"),
-            value.get("output_destination_id"),
+            destination_id,
             value.get("message"),
             int(value["dropped_frames"]) if value.get("dropped_frames") is not None else None,
             int(value["event_sequence"]) if value.get("event_sequence") is not None else None,
@@ -389,8 +418,7 @@ class RuntimeEvent:
             CaptureInfo.from_wire(value["session"]) if value.get("session") else None,
             RuntimeErrorInfo.from_wire(value["error"]) if value.get("error") else None,
             OutputInfo.from_wire(value["output_session"]) if value.get("output_session") else None,
-            AudioOutputDestination.from_wire(value["output_destination"])
-            if value.get("output_destination") else None,
+            destination,
         )
 
 

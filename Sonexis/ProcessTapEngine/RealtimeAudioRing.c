@@ -147,10 +147,9 @@ SonexisAudioRingBuffer *SonexisAudioRingBufferCreate(uint32_t capacityFrames, ui
 }
 
 static bool beginRead(SonexisAudioRingBuffer *ringBuffer) {
-    if (!atomic_load_explicit(&ringBuffer->readEnabled, memory_order_acquire)) {
-        return false;
-    }
-
+    // Register before observing the gate. A control-thread quiesce can then
+    // close the gate and wait for every callback that could have observed the
+    // ring, including one racing the transition.
     atomic_fetch_add_explicit(&ringBuffer->activeReaders, 1, memory_order_acq_rel);
     if (!atomic_load_explicit(&ringBuffer->readEnabled, memory_order_acquire)) {
         atomic_fetch_sub_explicit(&ringBuffer->activeReaders, 1, memory_order_release);
@@ -736,6 +735,16 @@ void SonexisAudioRingBufferSetReadEnabled(SonexisAudioRingBuffer *ringBuffer, bo
     }
 
     atomic_store_explicit(&ringBuffer->readEnabled, enabled, memory_order_release);
+}
+
+void SonexisAudioRingBufferQuiesceReads(SonexisAudioRingBuffer *ringBuffer) {
+    if (ringBuffer == NULL) {
+        return;
+    }
+    atomic_store_explicit(&ringBuffer->readEnabled, false, memory_order_release);
+    while (atomic_load_explicit(&ringBuffer->activeReaders, memory_order_acquire) != 0) {
+        sched_yield();
+    }
 }
 
 void SonexisAudioRingBufferSetTargetFillFrames(SonexisAudioRingBuffer *ringBuffer, uint32_t targetFillFrames) {

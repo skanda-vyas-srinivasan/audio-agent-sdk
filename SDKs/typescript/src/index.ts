@@ -367,7 +367,7 @@ export function filterOutputDestinations(destinations: readonly AudioOutputDesti
 
 /** Resolve an exact ID, exact name, kind alias, or typed destination uniquely. */
 export function resolveOutputDestination(destinations: readonly AudioOutputDestination[],
-                                         selector: OutputDestinationSelector | undefined = "default",
+                                         selector?: OutputDestinationSelector,
                                          kind?: OutputDestinationKind): AudioOutputDestination {
   const available = destinations.filter((destination) => destination.is_available);
   let candidates: AudioOutputDestination[];
@@ -522,9 +522,12 @@ export class Sonexis extends EventEmitter {
     timeoutMs?: number; pollIntervalMs?: number; signal?: AbortSignal;
   } = {}): Promise<AudioSource> {
     const pollIntervalMs = options.pollIntervalMs ?? 250;
-    if (pollIntervalMs <= 0) throw new RangeError("pollIntervalMs must be positive");
-    if (options.timeoutMs !== undefined && options.timeoutMs < 0) {
-      throw new RangeError("timeoutMs must not be negative");
+    if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      throw new RangeError("pollIntervalMs must be finite and positive");
+    }
+    if (options.timeoutMs !== undefined
+        && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) {
+      throw new RangeError("timeoutMs must be finite and nonnegative");
     }
     const deadline = options.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs;
     while (true) {
@@ -594,10 +597,21 @@ export class Sonexis extends EventEmitter {
                                    pollIntervalMs?: number; signal?: AbortSignal } = {})
     : Promise<AudioOutputDestination> {
     const pollIntervalMs = options.pollIntervalMs ?? 250;
-    if (!(pollIntervalMs > 0)) throw new RangeError("pollIntervalMs must be positive");
+    if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      throw new RangeError("pollIntervalMs must be finite and positive");
+    }
+    if (options.timeoutMs !== undefined
+        && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) {
+      throw new RangeError("timeoutMs must be finite and nonnegative");
+    }
     const deadline = options.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs;
     while (true) {
-      try { return await this.getOutputDestination(selector, options.kind); }
+      if (options.signal?.aborted) throw abortError();
+      try {
+        const destinations = await this.outputDestinations();
+        if (options.signal?.aborted) throw abortError();
+        return resolveOutputDestination(destinations, selector, options.kind);
+      }
       catch (error) {
         if (!(error instanceof OutputDestinationNotFoundError)) throw error;
         const remaining = deadline === undefined ? undefined : deadline - Date.now();
@@ -839,7 +853,7 @@ export class AudioOutput extends EventEmitter {
   private rotatingSocket?: Socket;
 
   private constructor(private readonly client: Sonexis, public info: OutputInfo,
-                      readonly destination: AudioOutputDestination, socket: Socket) {
+                      private currentDestination: AudioOutputDestination, socket: Socket) {
     super();
     this.socket = socket;
     this.observeSocket(socket);
@@ -854,6 +868,7 @@ export class AudioOutput extends EventEmitter {
 
   get closed(): boolean { return this.closing; }
   get metrics(): OutputMetrics { return this.info.metrics; }
+  get destination(): AudioOutputDestination { return this.currentDestination; }
 
   /**
    * Write whole interleaved PCM frames. Large writes are split into packets no
@@ -928,6 +943,7 @@ export class AudioOutput extends EventEmitter {
   async refresh(): Promise<OutputInfo> {
     this.info = await this.client.outputStatus(this.info.id);
     if (this.info.state === "failed") throw outputFailure(this.info);
+    this.currentDestination = await this.client.getOutputDestination(this.info.destination_id);
     return this.info;
   }
 
@@ -1937,6 +1953,15 @@ export function decodeEvent(line: Buffer): RuntimeEvent {
   const decoded = event as unknown as RuntimeEvent;
   if (event.output_session !== undefined && event.output_session !== null) {
     decoded.output_session = parseOutputInfo(event.output_session);
+  }
+  if (event.output_destination !== undefined && event.output_destination !== null) {
+    decoded.output_destination = parseOutputDestination(event.output_destination);
+    if (event.output_destination_id !== undefined
+        && event.output_destination_id !== decoded.output_destination.id) {
+      throw new SonexisError("invalid_event",
+        "Runtime event destination ID does not match its destination snapshot");
+    }
+    decoded.output_destination_id = decoded.output_destination.id;
   }
   return decoded;
 }

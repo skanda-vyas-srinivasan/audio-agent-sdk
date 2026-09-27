@@ -66,6 +66,13 @@ final class RealtimeRingBuffer {
         SonexisAudioRingBufferSetReadEnabled(pointer, enabled)
     }
 
+    /// Control-thread barrier used after a callback is unregistered and before
+    /// releasing its retained ring context.
+    func quiesceReads() {
+        guard let pointer else { return }
+        SonexisAudioRingBufferQuiesceReads(pointer)
+    }
+
     func setTargetFillFrames(_ frames: UInt32) {
         guard let pointer else { return }
         SonexisAudioRingBufferSetTargetFillFrames(pointer, frames)

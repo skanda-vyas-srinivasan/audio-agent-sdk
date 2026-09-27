@@ -50,6 +50,27 @@ test("resolves output destinations without silently choosing loopback devices", 
     OutputDestinationNotFoundError);
 });
 
+test("waits by destination kind and validates cancellation and timing", async () => {
+  const client = new Sonexis("/unused");
+  const loopback: AudioOutputDestination = {
+    id: "coreaudio:blackhole", kind: "virtual_input", name: "BlackHole 2ch",
+    is_available: true, is_default: false, follows_system_default: false,
+    supported_formats: [AudioFormats.openAIRealtime()],
+  };
+  client.outputDestinations = async () => [loopback];
+  assert.equal((await client.waitForOutputDestination(undefined,
+    { kind: "virtual_input", timeoutMs: 10, pollIntervalMs: 1 })).id, loopback.id);
+  await assert.rejects(client.waitForOutputDestination(undefined,
+    { timeoutMs: Number.NaN }), RangeError);
+  await assert.rejects(client.waitForOutputDestination(undefined,
+    { pollIntervalMs: Number.POSITIVE_INFINITY }), RangeError);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(client.waitForOutputDestination(undefined,
+    { signal: controller.signal }), (error: unknown) =>
+    error instanceof SonexisError && error.code === "cancelled");
+});
+
 interface FakeRuntimeOptions {
   outputCapability?: boolean;
   malformedSession?: boolean;

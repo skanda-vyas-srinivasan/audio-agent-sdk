@@ -70,6 +70,20 @@ test("strictly validates Runtime event envelopes and UTF-8", () => {
   assert.equal(event.type, "capture_started");
   assert.throws(() => decodeEvent(Buffer.from("{}")), SonexisError);
   assert.throws(() => decodeEvent(Buffer.from([0xff])), SonexisError);
+  const destination = {
+    id: "coreaudio:a", kind: "playback", name: "Speakers", is_available: true,
+    is_default: false, follows_system_default: false, supported_formats: [AudioFormats.speech16k()],
+  };
+  const destinationEvent = decodeEvent(Buffer.from(JSON.stringify({
+    protocol_version: 2, event_id: "event-2", type: "output_destination_added",
+    timestamp_nanoseconds: 124, output_destination: destination,
+  })));
+  assert.equal(destinationEvent.output_destination_id, "coreaudio:a");
+  assert.throws(() => decodeEvent(Buffer.from(JSON.stringify({
+    protocol_version: 2, event_id: "event-3", type: "output_destination_updated",
+    timestamp_nanoseconds: 125, output_destination_id: "coreaudio:b",
+    output_destination: destination,
+  }))), SonexisError);
 });
 
 test("rejects a wrong stream", () => {

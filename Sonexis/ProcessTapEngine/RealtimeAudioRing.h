@@ -58,6 +58,10 @@ OSStatus SonexisAudioRingBufferIOProc(
 uint32_t SonexisAudioRingBufferFlush(SonexisAudioRingBuffer *ringBuffer);
 
 void SonexisAudioRingBufferSetReadEnabled(SonexisAudioRingBuffer *ringBuffer, bool enabled);
+/// Permanently closes the realtime read gate and waits for callbacks already
+/// inside the ring to leave. Call only from a non-realtime control thread,
+/// after unregistering the callback and before destroying the ring.
+void SonexisAudioRingBufferQuiesceReads(SonexisAudioRingBuffer *ringBuffer);
 void SonexisAudioRingBufferSetTargetFillFrames(SonexisAudioRingBuffer *ringBuffer, uint32_t targetFillFrames);
 uint32_t SonexisAudioRingBufferGetFillFrames(SonexisAudioRingBuffer *ringBuffer);
 uint32_t SonexisAudioRingBufferGetWritableFrames(SonexisAudioRingBuffer *ringBuffer);

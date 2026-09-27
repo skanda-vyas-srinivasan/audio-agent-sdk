@@ -5,7 +5,64 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     guard condition() else { fatalError(message) }
 }
 
+private final class DiscoveryBackend: RuntimeOutputBackend, @unchecked Sendable {
+    var destinations: [RuntimeOutputDestinationDTO]
+
+    init(_ destinations: [RuntimeOutputDestinationDTO]) {
+        self.destinations = destinations
+    }
+
+    func availableOutputDestinations() throws -> [RuntimeOutputDestinationDTO] { destinations }
+
+    func startOutput(destinationID: String, format: RuntimePCMFormatDTO,
+                     targetBufferMilliseconds: UInt32,
+                     onEvent: @escaping @Sendable (RuntimeOutputBackendEvent) -> Void,
+                     onEnded: @escaping @Sendable (RuntimeErrorDTO?) -> Void)
+        throws -> RuntimeBackendOutputSession {
+        throw RuntimeErrorDTO(code: "unused", message: "Discovery test does not start output")
+    }
+}
+
+private func expectDiscoveryError(_ expected: String,
+                                  _ destinations: [RuntimeOutputDestinationDTO],
+                                  maximum: Int = 32) {
+    let backend = DiscoveryBackend(destinations)
+    let coordinator = RuntimeOutputCoordinator(backend: backend,
+        socketDirectory: URL(fileURLWithPath: "/tmp/sxr-discovery-test"),
+        limits: RuntimeResourceLimitsDTO(maximumOutputDestinations: maximum))
+    do {
+        _ = try coordinator.availableDestinations()
+        fatalError("expected destination discovery error \(expected)")
+    } catch let error as RuntimeErrorDTO {
+        expect(error.code == expected, "expected \(expected), got \(error.code)")
+    } catch {
+        fatalError("unexpected destination discovery error: \(error)")
+    }
+}
+
 do {
+    let defaultDestination = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+        name: "System Default", isAvailable: true, isDefault: true,
+        followsSystemDefault: true)
+    let speakers = RuntimeOutputDestinationDTO(id: "coreaudio:speakers", kind: .playback,
+        name: "Speakers", isAvailable: true)
+    let discovery = RuntimeOutputCoordinator(backend: DiscoveryBackend([speakers, defaultDestination]),
+        socketDirectory: URL(fileURLWithPath: "/tmp/sxr-discovery-valid"))
+    let validatedDestinations = try discovery.availableDestinations()
+    expect(validatedDestinations.map(\.id) == ["default", "coreaudio:speakers"],
+        "validated destination discovery was not deterministic")
+    expectDiscoveryError("duplicate_output_destination", [speakers, speakers])
+    expectDiscoveryError("invalid_output_destination", [
+        RuntimeOutputDestinationDTO(id: "", kind: .playback, name: "Missing ID",
+            isAvailable: true),
+    ])
+    expectDiscoveryError("invalid_output_destination", [
+        RuntimeOutputDestinationDTO(id: "default", kind: .playback, name: "Bad Default",
+            isAvailable: true),
+    ])
+    expectDiscoveryError("output_destination_limit_exceeded",
+        [defaultDestination, speakers], maximum: 1)
+
     func deviceFormat(rate: Double, channels: UInt32,
                       nonInterleaved: Bool = false) -> AudioStreamBasicDescription {
         let bytes = nonInterleaved ? UInt32(4) : UInt32(4 * channels)

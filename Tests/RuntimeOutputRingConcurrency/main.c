@@ -100,6 +100,9 @@ int main(void) {
     assert(pthread_join(flusher, NULL) == 0);
 
     assert(SonexisAudioRingBufferGetFillFrames(ringBuffer) <= 4096);
+    SonexisAudioRingBufferQuiesceReads(ringBuffer);
+    float silent[16] = {1};
+    assert(SonexisAudioRingBufferReadInterleaved(ringBuffer, silent, 8) == 0);
     SonexisAudioRingBufferDestroy(ringBuffer);
     puts("Runtime output ring concurrent flush/read/write stress passed");
     return 0;

@@ -101,8 +101,9 @@ class FakeOutputRuntime:
                     }
                 elif command == "list_output_destinations":
                     response["output_destinations"] = [{
-                        "id": "default", "name": "System Default", "kind": "default_device",
+                        "id": "default", "name": "System Default", "kind": "playback",
                         "is_available": True, "is_default": True,
+                        "follows_system_default": True,
                         "supported_formats": [value.to_wire() for value in OUTPUT_FORMATS],
                     }]
                 elif command == "start_output":
@@ -310,12 +311,15 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
                         response["output_destinations"] = [
                             {"id": "default", "name": "System Default", "kind": "playback",
                              "is_available": True, "is_default": True,
+                             "follows_system_default": True,
                              "supported_formats": [AudioFormat.openai_realtime().to_wire()]},
                             {"id": "coreaudio:a", "name": "BlackHole 2ch",
                              "kind": "virtual_input", "is_available": True,
+                             "is_default": False, "follows_system_default": False,
                              "supported_formats": [AudioFormat().to_wire()]},
                             {"id": "coreaudio:b", "name": "BLACKHOLE 2CH",
                              "kind": "virtual_input", "is_available": True,
+                             "is_default": False, "follows_system_default": False,
                              "supported_formats": [AudioFormat().to_wire()]},
                         ]
                     else:
@@ -343,6 +347,11 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OutputDestinationNotFoundError):
                 await client.wait_for_output_destination("missing", timeout=0.01,
                                                          poll_interval=0.005)
+            with self.assertRaises(ValueError):
+                await client.wait_for_output_destination("missing", timeout=float("nan"))
+            with self.assertRaises(ValueError):
+                await client.wait_for_output_destination(
+                    "missing", poll_interval=float("inf"))
             with self.assertRaises(UnsupportedFormatError):
                 await client.playback(destination="default", format=AudioFormat())
         self.runtime._control = original_control
@@ -353,10 +362,36 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
             "type": "output_destination_added", "timestamp_nanoseconds": 123,
             "output_destination": {"id": "coreaudio:a", "name": "BlackHole 2ch",
                 "kind": "virtual_input", "is_available": True,
+                "is_default": False, "follows_system_default": False,
                 "supported_formats": [AudioFormat().to_wire()]},
         })
         self.assertIsNotNone(event.output_destination)
         self.assertEqual(event.output_destination.id, "coreaudio:a")
+        self.assertEqual(event.output_destination_id, "coreaudio:a")
+
+    def test_output_destination_parser_rejects_malformed_metadata(self):
+        base = {"id": "coreaudio:a", "name": "Speakers", "kind": "playback",
+                "is_available": True, "is_default": False,
+                "follows_system_default": False,
+                "supported_formats": [AudioFormat().to_wire()]}
+        for mutation in (
+            {"id": 42}, {"name": ["Speakers"]}, {"kind": "mystery"},
+            {"is_available": "false"}, {"supported_formats": "pcm"},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises((TypeError, ValueError)):
+                AudioOutputDestination.from_wire({**base, **mutation})
+
+    def test_output_destination_event_rejects_mismatched_identity(self):
+        with self.assertRaises(ValueError):
+            RuntimeEvent.from_wire({
+                "protocol_version": 2, "event_id": "destination-event",
+                "type": "output_destination_updated", "timestamp_nanoseconds": 123,
+                "output_destination_id": "coreaudio:b",
+                "output_destination": {"id": "coreaudio:a", "name": "Speakers",
+                    "kind": "playback", "is_available": True,
+                    "is_default": False, "follows_system_default": False,
+                    "supported_formats": [AudioFormat().to_wire()]},
+            })
 
 
 class OutputHeaderTests(unittest.TestCase):

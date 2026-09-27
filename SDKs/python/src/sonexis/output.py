@@ -129,8 +129,11 @@ class AudioOutput:
             raise
 
     async def refresh(self) -> OutputInfo:
-        """Refresh and return this output session's Runtime state and metrics."""
-        self.info = await self.client.output_status(self.info.id)
+        """Refresh session metrics and the destination's current route metadata."""
+        self.info, self.destination = await asyncio.gather(
+            self.client.output_status(self.info.id),
+            self.client.get_output_destination(self.info.destination_id),
+        )
         return self.info
 
     async def flush(self) -> OutputInfo:

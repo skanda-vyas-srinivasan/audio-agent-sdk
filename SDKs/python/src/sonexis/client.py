@@ -1,6 +1,7 @@
 """Async public client for Sonexis Runtime."""
 
 import asyncio
+import math
 from dataclasses import replace
 import json
 import os
@@ -255,8 +256,10 @@ class Sonexis:
         poll_interval: float = 0.25,
     ) -> AudioSource:
         """Wait for a fresh, uniquely resolved source snapshot to become available."""
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be positive")
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            raise ValueError("poll_interval must be finite and positive")
+        if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
+            raise ValueError("timeout must be finite and nonnegative")
         deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
         while True:
             try:
@@ -483,8 +486,10 @@ class Sonexis:
         poll_interval: float = 0.25,
     ) -> AudioOutputDestination:
         """Wait until a fresh, uniquely resolved output destination is available."""
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be positive")
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            raise ValueError("poll_interval must be finite and positive")
+        if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
+            raise ValueError("timeout must be finite and nonnegative")
         deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
         while True:
             try:

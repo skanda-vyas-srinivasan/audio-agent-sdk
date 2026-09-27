@@ -221,10 +221,7 @@ public final class RuntimeHALPlaybackBackend: RuntimeOutputBackend, @unchecked S
             destinations.append(value)
         }
         let defaultDestination = destinations.removeFirst()
-        let fixed = Dictionary(grouping: destinations, by: \.id).compactMap {
-            $0.value.first
-        }.sorted { $0.id < $1.id }
-        return [defaultDestination] + fixed
+        return [defaultDestination] + destinations.sorted { $0.id < $1.id }
     }
 
     public func startOutput(destinationID: String, format: RuntimePCMFormatDTO,
@@ -392,7 +389,7 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
             lifecycleQueue.sync {
                 removeDefaultOutputListener()
                 removeFixedDeviceListener()
-                teardownRoute()
+                _ = try? teardownRoute()
             }
             throw error
         }
@@ -603,26 +600,27 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         if startStatus != noErr {
             let destroyStatus = AudioDeviceDestroyIOProcID(deviceID, ioProc)
             if destroyStatus == noErr {
+                ring.quiesceReads()
                 Unmanaged<RealtimeRingBuffer>.fromOpaque(retainedRingOpaque).release()
+                routeLock.lock(); route = nil; routeLock.unlock()
             }
-            routeLock.lock(); route = nil; routeLock.unlock()
             throw CoreAudioError(operation: "Start Runtime playback IOProc", status: startStatus)
         }
         try installDeviceFormatListeners(deviceID: deviceID, streamIDs: streams)
     }
 
     @discardableResult
-    private func teardownRoute() -> UInt64 {
+    private func teardownRoute() throws -> UInt64 {
         ingestLock.lock()
         defer { ingestLock.unlock() }
-        return teardownRouteWithIngestLockHeld()
+        return try teardownRouteWithIngestLockHeld()
     }
 
     /// Tears down the HAL route while the non-realtime ingest path is paused.
     /// The realtime callback observes its retained ring until AudioDeviceStop
     /// and IOProc destruction have quiesced it.
     @discardableResult
-    private func teardownRouteWithIngestLockHeld() -> UInt64 {
+    private func teardownRouteWithIngestLockHeld() throws -> UInt64 {
         routeLock.lock()
         guard let old = route else { routeLock.unlock(); return 0 }
         route = nil
@@ -630,19 +628,26 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         removeDeviceFormatListeners()
         old.ring.setReadEnabled(false)
         let discarded = UInt64(old.ring.fillFrames)
-        _ = AudioDeviceStop(old.deviceID, old.ioProcID)
+        let stopStatus = AudioDeviceStop(old.deviceID, old.ioProcID)
         let destroyStatus = AudioDeviceDestroyIOProcID(old.deviceID, old.ioProcID)
+        guard destroyStatus == noErr else {
+            // Preserve the Route, IOProc handle and retained callback context
+            // so a later stop/cleanup attempt can retry safely.
+            routeLock.lock(); route = old; routeLock.unlock()
+            throw CoreAudioError(operation: "Destroy Runtime playback IOProc",
+                status: destroyStatus)
+        }
+        old.ring.quiesceReads()
         routeLock.lock()
         archivedRendered &+= old.ring.renderedFrames
         archivedEnqueued &+= old.ring.writtenFrames
         archivedDropped &+= old.ring.droppedFrames &+ discarded
         archivedUnderflows &+= old.ring.underflowFrames
         routeLock.unlock()
-        if destroyStatus == noErr {
-            Unmanaged<RealtimeRingBuffer>.fromOpaque(old.retainedRingOpaque).release()
+        Unmanaged<RealtimeRingBuffer>.fromOpaque(old.retainedRingOpaque).release()
+        if stopStatus != noErr {
+            throw CoreAudioError(operation: "Stop Runtime playback IOProc", status: stopStatus)
         }
-        // On destroy failure the retained callback context deliberately owns
-        // the ring forever. Leaking is safer than freeing HAL-visible memory.
         return discarded
     }
 
@@ -775,8 +780,9 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         // Writers are briefly backpressured on the non-realtime ingest lock so
         // they never observe the intentional nil route between HAL devices.
         ingestLock.lock()
-        let discarded = teardownRouteWithIngestLockHeld()
+        let discarded: UInt64
         do {
+            discarded = try teardownRouteWithIngestLockHeld()
             try buildRoute()
             routeLock.lock(); routeChanges &+= 1; routeLock.unlock()
             ingestLock.unlock()
@@ -863,7 +869,8 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
 
     private func stopInternal(notify: Bool, error: RuntimeErrorDTO?) {
         routeLock.lock()
-        guard running else { routeLock.unlock(); return }
+        let wasRunning = running
+        guard wasRunning || route != nil else { routeLock.unlock(); return }
         running = false
         routeLock.unlock()
         metricsTimer?.setEventHandler {}
@@ -871,10 +878,18 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         metricsTimer = nil
         removeDefaultOutputListener()
         removeFixedDeviceListener()
-        teardownRoute()
-        if notify, !didComplete {
+        var completionError = error
+        do {
+            _ = try teardownRoute()
+        } catch {
+            if completionError == nil {
+                completionError = RuntimeErrorDTO(code: "output_cleanup_failed",
+                    message: String(describing: error), retryable: true)
+            }
+        }
+        if notify, wasRunning, !didComplete {
             didComplete = true
-            onEnded(error)
+            onEnded(completionError)
         }
     }
 

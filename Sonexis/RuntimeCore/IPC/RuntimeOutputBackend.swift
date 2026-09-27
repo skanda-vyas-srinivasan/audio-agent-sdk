@@ -118,7 +118,50 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
     }
 
     public func availableDestinations() throws -> [RuntimeOutputDestinationDTO] {
-        try backend.availableOutputDestinations()
+        let destinations = try backend.availableOutputDestinations()
+        let maximum = max(1, limits.maximumOutputDestinations ?? 32)
+        guard destinations.count <= maximum else {
+            throw RuntimeErrorDTO(code: "output_destination_limit_exceeded",
+                message: "Output discovery returned more than \(maximum) destinations")
+        }
+        var identifiers = Set<String>()
+        for destination in destinations {
+            guard !destination.id.isEmpty, destination.id.utf8.count <= 256,
+                  !destination.name.isEmpty, destination.name.utf8.count <= 256 else {
+                throw RuntimeErrorDTO(code: "invalid_output_destination",
+                    message: "Output discovery returned an invalid destination identity")
+            }
+            guard identifiers.insert(destination.id).inserted else {
+                throw RuntimeErrorDTO(code: "duplicate_output_destination",
+                    message: "Output discovery returned duplicate destination ID \(destination.id)")
+            }
+            let isDefaultAlias = destination.id == "default"
+            guard destination.isDefault == isDefaultAlias,
+                  destination.followsSystemDefault == isDefaultAlias else {
+                throw RuntimeErrorDTO(code: "invalid_output_destination",
+                    message: "Output destination \(destination.id) has invalid default semantics")
+            }
+            guard destination.supportedFormats.count <= 16,
+                  destination.supportedFormats.allSatisfy(\.isSupportedOutput) else {
+                throw RuntimeErrorDTO(code: "invalid_output_destination",
+                    message: "Output destination \(destination.id) advertises invalid formats")
+            }
+            if let activeID = destination.activeDeviceID,
+               activeID.isEmpty || activeID.utf8.count > 256 {
+                throw RuntimeErrorDTO(code: "invalid_output_destination",
+                    message: "Output destination \(destination.id) has an invalid active device ID")
+            }
+            if let activeName = destination.activeDeviceName,
+               activeName.isEmpty || activeName.utf8.count > 256 {
+                throw RuntimeErrorDTO(code: "invalid_output_destination",
+                    message: "Output destination \(destination.id) has an invalid active device name")
+            }
+        }
+        return destinations.sorted {
+            if $0.id == "default" { return true }
+            if $1.id == "default" { return false }
+            return $0.id < $1.id
+        }
     }
 
     public func startOutput(destinationID: String, format: RuntimePCMFormatDTO,

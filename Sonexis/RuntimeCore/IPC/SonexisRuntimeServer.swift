@@ -370,14 +370,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     private func refreshDestinations(publishChanges: Bool) {
         do {
             let destinations = try outputCoordinator.availableDestinations()
-            var next: [String: RuntimeOutputDestinationDTO] = [:]
-            for destination in destinations {
-                guard next[destination.id] == nil else {
-                    throw RuntimeErrorDTO(code: "duplicate_output_destination",
-                        message: "Output discovery returned duplicate destination ID \(destination.id)")
-                }
-                next[destination.id] = destination
-            }
+            let next = Dictionary(uniqueKeysWithValues: destinations.map { ($0.id, $0) })
             if publishChanges {
                 let diff = RuntimeOutputDestinationDiff(
                     previous: destinationSnapshot, current: next)
