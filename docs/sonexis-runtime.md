@@ -1,4 +1,4 @@
-# Sonexis Runtime v0.5
+# Sonexis Runtime v0.6
 
 ## Purpose
 
@@ -12,6 +12,11 @@ playback while preserving v0.3's source-aware input APIs. v0.5 adds an explicit
 per-user development install, foreground/background lifecycle tooling, locally
 buildable SDK artifacts, focused examples, synchronized version checks, and
 actionable connection errors without changing protocol or audio semantics.
+v0.6 makes output destinations first-class lifecycle resources: stable resolved
+device identity, add/remove/update/default-change events, exact SDK/CLI name
+resolution, wait helpers, advisory loopback feedback risk, stricter HAL format
+validation, and route changes that backpressure writers instead of terminating
+an otherwise healthy output session.
 
 The Runtime is audio infrastructure. It does not provide transcription, models,
 cloud transport, authentication, accounts, or acoustic echo cancellation, and
@@ -105,7 +110,7 @@ The Runtime executable embeds `NSAudioCaptureUsageDescription`, uses the stable 
 NSWorkspace + Core Audio HAL
             │
             ▼
-   AudioSourceRegistry ── 1 s source diff monitor ── event hub
+ endpoint registries ── 1 s source/destination diff monitor ── event hub
             │                                        │
             ▼                                        └─ events-UUID.sock (NDJSON)
  AudioCaptureManager / independent AudioCaptureSession
@@ -157,9 +162,9 @@ A successful response includes a distinct response ID and the negotiated platfor
   "ok": true,
   "handshake": {
     "protocol_version": 2,
-    "runtime_version": "0.5.0",
+    "runtime_version": "0.6.0",
     "runtime_instance_id": "UUID",
-    "capabilities": ["application_sources", "capture_sessions", "event_stream", "format_negotiation", "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions", "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush", "default_device_playback"],
+    "capabilities": ["application_sources", "capture_sessions", "event_stream", "format_negotiation", "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions", "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush", "default_device_playback", "output_destination_events"],
     "supported_formats": [
       {"sample_rate": 16000, "channel_count": 1, "sample_format": "pcm_s16le", "interleaved": true}
     ],
@@ -176,13 +181,14 @@ A successful response includes a distinct response ID and the negotiated platfor
       "maximum_event_subscriptions_per_client": 4,
       "maximum_output_sessions": 8,
       "maximum_output_sessions_per_client": 4,
-      "maximum_output_packet_milliseconds": 200
+      "maximum_output_packet_milliseconds": 200,
+      "maximum_output_destinations": 32
     }
   }
 }
 ```
 
-Protocol version 2 remains mandatory in v0.5. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
+Protocol version 2 remains mandatory in v0.6. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
 
 Supported commands:
 
@@ -231,11 +237,21 @@ A capture has distinct session and stream UUIDs. The session owns capture lifecy
 
 `output_destinations` exposes `default` plus fixed `coreaudio:<UID>` HAL
 outputs. A fixed loopback/virtual device uses kind `virtual_input` only when it
-also exposes an input stream; `default` always remains kind `playback`. Output supports
+also exposes an input stream and its name/UID matches a known loopback family.
+The semantic `default` alias reports the resolved device kind and carries
+`active_device_id` as `coreaudio:<UID>` plus its display name. Output supports
 the same advertised PCM matrix as capture and converts to the active device
 format off the realtime callback. `default` follows route changes and sessions
 rebuild for same-device nominal-rate/stream-format changes; fixed devices fail
 cleanly when disconnected.
+
+Python and TypeScript expose `find_output_destinations`,
+`get_output_destination`, and `wait_for_output_destination` (camelCase in
+TypeScript). Resolution is exact ID, exact case-sensitive name, then exact
+case-insensitive name. `loopback`/`virtual_input` are kind aliases only when one
+available destination is unambiguous. CLI `play --destination` uses the same
+policy. A discovery snapshot can race device removal; `start_output` remains
+authoritative.
 
 Client audio uses the same 64-byte SXPC v2 envelope in the client-to-Runtime
 direction. SDKs split packets to at most 200 ms, serialize sequence numbers,
@@ -250,7 +266,13 @@ Output states are `starting`, `ready`, `draining`, `stopped`, `cancelled`, and
 Flush rotates the stream UUID/socket and is the nonterminal barge-in primitive;
 only its creating connection may perform that cooperative stream rotation.
 Output events include started, stopped, failed, cancelled, underrun, overrun,
-dropped, and destination changed.
+dropped, and active-session destination changed. Global destination snapshots
+add `output_destination_added`, `output_destination_removed`,
+`output_destination_updated`, and `output_default_changed`. The last event is
+emitted only when the default alias's stable resolved device ID changes. A
+removal event carries the last known destination snapshot; its event type is
+authoritative. Global polling and per-session HAL callbacks use different
+queues, so their cross-plane arrival order is deliberately unspecified.
 
 ## Runtime events
 
@@ -265,7 +287,7 @@ Implemented event types:
 - `runtime_shutting_down`, delivered best-effort before sockets close.
 - output lifecycle/backpressure events listed in the output section. v0.3
   clients using the legacy implicit event set do not receive new output event
-  types unless they subscribe explicitly. The v0.4 Python and TypeScript SDKs
+  types unless they subscribe explicitly. The current Python and TypeScript SDKs
   explicitly request every event they understand by default.
 
 Permission-change and signal-level audio-start/stop events are deliberately not advertised because the Runtime cannot determine those transitions reliably. Each delivered event includes an event UUID, monotonic timestamp, per-subscription `event_sequence`, and relevant typed source/session/error data. `dropped_events_before` reports events lost before that delivery, including the subscribe-to-data-socket attach window. Subscriptions are capped, owned by their control connection, and disappear on disconnect.

@@ -1,8 +1,8 @@
 # Virtual audio input design
 
-## v0.4 decision
+## v0.6 decision for the 1.0 line
 
-Runtime v0.4 supports installed Core Audio loopback devices as first-class
+Runtime v0.6 supports installed Core Audio loopback devices as first-class
 `virtual_input` output destinations when they expose both output and input
 streams and their name/UID identifies a loopback/virtual device. It was live-tested with `BlackHole 2ch`:
 Sonexis accepted 24 kHz mono PCM, converted it to the device's 48 kHz stereo
@@ -17,7 +17,8 @@ the loopback device's input stream can read audio injected there. v0.4 supports
 only single-output-stream, one- or two-channel devices; more complex aggregate
 or multi-stream layouts are rejected.
 
-v0.4 does **not** install a Sonexis-branded HAL driver. Shipping an unreviewed
+Sonexis Runtime 1.0 will **not** install a first-party Sonexis HAL driver.
+Shipping an unreviewed
 driver merely to claim completion would put the system audio service at risk.
 Apple's supported sample is a 4,000-plus-line AudioServerPlugIn with a large HAL
 property surface; its null device does not provide Sonexis's required loopback
@@ -26,11 +27,19 @@ transport. Installation requires administrator authorization, placement in
 requires a driver-specific signing/notarization/installer lifecycle that is not
 covered by the Runtime's executable signing identity.
 
-This is a deliberate product boundary, not a claim that macOS cannot implement
+This is a deliberate 1.0 product boundary, not a claim that macOS cannot implement
 the device. Generic destination support ships and validates the
 Runtime-to-installed-loopback output path without coupling Runtime to a
 particular driver. It does not by itself prove receipt by Discord, Zoom, or a
 browser.
+
+The v0.6 endpoint APIs remove the main usability penalty of this decision:
+installed loopback devices have stable IDs, exact-name/kind resolution,
+add/remove/update events, wait helpers, native-format metadata, and advisory
+duplex feedback warnings. Owning a driver would still require a separate
+installer/signing/recovery program and would increase the blast radius from one
+user process to system audio. That trade is not responsible before the Runtime
+API, distribution, and long-soak behavior reach 1.0.
 
 ## Mechanisms considered
 

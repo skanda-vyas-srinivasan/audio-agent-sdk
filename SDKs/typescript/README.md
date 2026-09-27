@@ -1,7 +1,7 @@
 # Sonexis TypeScript SDK
 
 The dependency-free `@sonexis/runtime` client targets Node.js 18+ and Sonexis
-Runtime protocol v2. Version 0.5 is locally packageable for external consumers
+Runtime protocol v2. Version 0.6 is locally packageable for external consumers
 and includes typed, bounded client-to-Runtime audio output, source-aware capture,
 AI format presets, and labeled multi-source APIs.
 
@@ -98,8 +98,14 @@ plane; audio never travels in control-plane JSON.
 const destinations = await sx.outputDestinations();
 console.log(destinations.map((destination) => destination.name));
 
+const loopback = await sx.waitForOutputDestination(undefined, {
+  kind: "virtual_input",
+  timeoutMs: 30_000,
+  signal: abortController.signal,
+});
+
 const output = await sx.playback({
-  destination: "default", // or a typed AudioOutputDestination
+  destination: loopback, // or "default", an exact ID, or exact name
   format: AudioFormats.openAIRealtimeOutput(),
   targetBufferMilliseconds: 60,
 });
@@ -130,14 +136,17 @@ await output.write(pcm, {
 
 `await output.refresh()` returns current `OutputInfo` and `OutputMetrics`, including rendered,
 dropped, late, underrun, overrun, queue-depth, buffered-duration, conversion, route-change, and
-producer-connection state. `await output.flush()` discards Runtime-buffered audio, reconnects to a
+producer-connection state, and refreshes `output.destination` after route changes.
+`findOutputDestinations()`, `getOutputDestination()`, and
+`waitForOutputDestination()` share exact, ambiguity-safe resolution rules.
+`await output.flush()` discards Runtime-buffered audio, reconnects to a
 fresh stream epoch, and resets sequence/timestamp numbering. `cancel()` is the immediate barge-in
 primitive. Closing the owning `Sonexis` client cancels every output it created before closing the
 control connection.
 
 `default` follows the current system default output device. Fixed HAL outputs use
 stable `coreaudio:<UID>` IDs. Recognized installed loopback devices are exposed
-as `virtual_input`; v0.4 does not install a driver.
+as `virtual_input`; Sonexis 1.0 will not install a first-party HAL driver.
 Output APIs fail with `unsupported_capability` against a pre-v0.4 Runtime.
 
 For ownership convenience, `await sx.duplex(source, options)` creates one

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Runtime v0.4 accepts realtime PCM from local clients and renders it through a
+Runtime v0.6 accepts realtime PCM from local clients and renders it through a
 macOS Core Audio output device. Capture and output remain independent; the
 optional SDK duplex helper only owns one of each. Provider adapters do not own
 playback and the Runtime has no OpenAI- or Gemini-specific behavior.
@@ -31,8 +31,9 @@ ring. It does not allocate, lock, log, convert formats, or perform IPC.
 - `coreaudio:<device UID>` for each currently available HAL output device.
 
 Known loopback devices are classified as `virtual_input` only when Core Audio
-also reports a real input stream; the semantic `default` destination always
-remains `playback`. All destinations are selectable by ID. Device UIDs are
+also reports a real input stream and a recognized loopback name/UID. The
+semantic `default` alias reports the kind of its resolved device. All
+destinations are selectable by stable ID or an unambiguous exact name. Device UIDs are
 stable Core Audio identifiers, not transient
 `AudioObjectID` values. A fixed destination fails with
 `output_destination_disconnected` when its device reports that it is no longer
@@ -41,9 +42,17 @@ and emits `output_destination_changed`. Sessions also rebuild when the active
 device changes its nominal sample rate or output-stream virtual format without
 changing device identity.
 
+Every snapshot includes `active_device_id` (`coreaudio:<UID>`) and
+`active_device_name` when a route is resolved. Runtime monitors the catalog once
+per second and emits `output_destination_added`, `output_destination_removed`,
+`output_destination_updated`, and `output_default_changed`. Removal carries the
+last-known snapshot. The default event keys off the stable UID, not a display
+name. If macOS temporarily has no default, Runtime still returns an unavailable
+`default` alias and continues enumerating usable fixed destinations.
+
 The `virtual_input` classification is advisory: it is based on an input stream
 plus a recognized loopback name/UID. It does not prove that a particular
-receiving application has opened the input side. v0.4 intentionally accepts
+receiving application has opened the input side. The current Runtime accepts
 only one-stream, one- or two-channel output devices at 8–192 kHz; aggregate or
 multi-stream devices fail with a structured unsupported-device error instead
 of being routed incorrectly.
@@ -125,20 +134,37 @@ software queue time with Core Audio latency/safety-offset frames. That estimate
 does not include acoustic, Bluetooth codec, or provider latency. Runtime totals
 appear in `sonexisctl status`.
 
+Default-route and format callbacks are coalesced for 75 ms. The non-realtime
+ingest path is briefly paused across teardown and rebuild, so a client write
+does not observe the intentional route gap. Buffered frames discarded during
+the transition are counted and attached to the session's
+`output_destination_changed` event. The HAL callback continues to use only its
+retained ring and never waits on this lock.
+
 ## Python
 
 ```python
 from sonexis import AudioFormat, Sonexis
 
 async with Sonexis() as sx:
+    loopback = await sx.get_output_destination("BlackHole 2ch")
     async with await sx.playback(
-        destination="default",
+        destination=loopback,
         format=AudioFormat.gemini_live_output(),
         target_buffer_milliseconds=60,
     ) as output:
         async for chunk in model_audio:
             await output.write(chunk)
 ```
+
+`find_output_destinations()`, `get_output_destination()`, and
+`wait_for_output_destination()` mirror source discovery. Exact IDs win over
+names; name matching is exact before case folding; kind-only or `loopback`
+selection must be unique. Typed not-found and ambiguity errors expose candidate
+IDs. `AudioOutput.destination` starts with the resolved creation snapshot;
+`await output.refresh()` refreshes both metrics and that destination metadata.
+Event subscribers can react to default-device changes immediately rather than
+waiting for an explicit refresh.
 
 `await output.flush()` discards pending response audio and creates a fresh
 stream epoch. `await output.cancel()` stops immediately. `await output.aclose()`
@@ -151,8 +177,9 @@ cannot retract the current device quantum already handed to Core Audio.
 
 ```typescript
 const sx = await Sonexis.connect();
+const destination = await sx.getOutputDestination("BlackHole 2ch");
 const output = await sx.playback({
-  destination: "default",
+  destination,
   format: AudioFormats.openAIRealtimeOutput(),
   targetBufferMilliseconds: 60,
 });
@@ -162,6 +189,8 @@ await output.close();
 
 Writes accept an `AbortSignal`. `flush()`, `cancel()`, metrics, destination
 enumeration, and `sx.duplex(...)` match the Python lifecycle.
+The TypeScript `findOutputDestinations`, `getOutputDestination`, and
+`waitForOutputDestination` helpers use the same resolution rules.
 
 ## CLI replay
 
@@ -193,6 +222,18 @@ and a remote participant may retransmit audio injected through a loopback
 device. Applications should prefer headphones, select sources deliberately,
 and use `flush()`/`cancel()` for barge-in. Muting, ducking, and conversational
 turn policy remain above Runtime.
+
+Python `DuplexSession.feedback_risk` / `feedback_warning` and TypeScript
+`feedbackRisk` / `feedbackWarning` are advisory when the resolved output kind
+is `virtual_input`. Call `output.refresh()` after a destination event before
+re-evaluating the warning. These properties do not claim that a receiving
+application selected the device, do not suppress packets, and are not echo
+cancellation.
+
+Discovery is bounded to 32 destinations. Runtime rejects duplicate/empty IDs,
+incoherent default aliases, and invalid advertised formats before returning a
+snapshot or diffing events. This keeps responses within the bounded control
+plane and prevents ambiguous Core Audio UIDs from being chosen silently.
 
 ## Security
 

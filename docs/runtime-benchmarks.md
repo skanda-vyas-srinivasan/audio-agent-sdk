@@ -1,5 +1,36 @@
 # Sonexis Runtime benchmarks
 
+## v0.6 endpoint/routing validation
+
+The v0.6 optimized converter/ring benchmark was rerun on 2026-09-27 on the
+same Apple M4 host and macOS 27.0 build 26A428:
+
+```sh
+Scripts/benchmark-runtime-v04.sh
+```
+
+| Path | Represented audio | Wall time | Realtime factor | Device frames |
+| --- | ---: | ---: | ---: | ---: |
+| PCM16 24 kHz mono → Float32 48 kHz stereo | 200 s | 0.030395 s | 6,580.1× | 9,600,000 |
+| PCM16 48 kHz stereo → Float32 48 kHz stereo | 200 s | 0.008726 s | 22,921.2× | 9,600,000 |
+| Float32 48 kHz mono → Float32 44.1 kHz stereo | 200 s | 0.027140 s | 7,369.3× | 8,820,000 |
+| two-channel ring write/read | 200 s | 0.017763 s | 11,259.1× | 9,600,000 |
+
+This microbenchmark does not traverse a live HAL route, so it neither measures
+the new 75 ms callback-coalescing window nor physical device-switch latency.
+The v0.6 format matrix separately verifies exact 100 ms duration for all six
+advertised ingress formats against 44.1, 48, and 96 kHz mono/stereo device
+formats, plus packed/interleaved/planar ASBD bounds. It is a correctness test,
+not a timing measurement.
+
+The final non-TSan release-gate stress completed 1,000 capture cycles, 1,000
+output cycles, 200 connections, and 16 parallel sessions in 1.390 seconds with
+one descriptor of in-scope growth and 11,288,576 bytes peak RSS. The TSan run
+completed in 3.950 seconds with the same descriptor bound and 88,358,912 bytes
+peak RSS. The C output test now invokes the production IOProc shape against
+both interleaved and planar `AudioBufferList` layouts while a producer and
+flusher race under TSan.
+
 ## v0.4 output benchmark
 
 The repeatable output benchmark was collected on 2026-09-26 on the Apple M4

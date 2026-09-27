@@ -1,6 +1,6 @@
 # Sonexis Python SDK
 
-The source-aware, bidirectional async SDK for Sonexis Runtime v0.5. It connects
+The source-aware, bidirectional async SDK for Sonexis Runtime v0.6. It connects
 only to the local Unix-domain Runtime and keeps Core Audio details out of
 application code. The core package has no runtime dependencies and supports
 Python 3.9+.
@@ -91,10 +91,17 @@ default output device. A Runtime without the v0.4 `output_sessions` capability
 fails these calls with `unsupported_capability` instead of sending unsupported
 commands.
 
+Use `find_output_destinations()`, `get_output_destination()`, and
+`wait_for_output_destination()` to search snapshots, resolve an exact ID or
+name, or wait for a device to appear. `"loopback"` and `"virtual_input"` are
+accepted only when they identify one unambiguous installed loopback. The SDK
+raises typed not-found/ambiguity errors rather than choosing silently.
+
 Installed loopback HAL devices are returned as `virtual_input` destinations
-when recognizable and can be selected by their `coreaudio:<UID>` ID. Sonexis
-v0.4 does not install a virtual driver; destination enumeration is the
-authoritative source of availability.
+when recognizable and can be selected by their `coreaudio:<UID>` ID or exact
+name. Sonexis 1.0 will not install a virtual driver; destination enumeration is
+the authoritative source of availability. `await output.refresh()` updates the
+creation-time destination snapshot after a default-device change.
 
 Capture and output can also be owned together without imposing agent policy:
 
