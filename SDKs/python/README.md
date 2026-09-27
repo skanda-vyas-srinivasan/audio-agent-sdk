@@ -1,6 +1,6 @@
 # Sonexis Python SDK
 
-The source-aware, bidirectional async SDK for Sonexis Runtime v0.6. It connects
+The source-aware, bidirectional async SDK for Sonexis Runtime v0.7. It connects
 only to the local Unix-domain Runtime and keeps Core Audio details out of
 application code. The core package has no runtime dependencies and supports
 Python 3.9+.
@@ -234,6 +234,11 @@ tests. `measure_activity(frame)` reports RMS/peak and non-silence activity; it
 does not claim to detect speech. Applications may implement the
 `VoiceActivityDetector` protocol with their chosen VAD.
 
+`AudioActivityDetector(ActivityDetectionConfig(...))` provides debounced
+`activity_started` / `activity_ended` edges with source/session/stream context.
+It runs on the consuming task, resets on discontinuities, and accepts an
+optional `VoiceActivityDetector` for speech-aware classification.
+
 `LatencyTracker` keeps a bounded sample window and reports p50/p95/p99 estimates
 from Runtime session presentation time to SDK receipt. These estimates exclude
 provider response/network latency and are not live Process Tap capture latency.
@@ -247,8 +252,9 @@ python -m pip install -e 'SDKs/python[mcp]'
 python -m sonexis.mcp_server
 ```
 
-Source/session/diagnostic tools are local and low-bandwidth. Starting or stopping
-capture is disabled unless the server is launched with `--allow-capture`. MCP
+Runtime/source/diagnostic/output-destination tools are local and low-bandwidth.
+Capture tools are not registered unless the server is launched with
+`--allow-capture`. MCP
 never carries PCM. Attach an audio process through the binary data plane:
 
 ```python
@@ -258,7 +264,9 @@ async with Sonexis() as sx:
             ...
 ```
 
-The MCP process owns sessions it creates and must remain running; closing its
+The MCP process owns sessions it creates, cannot inspect another client's
+capture, and must remain running. Session results omit binary socket paths;
+closing its
 Runtime control connection stops those captures.
 
 ## Failure and reconnect behavior

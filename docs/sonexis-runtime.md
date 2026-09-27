@@ -1,4 +1,4 @@
-# Sonexis Runtime v0.6
+# Sonexis Runtime v0.7
 
 ## Purpose
 
@@ -12,11 +12,14 @@ playback while preserving v0.3's source-aware input APIs. v0.5 adds an explicit
 per-user development install, foreground/background lifecycle tooling, locally
 buildable SDK artifacts, focused examples, synchronized version checks, and
 actionable connection errors without changing protocol or audio semantics.
-v0.6 makes output destinations first-class lifecycle resources: stable resolved
+v0.6 made output destinations first-class lifecycle resources: stable resolved
 device identity, add/remove/update/default-change events, exact SDK/CLI name
 resolution, wait helpers, advisory loopback feedback risk, stricter HAL format
 validation, and route changes that backpressure writers instead of terminating
-an otherwise healthy output session.
+an otherwise healthy output session. v0.7 adds provider-neutral activity edges,
+source-correlated provider responses, resilient labeled multi-source
+consumption, and a safer structured MCP control surface without changing
+protocol v2 or either PCM data plane.
 
 The Runtime is audio infrastructure. It does not provide transcription, models,
 cloud transport, authentication, accounts, or acoustic echo cancellation, and
@@ -162,7 +165,7 @@ A successful response includes a distinct response ID and the negotiated platfor
   "ok": true,
   "handshake": {
     "protocol_version": 2,
-    "runtime_version": "0.6.0",
+    "runtime_version": "0.7.0",
     "runtime_instance_id": "UUID",
     "capabilities": ["application_sources", "capture_sessions", "event_stream", "format_negotiation", "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions", "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush", "default_device_playback", "output_destination_events"],
     "supported_formats": [
@@ -188,7 +191,7 @@ A successful response includes a distinct response ID and the negotiated platfor
 }
 ```
 
-Protocol version 2 remains mandatory in v0.6. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
+Protocol version 2 remains mandatory in v0.7. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
 
 Supported commands:
 
@@ -361,9 +364,11 @@ Strings resolve exactly by Runtime ID, bundle ID, or application name; integers 
 
 `sx.session()` combines independent captures into a bounded labeled iterator
 without mixing their audio. `sx.playback()` creates a typed `AudioOutput`, and
-`sx.duplex()` owns one capture and output without imposing agent policy.
+`sx.duplex()` owns one capture and output without imposing agent policy. Its
+provider-neutral default output format matches the input format.
 Provider-specific input/output format presets prevent repetitive format
-mistakes. `ReplayStream`, `measure_activity`, and `LatencyTracker` support
+mistakes. `ReplayStream`, `measure_activity`, `AudioActivityDetector`, and
+`LatencyTracker` support
 deterministic development and diagnostics. Optional OpenAI/Gemini adapters and
 the reference audio agent remain outside Runtime core; see
 [AI integration](ai-integration.md).
@@ -390,7 +395,14 @@ the v0.5 release gate.
 
 ## MCP control
 
-The optional Python MCP server exposes source lookup and Runtime/session diagnostics. Capture mutation (start and stop) is disabled by default and requires `--allow-capture`. An MCP-started session can be consumed with `Sonexis.attach_capture(session_id)` over the existing binary socket. The MCP control connection owns that session and must remain alive. MCP never transports PCM. The server uses the official `mcp` Python package and requires Python 3.10+.
+The optional Python MCP server exposes Runtime metadata, source lookup,
+diagnostics, and output-destination discovery. Its default inventory is
+read-only. `--allow-capture` additionally registers start/list/get/stop tools,
+restricted to captures owned by that MCP process. Results omit private
+data-socket paths and return bounded structured errors. An external SDK attaches
+by session ID over the normal binary data plane. MCP uses stdio and never
+transports PCM. The server uses the official `mcp` Python package and requires
+Python 3.10+.
 
 ## CLI and diagnostics
 

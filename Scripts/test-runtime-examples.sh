@@ -16,7 +16,9 @@ for example in \
     duplex.py \
     python-runtime-client.py \
     python-runtime-monitor.py \
-    multi-source-runtime.py
+    multi-source-runtime.py \
+    multi-source-agent.py \
+    provider-output.py
 do
     "$PYTHON" -m py_compile "$ROOT_DIR/Examples/$example"
     "$PYTHON" "$ROOT_DIR/Examples/$example" --help >/dev/null

@@ -9,6 +9,8 @@ before running them.
 | labeled independent sources | `capture-multiple-sources.py conversation=Discord media=Spotify` |
 | Runtime-owned playback | `playback.py response.wav --destination default` |
 | input/output ownership | `duplex.py Discord --destination default` |
+| minimal provider response playback | `provider-output.py Discord` |
+| agent policy over two labeled sources | `multi-source-agent.py Discord Spotify` |
 | Gemini or OpenAI | `audio-agent/audio_agent.py --help` |
 | MCP control | `python -m sonexis.mcp_server --help` |
 

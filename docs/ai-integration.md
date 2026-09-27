@@ -183,6 +183,17 @@ callback. Its `active` flag means non-silent signal, not speech. Applications
 may supply a real VAD through the `VoiceActivityDetector` protocol; Sonexis does
 not ship an unvalidated speech detector.
 
+`AudioActivityDetector` adds provider-neutral start/end edges with separate
+thresholds and sustained-on/sustained-silence debounce. It runs on the SDK
+consumer task, resets on discontinuities, and can use an application-supplied
+`VoiceActivityDetector`. Gemini uses this same primitive for hybrid turn
+finalization. TypeScript exposes the equivalent energy detector.
+
+Provider events carry normalized `response_started` and `response_completed`
+flags plus source, capture-session, and stream correlation learned from input.
+Original provider event types remain available; `raw` is unstable
+provider-private diagnostic data.
+
 ## MCP control plane
 
 Install `SDKs/python[mcp]` under Python 3.10+ and run:
@@ -191,12 +202,15 @@ Install `SDKs/python[mcp]` under Python 3.10+ and run:
 python -m sonexis.mcp_server
 ```
 
-The tools list/resolve sources and query Runtime/session diagnostics. Starting
-or stopping capture requires `--allow-capture`; this makes accidental agent
-mutation harder. The result tells a consumer to call
+The default tools report Runtime metadata, list/resolve sources, query
+diagnostics, and discover output destinations. `--allow-capture` registers
+start/list/get/stop capture tools, restricts them to sessions owned by that MCP
+process, and makes sensitive mutation explicit. Results omit private socket
+paths. A start result tells a consumer to call
 `await sx.attach_capture(session_id)` with the SDK. Audio never passes through
 MCP. The MCP control connection continues to own that session and must remain
-alive until capture stops.
+alive until capture stops. The server is stdio-only and returns bounded
+structured errors. Realtime PCM never passes through MCP.
 
 ## Latency and failure semantics
 
