@@ -527,21 +527,13 @@ sampled off the realtime callback.
 - Detailed Process Tap lifecycle logging is opt-in through
   `SONEXIS_AUDIO_DEBUG=1`; normal Runtime operation does not persist device UIDs
   or per-session audio metadata.
-- `verify-runtime-artifacts.sh` verifies bounded package inventory, hashes,
-  signatures, identifiers, versions, and architectures without executing the
-  candidate binaries. Bundle hashes are self-consistency evidence, not publisher
-  authenticity. Before inspecting a copied bundle, obtain the manifest SHA-256
-  through a trusted channel and set `SONEXIS_EXPECTED_MANIFEST_SHA256`; that
-  digest anchors the manifest, SDK hashes, and source-commit declaration.
-  `SONEXIS_EXPECTED_TEAM_ID` and `SONEXIS_EXPECTED_SOURCE_COMMIT` are useful
-  additional assertions but cannot authenticate the SDKs by themselves. Without
-  the manifest-digest anchor, the verifier is intended only for trusted local
-  build output, not as a hostile archive parser. Verification also requires the
-  artifact directory, its parent, and every input file to be current-user-owned
-  and non-writable by group/other; copy a bundle out of shared writable storage
-  before checking it. Other same-UID processes remain inside the documented
-  local-account trust boundary. Apple Development signatures are local
-  engineering identity, not a substitute for Developer ID and notarization.
+- `Scripts/test-runtime-release.sh` builds and executes the standalone source,
+  SDK, package, stress, TSan, metadata, provenance, and Apple Development
+  signing gates. The development installer verifies exact managed inventory,
+  hashes, stable identifiers, versions, embedded capture metadata, and matching
+  Team IDs before replacement or removal. Apple Development signatures are
+  local engineering identity, not a substitute for Developer ID signing and
+  notarization of a public distribution.
 
 ## Troubleshooting
 

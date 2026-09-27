@@ -32,6 +32,27 @@ for name in sonexis-runtime sonexisctl; do
         echo "$product is not Apple Development signed" >&2; exit 1;
     }
 done
+RUNTIME_SOURCE="$PRODUCTS_DIR/sonexis-runtime"
+CTL_SOURCE="$PRODUCTS_DIR/sonexisctl"
+RUNTIME_TEAM=$(codesign -dvv "$RUNTIME_SOURCE" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+CLI_TEAM=$(codesign -dvv "$CTL_SOURCE" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+[ -n "$RUNTIME_TEAM" ] && [ "$RUNTIME_TEAM" = "$CLI_TEAM" ] || {
+    echo "Runtime and CLI must have the same nonempty TeamIdentifier" >&2; exit 1;
+}
+[ "$(codesign -dvv "$RUNTIME_SOURCE" 2>&1 | sed -n 's/^Identifier=//p')" = \
+    "com.sonexis.runtime" ] || { echo "unexpected Runtime identifier" >&2; exit 1; }
+[ "$(codesign -dvv "$CTL_SOURCE" 2>&1 | sed -n 's/^Identifier=//p')" = \
+    "com.sonexis.ctl" ] || { echo "unexpected CLI identifier" >&2; exit 1; }
+strings "$RUNTIME_SOURCE" | grep -F '<key>NSAudioCaptureUsageDescription</key>' >/dev/null || {
+    echo "Runtime lacks NSAudioCaptureUsageDescription" >&2; exit 1;
+}
+VERSION=$(sed -n '1p' "$ROOT_DIR/RUNTIME_VERSION")
+[ "$("$RUNTIME_SOURCE" --version)" = "sonexis-runtime $VERSION (protocol 2)" ] || {
+    echo "Runtime version does not match RUNTIME_VERSION" >&2; exit 1;
+}
+[ "$("$CTL_SOURCE" version)" = "sonexisctl $VERSION (protocol 2)" ] || {
+    echo "CLI version does not match RUNTIME_VERSION" >&2; exit 1;
+}
 
 PARENT=$(dirname -- "$PREFIX")
 mkdir -p "$PARENT"
@@ -41,12 +62,28 @@ mkdir -p "$PARENT"
 [ "$(stat -f %u "$PARENT")" = "$(id -u)" ] || {
     echo "install parent belongs to another user" >&2; exit 1;
 }
+
+verify_managed_install() {
+    [ -d "$PREFIX" ] && [ ! -L "$PREFIX" ] || return 1
+    [ "$(stat -f %u "$PREFIX")" = "$(id -u)" ] || return 1
+    [ -d "$PREFIX/bin" ] && [ ! -L "$PREFIX/bin" ] || return 1
+    [ -f "$PREFIX/bin/sonexis-runtime" ] && [ ! -L "$PREFIX/bin/sonexis-runtime" ] || return 1
+    [ -f "$PREFIX/bin/sonexisctl" ] && [ ! -L "$PREFIX/bin/sonexisctl" ] || return 1
+    [ -f "$PREFIX/manifest.plist" ] && [ ! -L "$PREFIX/manifest.plist" ] || return 1
+    [ -z "$(find "$PREFIX" -mindepth 1 -maxdepth 1 \
+        ! -name bin ! -name manifest.plist -print -quit)" ] || return 1
+    [ -z "$(find "$PREFIX/bin" -mindepth 1 -maxdepth 1 \
+        ! -name sonexis-runtime ! -name sonexisctl -print -quit)" ] || return 1
+    [ "$(plutil -extract install_kind raw -o - "$PREFIX/manifest.plist" 2>/dev/null)" = \
+        "sonexis-runtime-standalone-dev" ] || return 1
+    [ "$(plutil -extract runtime_sha256 raw -o - "$PREFIX/manifest.plist" 2>/dev/null)" = \
+        "$(shasum -a 256 "$PREFIX/bin/sonexis-runtime" | awk '{print $1}')" ] || return 1
+    [ "$(plutil -extract cli_sha256 raw -o - "$PREFIX/manifest.plist" 2>/dev/null)" = \
+        "$(shasum -a 256 "$PREFIX/bin/sonexisctl" | awk '{print $1}')" ] || return 1
+}
 if [ -e "$PREFIX" ]; then
-    [ -d "$PREFIX" ] && [ ! -L "$PREFIX" ] \
-        && [ -f "$PREFIX/manifest.plist" ] && [ ! -L "$PREFIX/manifest.plist" ] \
-        && [ "$(plutil -extract install_kind raw -o - "$PREFIX/manifest.plist" 2>/dev/null)" = \
-            "sonexis-runtime-standalone-dev" ] || {
-        echo "refusing to replace unmanaged install: $PREFIX" >&2; exit 1;
+    verify_managed_install || {
+        echo "refusing to replace modified or unmanaged install: $PREFIX" >&2; exit 1;
     }
 fi
 

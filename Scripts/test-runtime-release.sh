@@ -14,5 +14,6 @@ codesign --verify --strict "$CLI"
 strings "$RUNTIME" | grep -F '<key>NSAudioCaptureUsageDescription</key>' >/dev/null
 [ "$(codesign -dvv "$RUNTIME" 2>&1 | sed -n 's/^Identifier=//p')" = \
     "com.sonexis.runtime" ]
+"$ROOT_DIR/Scripts/test-runtime-install.sh"
 
 echo "Standalone Sonexis Runtime release gate passed"
