@@ -4,6 +4,11 @@ import Foundation
 final class RealtimeRingBuffer {
     private var pointer: OpaquePointer?
 
+    /// Stable for this wrapper's lifetime. Callback contexts retain the
+    /// wrapper separately and use this pointer to avoid Swift dispatch/ARC in
+    /// the realtime render callback.
+    var realtimePointer: OpaquePointer? { pointer }
+
     let capacityFrames: UInt32
     let channels: UInt32
 
@@ -99,6 +104,11 @@ final class RealtimeRingBuffer {
     var readFrames: UInt64 {
         guard let pointer else { return 0 }
         return SonexisAudioRingBufferGetReadFrames(pointer)
+    }
+
+    var renderedFrames: UInt64 {
+        guard let pointer else { return 0 }
+        return SonexisAudioRingBufferGetRenderedFrames(pointer)
     }
 
     var lastInputPeakPPM: UInt32 {

@@ -1,6 +1,22 @@
 """Exceptions raised by the Sonexis SDK."""
 
+import re
 from typing import Any, Dict, Optional
+
+
+def sanitized_provider_error(error: BaseException) -> str:
+    """Return bounded provider diagnostics with common credential forms removed."""
+    text = str(error)[:2_000]
+    text = re.sub(r"(?i)\b(bearer)\s+[^\s,;]+", r"\1 [REDACTED]", text)
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|authorization|access[_-]?token|token|key)"
+        r"(\s*[=:]\s*)[^\s&,;]+",
+        r"\1\2[REDACTED]",
+        text,
+    )
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", text)
+    text = re.sub(r"\bAIza[A-Za-z0-9_-]{8,}\b", "[REDACTED]", text)
+    return text
 
 
 class SonexisError(Exception):
@@ -35,12 +51,22 @@ class SonexisError(Exception):
             "slow_consumer": SlowConsumerError,
             "capture_failed": CaptureFailedError,
             "output_unavailable": OutputUnavailableError,
+            "output_destination_unavailable": OutputUnavailableError,
+            "output_destination_disconnected": OutputUnavailableError,
+            "output_device_unavailable": OutputUnavailableError,
             "output_session_limit_exceeded": SessionLimitError,
             "unsupported_output_format": UnsupportedFormatError,
+            "unsupported_output_device_format": UnsupportedFormatError,
             "output_initialization_failed": OutputFailedError,
             "output_flush_failed": OutputFailedError,
             "output_stream_failed": OutputFailedError,
             "output_stream_truncated": OutputFailedError,
+            "output_device_change_failed": OutputFailedError,
+            "output_conversion_failed": OutputFailedError,
+            "output_converter_unavailable": OutputFailedError,
+            "output_buffer_allocation_failed": OutputFailedError,
+            "output_ended_during_start": OutputFailedError,
+            "output_not_writable": OutputFailedError,
         }.get(code, cls)
         return error_type(
             code,

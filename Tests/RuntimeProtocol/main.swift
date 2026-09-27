@@ -67,6 +67,10 @@ do {
     var coalesced = RuntimeNDJSONParser()
     let coalescedLines = try coalesced.append(twoLines)
     expect(coalescedLines.count == 2, "coalesced lines were not separated")
+    var tinyLines = RuntimeNDJSONParser()
+    let tinyLineValues = try tinyLines.append(Data(repeating: 0x0A, count: 10_000))
+    expect(tinyLineValues.count == 10_000,
+           "packed tiny control lines were not parsed in one cursor-based pass")
 
     expectError("message_too_large") {
         var oversized = RuntimeNDJSONParser()
@@ -134,6 +138,20 @@ do {
     _ = try complete.append(encoded)
     _ = try complete.append(RuntimePCMFrameCodec.encode(header: eos, payload: Data()))
     try complete.finish(requireEndOfStream: true)
+
+    var packed = Data()
+    for sequence in 0..<900 {
+        let tinyHeader = RuntimePCMFrameHeader(payloadByteCount: 2, streamID: streamID,
+            sequence: UInt64(sequence), timestampNanoseconds: UInt64(sequence) * 62_500,
+            sampleRate: 16_000, frameCount: 1, channelCount: 1)
+        packed.append(try RuntimePCMFrameCodec.encode(
+            header: tinyHeader, payload: Data([0, 0])))
+    }
+    var packedDecoder = RuntimePCMStreamDecoder(expectedStreamID: streamID)
+    let packedFrames = try packedDecoder.append(packed)
+    expect(packedFrames.count == 900,
+           "packed tiny frames were not decoded in one cursor-based pass")
+    try packedDecoder.finish()
 
     print("Runtime protocol v2 tests passed")
 } catch {

@@ -78,6 +78,8 @@ class AudioOutput:
         frame_size = audio_format.channels * audio_format.sample_format.bytes_per_sample
         if len(view) % frame_size:
             raise ValueError("audio payload must contain whole interleaved sample frames")
+        if len(view) // frame_size < max(1, audio_format.sample_rate // 1000):
+            raise ValueError("audio writes must contain at least one millisecond of PCM")
         max_frames = max(1, audio_format.sample_rate * self._MAX_PACKET_MILLISECONDS // 1000)
         max_bytes = max_frames * frame_size
 
@@ -110,8 +112,7 @@ class AudioOutput:
                         self._writer.write(packet)
                         await self._writer.drain()
                     except (OSError, ConnectionError) as error:
-                        raise SonexisConnectionError(
-                            "output_stream_closed", str(error), retryable=True) from error
+                        raise await self._resolve_stream_failure(error) from error
                     self._sequence += 1
                     frames_written_this_call += frame_count
                     self._next_timestamp_ns = (
@@ -231,6 +232,36 @@ class AudioOutput:
                     "stop_output", output_session_id=self.info.id)
                 return
             await asyncio.sleep(min(0.02, remaining))
+
+    async def _resolve_stream_failure(self, transport_error: BaseException) -> SonexisError:
+        """Prefer the Runtime's terminal backend cause over a generic socket error."""
+        async def terminal_error() -> Optional[SonexisError]:
+            deadline = asyncio.get_running_loop().time() + 0.4
+            while asyncio.get_running_loop().time() < deadline:
+                info = await self.client.output_status(self.info.id)
+                self.info = info
+                if info.error is not None:
+                    return SonexisError.from_response({
+                        "error": {
+                            "code": info.error.code,
+                            "message": info.error.message,
+                            "retryable": info.error.retryable,
+                            "details": info.error.details or {},
+                        }
+                    })
+                if info.state in ("stopped", "cancelled"):
+                    return None
+                await asyncio.sleep(0.02)
+            return None
+
+        try:
+            resolved = await asyncio.wait_for(terminal_error(), timeout=0.5)
+            if resolved is not None:
+                return resolved
+        except Exception:
+            pass
+        return SonexisConnectionError(
+            "output_stream_closed", str(transport_error), retryable=True)
 
     def _frames_to_nanoseconds(self, frame_count: int) -> int:
         return frame_count * 1_000_000_000 // self.info.format.sample_rate

@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator, Callable, List, Optional
 
 from ..activity import VoiceActivityDetector, measure_activity
 from ..diagnostics import AudioSendReceipt, send_receipt
-from ..errors import ProviderError
+from ..errors import ProviderError, sanitized_provider_error
 from ..models import AudioFormat, AudioFrame
 from .base import ProviderEvent
 
@@ -38,6 +38,26 @@ class GeminiLiveSink:
     """Send Sonexis PCM to a Google Gemini Live session."""
 
     required_format = AudioFormat.gemini_live()
+
+    @staticmethod
+    def _output_audio_format(mime_type: str) -> AudioFormat:
+        parts = [part.strip().lower() for part in mime_type.split(";")]
+        if not parts or parts[0] != "audio/pcm":
+            raise ProviderError(
+                "unsupported_provider_audio_format",
+                f"Gemini returned unsupported output audio type {mime_type!r}",
+            )
+        parameters = {}
+        for part in parts[1:]:
+            if "=" in part:
+                key, value = part.split("=", 1)
+                parameters[key.strip()] = value.strip()
+        if parameters.get("rate") != "24000":
+            raise ProviderError(
+                "unsupported_provider_audio_format",
+                "Gemini output PCM must explicitly declare rate=24000",
+            )
+        return AudioFormat.gemini_live_output()
 
     @staticmethod
     def _connection_config(response_modalities, system_instruction: Optional[str]) -> dict:
@@ -117,11 +137,14 @@ class GeminiLiveSink:
                        turn_detection=turn_detection,
                        voice_activity_detector=voice_activity_detector,
                        debug_callback=debug_callback)
-        except BaseException:
+        except BaseException as error:
             close = getattr(client, "close", None)
             if close is not None:
                 close()
-            raise
+            if isinstance(error, (asyncio.CancelledError, ProviderError)):
+                raise
+            raise ProviderError("provider_handshake_failed",
+                                sanitized_provider_error(error), retryable=True) from error
 
     async def __aenter__(self) -> "GeminiLiveSink":
         return self
@@ -231,7 +254,8 @@ class GeminiLiveSink:
             except asyncio.CancelledError:
                 raise
             except BaseException as error:
-                raise ProviderError("provider_send_failed", str(error), retryable=True) from error
+                raise ProviderError("provider_send_failed",
+                                    sanitized_provider_error(error), retryable=True) from error
             if self._closed:
                 raise ProviderError("provider_closed", "Gemini session closed during send")
             self._last_sequence = frame.sequence
@@ -244,12 +268,20 @@ class GeminiLiveSink:
                 transcription = getattr(server, "output_transcription", None)
                 text = getattr(transcription, "text", None) or getattr(value, "text", None)
                 audio_parts = []
+                audio_format = None
                 model_turn = getattr(server, "model_turn", None)
                 for part in getattr(model_turn, "parts", None) or []:
                     inline = getattr(part, "inline_data", None)
                     data = getattr(inline, "data", None)
                     mime = str(getattr(inline, "mime_type", ""))
                     if isinstance(data, bytes) and mime.startswith("audio/"):
+                        part_format = self._output_audio_format(mime)
+                        if audio_format is not None and part_format != audio_format:
+                            raise ProviderError(
+                                "unsupported_provider_audio_format",
+                                "Gemini returned mixed output audio formats in one event",
+                            )
+                        audio_format = part_format
                         audio_parts.append(data)
                 has_response = bool(text or audio_parts or model_turn)
                 if has_response and not self._response_in_progress:
@@ -263,17 +295,19 @@ class GeminiLiveSink:
                 yield ProviderEvent("gemini", event_type,
                                     text=text if isinstance(text, str) else None,
                                     audio=b"".join(audio_parts) or None,
-                                    audio_format=(AudioFormat.gemini_live_output()
-                                                  if audio_parts else None),
+                                    audio_format=audio_format,
                                     raw=value)
         except asyncio.CancelledError:
             raise
         except GeneratorExit:
             return
+        except ProviderError:
+            raise
         except BaseException as error:
             if self._closed:
                 return
-            raise ProviderError("provider_receive_failed", str(error), retryable=True) from error
+            raise ProviderError("provider_receive_failed",
+                                sanitized_provider_error(error), retryable=True) from error
 
     async def aclose(self) -> None:
         if self._close_task is None:

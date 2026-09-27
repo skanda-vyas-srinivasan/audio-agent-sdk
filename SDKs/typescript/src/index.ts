@@ -20,10 +20,22 @@ function audioFormat(sampleRate: number, channelCount: number,
 export const AudioFormats = Object.freeze({
   speech16k: (): AudioFormat => audioFormat(16000, 1),
   openAIRealtime: (): AudioFormat => audioFormat(24000, 1),
+  openAIRealtimeOutput: (): AudioFormat => audioFormat(24000, 1),
   geminiLive: (): AudioFormat => audioFormat(16000, 1),
+  geminiLiveOutput: (): AudioFormat => audioFormat(24000, 1),
   pcm48kMono: (): AudioFormat => audioFormat(48000, 1),
   pcm48kStereo: (): AudioFormat => audioFormat(48000, 2),
 });
+
+/** Every event understood by this SDK version. Supplying the explicit list
+ * opts v0.4 clients into output events while preserving Runtime v0.3 defaults. */
+export const RuntimeEventTypes = Object.freeze([
+  "source_added", "source_removed", "source_updated", "capture_started",
+  "capture_stopped", "capture_failed", "client_warning", "device_changed",
+  "runtime_warning", "runtime_shutting_down", "output_started", "output_stopped",
+  "output_cancelled", "output_failed", "output_underrun", "output_overrun",
+  "output_dropped", "output_destination_changed",
+] as const);
 
 export interface AudioSource {
   id: string;
@@ -108,6 +120,10 @@ export interface OutputMetrics {
   conversion_nanoseconds: number;
   route_changes: number;
   producer_connected: boolean;
+  device_sample_rate?: number;
+  device_channel_count?: number;
+  estimated_output_latency_milliseconds?: number;
+  uptime_nanoseconds?: number;
 }
 export type OutputSessionState =
   "starting" | "ready" | "draining" | "stopped" | "cancelled" | "failed";
@@ -132,6 +148,10 @@ export interface OutputWriteOptions {
   timestampNs?: bigint | number;
   discontinuity?: boolean;
   signal?: AbortSignal;
+}
+export interface DuplexOptions {
+  inputFormat?: AudioFormat;
+  output?: OutputOptions;
 }
 export interface RuntimeErrorInfo {
   code: string;
@@ -203,6 +223,7 @@ export interface Handshake {
   runtime_instance_id: string;
   capabilities: string[];
   supported_formats: AudioFormat[];
+  supported_output_formats?: AudioFormat[];
   limits: Record<string, number>;
 }
 
@@ -473,7 +494,7 @@ export class Sonexis extends EventEmitter {
   /** Create and attach a bounded client-to-Runtime PCM output stream. */
   async createOutput(options: OutputOptions = {}): Promise<AudioOutput> {
     this.requireOutputCapability();
-    const targetBufferMilliseconds = options.targetBufferMilliseconds ?? 80;
+    const targetBufferMilliseconds = options.targetBufferMilliseconds ?? 60;
     if (!Number.isInteger(targetBufferMilliseconds)
         || targetBufferMilliseconds < 20 || targetBufferMilliseconds > 250) {
       throw new RangeError("targetBufferMilliseconds must be an integer between 20 and 250");
@@ -482,7 +503,7 @@ export class Sonexis extends EventEmitter {
       ? options.destination : options.destination?.id ?? "default";
     const response = await this.request("start_output", {
       destination_id: destinationId,
-      format: options.format ?? AudioFormats.openAIRealtime(),
+      format: options.format ?? AudioFormats.openAIRealtimeOutput(),
       target_buffer_milliseconds: targetBufferMilliseconds,
     });
     let info: OutputInfo;
@@ -504,6 +525,11 @@ export class Sonexis extends EventEmitter {
   /** Convenience alias for createOutput(). */
   playback(options: OutputOptions = {}): Promise<AudioOutput> {
     return this.createOutput(options);
+  }
+
+  /** Compose one independent capture and one output without imposing agent policy. */
+  duplex(source: SourceSelector, options: DuplexOptions = {}): Promise<DuplexSession> {
+    return DuplexSession.open(this, source, options);
   }
 
   async outputStatus(outputSessionId: string): Promise<OutputInfo> {
@@ -528,7 +554,7 @@ export class Sonexis extends EventEmitter {
 
   async events(eventTypes?: string[]): Promise<EventStream> {
     const response = await this.request("subscribe_events",
-      eventTypes ? { event_types: eventTypes } : {});
+      { event_types: eventTypes ?? [...RuntimeEventTypes] });
     const subscription = response.subscription as {
       id: string; event_socket_path: string; event_types: string[];
     };
@@ -681,6 +707,7 @@ export class AudioOutput extends EventEmitter {
   private operationTail: Promise<void> = Promise.resolve();
   private closePromise?: Promise<void>;
   private closing = false;
+  private resolvingStreamFailure = false;
   private terminalError?: Error;
   private rotatingSocket?: Socket;
 
@@ -711,6 +738,9 @@ export class AudioOutput extends EventEmitter {
     const frameSize = bytesPerFrame(this.info.format);
     if (bytes.length % frameSize !== 0) {
       throw new RangeError("Audio payload must contain whole interleaved sample frames");
+    }
+    if (bytes.length / frameSize < Math.max(1, Math.floor(this.info.format.sample_rate / 1000))) {
+      throw new RangeError("Audio writes must contain at least one millisecond of PCM");
     }
     const explicitTimestamp = options.timestampNs === undefined
       ? undefined : timestampToBigInt(options.timestampNs);
@@ -757,8 +787,7 @@ export class AudioOutput extends EventEmitter {
         throw error;
       }
       const failure = error instanceof SonexisError ? error
-        : new SonexisError("output_stream_closed",
-          error instanceof Error ? error.message : String(error), true);
+        : await this.resolveStreamFailure(error);
       this.emit("outputError", failure);
       await this.cancel();
       throw failure;
@@ -875,7 +904,8 @@ export class AudioOutput extends EventEmitter {
       try { info = await this.client.outputStatus(this.info.id); }
       catch (error) {
         if (error instanceof SonexisError
-            && ["session_not_found", "output_not_found"].includes(error.code)) return;
+            && ["session_not_found", "output_not_found", "output_session_not_found"]
+              .includes(error.code)) return;
         throw error;
       }
       this.info = info;
@@ -893,11 +923,38 @@ export class AudioOutput extends EventEmitter {
     });
     socket.on("close", () => {
       if (this.socket !== socket || this.rotatingSocket === socket || this.closing) return;
-      const error = this.terminalError ?? new SonexisError(
-        "output_stream_closed", "Runtime closed the output stream unexpectedly", true);
-      this.runtimeDisconnected(error);
-      void this.client.cleanupOutput(this.info.id);
+      void this.handleUnexpectedStreamClose(this.terminalError);
     });
+  }
+
+  private async handleUnexpectedStreamClose(transportError?: Error): Promise<void> {
+    if (this.closing || this.resolvingStreamFailure) return;
+    this.resolvingStreamFailure = true;
+    const error = await this.resolveStreamFailure(transportError);
+    if (this.closing) return;
+    this.closing = true;
+    this.terminalError = error;
+    this.client.untrackOutput(this);
+    this.emit("outputError", error);
+    this.emit("closed", this.info);
+    this.closePromise = Promise.resolve();
+    await this.client.cleanupOutput(this.info.id);
+  }
+
+  private async resolveStreamFailure(transportError: unknown): Promise<Error> {
+    const deadline = Date.now() + 400;
+    try {
+      while (Date.now() < deadline) {
+        const info = await this.client.outputStatus(this.info.id);
+        this.info = info;
+        if (info.error) return outputFailure(info);
+        if (info.state === "stopped" || info.state === "cancelled") break;
+        await delay(20);
+      }
+    } catch { /* Control connection failure falls through to transport error. */ }
+    return new SonexisError("output_stream_closed",
+      transportError instanceof Error ? transportError.message
+        : "Runtime closed the output stream unexpectedly", true);
   }
 
   private async runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -962,8 +1019,10 @@ export function encodeOutputFrame(input: OutputFrameInput): Buffer {
     header.writeUInt32BE(input.format.sample_rate, 48);
     header.writeUInt32BE(input.frameCount, 52);
     header.writeUInt16BE(input.format.channel_count, 56);
-    header.writeUInt16BE(input.format.sample_format === "pcm_s16le" ? 1 : 2, 58);
   }
+  // Swift validates the format code before applying the special EOS rules;
+  // EOS zeros rate/frame/channel fields but retains its negotiated format code.
+  header.writeUInt16BE(input.format.sample_format === "pcm_s16le" ? 1 : 2, 58);
   return data.length ? Buffer.concat([header, data]) : header;
 }
 
@@ -1025,6 +1084,12 @@ function parseOutputMetrics(value: unknown): OutputMetrics {
   for (const field of integerFields) result[field] = optionalNumericField(record, field, 0);
   result.buffered_milliseconds = optionalNumericField(record, "buffered_milliseconds", 0);
   result.producer_connected = optionalBooleanField(record, "producer_connected", false);
+  for (const field of ["device_sample_rate", "device_channel_count",
+    "estimated_output_latency_milliseconds", "uptime_nanoseconds"] as const) {
+    if (record[field] !== undefined && record[field] !== null) {
+      result[field] = optionalNumericField(record, field, 0);
+    }
+  }
   return result as unknown as OutputMetrics;
 }
 
@@ -1348,6 +1413,38 @@ export interface LabeledAudioFrame {
   timestampNs: bigint;
   localDroppedFramesBefore: number;
   discontinuity: boolean;
+}
+
+/** Convenience ownership boundary for one input and one independent output. */
+export class DuplexSession {
+  private closed = false;
+
+  private constructor(readonly input: CaptureStream, readonly output: AudioOutput) {}
+
+  static async open(client: Sonexis, source: SourceSelector,
+                    options: DuplexOptions = {}): Promise<DuplexSession> {
+    const input = await client.capture(source, options.inputFormat ?? AudioFormats.speech16k());
+    try {
+      const output = await client.playback(options.output ?? {});
+      return new DuplexSession(input, output);
+    } catch (error) {
+      await input.close();
+      throw error;
+    }
+  }
+
+  /** Drain response audio on normal shutdown; pass false for barge-in. */
+  async close(drainOutput = true): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    const results = await Promise.allSettled([
+      this.output.close({ drain: drainOutput }),
+      this.input.close(),
+    ]);
+    const failure = results.find((result): result is PromiseRejectedResult =>
+      result.status === "rejected");
+    if (failure) throw failure.reason;
+  }
 }
 
 interface MultiSourceEnd {

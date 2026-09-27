@@ -5,9 +5,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#if __has_feature(nullability)
+#pragma clang assume_nonnull begin
+#endif
+
 typedef struct SonexisAudioRingBuffer SonexisAudioRingBuffer;
 
-SonexisAudioRingBuffer *SonexisAudioRingBufferCreate(uint32_t capacityFrames, uint32_t channels);
+SonexisAudioRingBuffer * _Nullable SonexisAudioRingBufferCreate(
+    uint32_t capacityFrames,
+    uint32_t channels
+);
 void SonexisAudioRingBufferDestroy(SonexisAudioRingBuffer *ringBuffer);
 
 uint32_t SonexisAudioRingBufferWriteFromAudioBufferList(
@@ -32,8 +39,22 @@ uint32_t SonexisAudioRingBufferReadInterleaved(
     uint32_t frames
 );
 
-/// Discards all currently readable frames. The caller should gate reads while
-/// flushing when an exact barge-in boundary is required.
+/// C-only HAL output callback. `inClientData` must be a live
+/// SonexisAudioRingBuffer pointer with the device's output channel count.
+OSStatus SonexisAudioRingBufferIOProc(
+    AudioObjectID inDevice,
+    const AudioTimeStamp *inNow,
+    const AudioBufferList *inInputData,
+    const AudioTimeStamp *inInputTime,
+    AudioBufferList *outOutputData,
+    const AudioTimeStamp *inOutputTime,
+    void * _Nullable inClientData
+);
+
+/// Discards all currently readable frames. This control-thread-only operation
+/// closes the read gate and waits for an in-flight realtime read before moving
+/// the cursor. Audio already handed to Core Audio may still render for up to
+/// one device callback period.
 uint32_t SonexisAudioRingBufferFlush(SonexisAudioRingBuffer *ringBuffer);
 
 void SonexisAudioRingBufferSetReadEnabled(SonexisAudioRingBuffer *ringBuffer, bool enabled);
@@ -45,10 +66,15 @@ uint64_t SonexisAudioRingBufferGetUnderflowFrames(SonexisAudioRingBuffer *ringBu
 uint64_t SonexisAudioRingBufferGetWrittenFrames(SonexisAudioRingBuffer *ringBuffer);
 uint64_t SonexisAudioRingBufferGetWriteOperations(SonexisAudioRingBuffer *ringBuffer);
 uint64_t SonexisAudioRingBufferGetReadFrames(SonexisAudioRingBuffer *ringBuffer);
+uint64_t SonexisAudioRingBufferGetRenderedFrames(SonexisAudioRingBuffer *ringBuffer);
 uint32_t SonexisAudioRingBufferGetLastInputPeakPPM(SonexisAudioRingBuffer *ringBuffer);
 uint32_t SonexisAudioRingBufferGetTargetFillFrames(SonexisAudioRingBuffer *ringBuffer);
 void SonexisAudioRingBufferSetGainImmediate(SonexisAudioRingBuffer *ringBuffer, float gain);
 void SonexisAudioRingBufferRequestGainRamp(SonexisAudioRingBuffer *ringBuffer, float targetGain, uint32_t rampFrames);
 uint32_t SonexisAudioRingBufferGetCurrentGainPPM(SonexisAudioRingBuffer *ringBuffer);
+
+#if __has_feature(nullability)
+#pragma clang assume_nonnull end
+#endif
 
 #endif

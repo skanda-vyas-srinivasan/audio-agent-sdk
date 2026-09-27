@@ -21,6 +21,7 @@ from sonexis import (AmbiguousSourceError, AudioFormat, AudioFrame, AudioSource,
                      MultiSourceSession, ReplayStream, SampleFormat, SessionMetrics,
                      SonexisProtocolError, SourceNotFoundError, measure_activity)
 from sonexis.diagnostics import send_receipt
+from sonexis.errors import sanitized_provider_error
 from sonexis.mcp_control import SonexisControlTools
 from sonexis.providers import (GeminiLiveSink, GeminiTurnDetectionConfig,
                                OpenAIRealtimeSink)
@@ -370,6 +371,15 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["output_audio_transcription"], {})
         self.assertEqual(config["system_instruction"], instruction)
 
+    def test_provider_diagnostics_redact_common_secret_forms(self):
+        message = sanitized_provider_error(RuntimeError(
+            "request failed api_key=AIzaSecretValue123 token: sk-secretvalue123 "
+            "Authorization=BearerSecret"))
+        self.assertNotIn("AIzaSecretValue123", message)
+        self.assertNotIn("sk-secretvalue123", message)
+        self.assertNotIn("BearerSecret", message)
+        self.assertGreaterEqual(message.count("[REDACTED]"), 3)
+
     async def test_openai_audio_encoding_and_format_validation(self):
         connection = FakeOpenAIConnection()
         sink = OpenAIRealtimeSink(connection)
@@ -498,7 +508,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         gemini_session.received.append(SimpleNamespace(server_content=SimpleNamespace(
             output_transcription=None,
             model_turn=SimpleNamespace(parts=[SimpleNamespace(inline_data=SimpleNamespace(
-                data=b"gemini", mime_type="audio/pcm"))]),
+                data=b"gemini", mime_type="audio/pcm;rate=24000"))]),
             turn_complete=False)))
         gemini = GeminiLiveSink(gemini_session, blob_factory=lambda **value: value)
         gemini_event = await gemini.events().__anext__()
@@ -511,6 +521,21 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             delta=base64.b64encode(b"openai").decode("ascii")))
         self.assertEqual(openai_event.audio, b"openai")
         self.assertEqual(openai_event.audio_format, AudioFormat.openai_realtime_output())
+
+    async def test_gemini_rejects_undeclared_or_unsupported_output_audio(self):
+        for mime in ("audio/pcm", "audio/pcm;rate=16000", "audio/opus"):
+            session = FakeGeminiSession()
+            session.received.append(SimpleNamespace(server_content=SimpleNamespace(
+                output_transcription=None,
+                model_turn=SimpleNamespace(parts=[SimpleNamespace(
+                    inline_data=SimpleNamespace(data=b"audio", mime_type=mime))]),
+                turn_complete=False)))
+            sink = GeminiLiveSink(session, blob_factory=lambda **value: value)
+            with self.assertRaises(Exception) as failure:
+                await sink.events().__anext__()
+            self.assertEqual(failure.exception.code,
+                             "unsupported_provider_audio_format")
+            await sink.aclose()
 
     async def test_provider_stream_affinity_and_bounded_close(self):
         connection = FakeOpenAIConnection()
@@ -652,6 +677,48 @@ class ReferenceProviderOutputTests(unittest.IsolatedAsyncioTestCase):
             await self.module.print_provider_events(
                 Sink(), asyncio.Event(), debug=True)
         self.assertIn("received 5 audio bytes", debug_output.getvalue())
+
+    async def test_provider_audio_uses_public_runtime_output_and_drains(self):
+        from sonexis.providers import ProviderEvent
+
+        class Output:
+            def __init__(self):
+                self.info = SimpleNamespace(id="output", destination_id="default")
+                self.metrics = SimpleNamespace(frames_rendered=240)
+                self.writes = []
+                self.close_drains = []
+
+            async def write(self, value):
+                self.writes.append(bytes(value))
+
+            async def aclose(self, *, drain):
+                self.close_drains.append(drain)
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+                self.output = Output()
+
+            async def playback(self, *, destination, format):
+                self.calls.append((destination, format))
+                return self.output
+
+        for provider, audio_format in (
+            ("gemini", AudioFormat.gemini_live_output()),
+            ("openai", AudioFormat.openai_realtime_output()),
+        ):
+            client = Client()
+            player = self.module.RuntimeResponsePlayer(client, "default", debug=False)
+            await player.write(ProviderEvent(
+                provider, "audio", audio=b"\x01\x02", audio_format=audio_format))
+            self.assertEqual(client.calls, [("default", audio_format)])
+            self.assertEqual(client.output.writes, [b"\x01\x02"])
+            with self.assertRaises(RuntimeError):
+                await player.write(ProviderEvent(
+                    provider, "audio", audio=b"\0\0",
+                    audio_format=AudioFormat.speech_16k()))
+            await player.close()
+            self.assertEqual(client.output.close_drains, [True])
 
 
 if __name__ == "__main__":

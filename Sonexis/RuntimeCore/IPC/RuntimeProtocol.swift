@@ -417,6 +417,10 @@ public struct RuntimeOutputMetricsDTO: Codable, Equatable, Sendable {
     public let conversionNanoseconds: UInt64
     public let routeChanges: UInt64
     public let producerConnected: Bool
+    public let deviceSampleRate: UInt32?
+    public let deviceChannelCount: UInt16?
+    public let estimatedOutputLatencyMilliseconds: Double?
+    public let uptimeNanoseconds: UInt64?
 
     public init(packetsReceived: UInt64 = 0, inputFramesReceived: UInt64 = 0,
                 inputBytesReceived: UInt64 = 0, deviceFramesEnqueued: UInt64 = 0,
@@ -427,7 +431,10 @@ public struct RuntimeOutputMetricsDTO: Codable, Equatable, Sendable {
                 queueHighWaterFrames: UInt32 = 0, bufferedMilliseconds: Double = 0,
                 targetBufferMilliseconds: UInt32 = 60, conversionBatches: UInt64 = 0,
                 conversionNanoseconds: UInt64 = 0, routeChanges: UInt64 = 0,
-                producerConnected: Bool = false) {
+                producerConnected: Bool = false, deviceSampleRate: UInt32? = nil,
+                deviceChannelCount: UInt16? = nil,
+                estimatedOutputLatencyMilliseconds: Double? = nil,
+                uptimeNanoseconds: UInt64? = nil) {
         self.packetsReceived = packetsReceived
         self.inputFramesReceived = inputFramesReceived
         self.inputBytesReceived = inputBytesReceived
@@ -447,6 +454,16 @@ public struct RuntimeOutputMetricsDTO: Codable, Equatable, Sendable {
         self.conversionNanoseconds = conversionNanoseconds
         self.routeChanges = routeChanges
         self.producerConnected = producerConnected
+        self.deviceSampleRate = deviceSampleRate
+        self.deviceChannelCount = deviceChannelCount
+        self.estimatedOutputLatencyMilliseconds = estimatedOutputLatencyMilliseconds
+        self.uptimeNanoseconds = uptimeNanoseconds
+    }
+
+    public var averageConversionMicroseconds: Double {
+        conversionBatches == 0
+            ? 0
+            : Double(conversionNanoseconds) / Double(conversionBatches) / 1_000
     }
 }
 
@@ -499,8 +516,6 @@ public enum RuntimeEventTypeDTO: String, Codable, CaseIterable, Sendable {
     case outputOverrun = "output_overrun"
     case outputDropped = "output_dropped"
     case outputDestinationChanged = "output_destination_changed"
-    case virtualInputConnected = "virtual_input_connected"
-    case virtualInputDisconnected = "virtual_input_disconnected"
 }
 
 public struct RuntimeEventDTO: Codable, Equatable, Sendable {
@@ -785,21 +800,38 @@ private struct RuntimeCodingKey: CodingKey {
 /// Incremental bounded parser for stream-oriented sockets.
 public struct RuntimeNDJSONParser {
     private var buffer = Data()
+    private var readOffset = 0
     public init() {}
 
     public mutating func append(_ data: Data) throws -> [Data] {
+        compact(force: buffer.count + data.count > RuntimeProtocolCodec.maximumControlMessageBytes)
+        let bufferedBytes = buffer.count - readOffset
         guard data.count <= RuntimeProtocolCodec.maximumControlMessageBytes,
-              buffer.count <= RuntimeProtocolCodec.maximumControlMessageBytes - data.count else {
+              bufferedBytes <= RuntimeProtocolCodec.maximumControlMessageBytes - data.count else {
             buffer.removeAll(keepingCapacity: true)
+            readOffset = 0
             throw RuntimeErrorDTO(code: "message_too_large", message: "Control message has no newline within the size limit")
         }
         buffer.append(data)
         var lines: [Data] = []
-        while let newline = buffer.firstIndex(of: 0x0A) {
+        while readOffset < buffer.count,
+              let newline = buffer[readOffset...].firstIndex(of: 0x0A) {
             let end = buffer.index(after: newline)
-            lines.append(buffer[..<end])
-            buffer.removeSubrange(..<end)
+            lines.append(Data(buffer[readOffset..<end]))
+            readOffset = end
         }
+        compact(force: readOffset == buffer.count)
         return lines
+    }
+
+    private mutating func compact(force: Bool = false) {
+        guard readOffset > 0,
+              force || readOffset >= 32 * 1_024 || readOffset * 2 >= buffer.count else { return }
+        if readOffset == buffer.count {
+            buffer.removeAll(keepingCapacity: true)
+        } else {
+            buffer.removeSubrange(0..<readOffset)
+        }
+        readOffset = 0
     }
 }

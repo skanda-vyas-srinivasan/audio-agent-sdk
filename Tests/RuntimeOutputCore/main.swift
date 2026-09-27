@@ -6,6 +6,33 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 do {
+    var invalidDeviceFormat = AudioStreamBasicDescription()
+    invalidDeviceFormat.mFormatID = kAudioFormatLinearPCM
+    invalidDeviceFormat.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+        | kAudioFormatFlagIsNonInterleaved
+    invalidDeviceFormat.mBitsPerChannel = 32
+    invalidDeviceFormat.mBytesPerFrame = 4
+    invalidDeviceFormat.mFramesPerPacket = 1
+    invalidDeviceFormat.mBytesPerPacket = 4
+    invalidDeviceFormat.mChannelsPerFrame = 2
+    invalidDeviceFormat.mSampleRate = .infinity
+    do {
+        _ = try RuntimeHALPlaybackBackend.validatedDeviceFormat(invalidDeviceFormat)
+        fatalError("infinite HAL sample rate was accepted")
+    } catch let error as RuntimeErrorDTO {
+        expect(error.code == "unsupported_output_device_format",
+               "invalid HAL format returned the wrong structured error")
+    }
+    invalidDeviceFormat.mSampleRate = 48_000
+    invalidDeviceFormat.mChannelsPerFrame = 128
+    do {
+        _ = try RuntimeHALPlaybackBackend.validatedDeviceFormat(invalidDeviceFormat)
+        fatalError("extreme HAL channel count was accepted")
+    } catch let error as RuntimeErrorDTO {
+        expect(error.code == "unsupported_output_device_format",
+               "extreme HAL channel count returned the wrong error")
+    }
+
     let ring = try RealtimeRingBuffer(capacityFrames: 100, channels: 1)
     ring.setReadEnabled(false)
     let input = (0..<120).map { Float($0) / 120 }
@@ -24,6 +51,7 @@ do {
         ring.readInterleaved($0.baseAddress!, frames: 20)
     }
     expect(read == 20 && ring.fillFrames == 20, "ring did not render queued frames")
+    expect(ring.renderedFrames == 20, "ring did not count non-silent callback output frames")
     expect(ring.flush() == 20 && ring.fillFrames == 0, "ring flush did not discard backlog")
     let overflowWrite = input.withUnsafeBufferPointer {
         ring.writeInterleaved($0.baseAddress!, frames: 120)
@@ -61,10 +89,78 @@ do {
         let converted = try converter.convert(RuntimePCMFrame(header: header, payload: payload))
         expect((470...490).contains(Int(converted.1)),
                "converter produced \(converted.1) frames for 10 ms of \(format)")
+        if format.sampleRate == 48_000 {
+            expect(converted.1 == frameCount,
+                   "same-rate conversion retained or truncated frames for \(format)")
+        }
         let sampleCount = Int(converted.1) * 2
         let values = UnsafeBufferPointer(start: converted.0, count: sampleCount)
         expect(values.contains { abs($0) > 0.01 }, "converter emitted silence for \(format)")
     }
+
+    let resampleFormat = RuntimePCMFormatDTO(sampleRate: 24_000, channelCount: 1)
+    let resampler = try RuntimePlaybackConverter(input: resampleFormat,
+        deviceSampleRate: 48_000, deviceChannels: 2)
+    var resampledFrames: UInt32 = 0
+    for sequence in 0..<3 {
+        let inputFrames: UInt32 = sequence < 2 ? 4_800 : 2_400
+        let samples = [Int16](repeating: 2_048, count: Int(inputFrames))
+        let payload = samples.withUnsafeBytes { Data($0) }
+        let header = RuntimePCMFrameHeader(payloadByteCount: UInt32(payload.count),
+            streamID: UUID(), sequence: UInt64(sequence), timestampNanoseconds: 0,
+            sampleRate: 24_000, frameCount: inputFrames, channelCount: 1)
+        resampledFrames &+= try resampler.convert(
+            RuntimePCMFrame(header: header, payload: payload)).1
+    }
+    resampledFrames &+= try resampler.drain().1
+    expect(resampledFrames == 24_000,
+           "converter drain did not preserve a 500 ms 24-to-48 kHz stream: \(resampledFrames)")
+
+    for inputRate: UInt32 in [16_000, 24_000, 48_000] {
+        for inputChannels: UInt16 in [1, 2] {
+            let inputFormat = RuntimePCMFormatDTO(sampleRate: inputRate,
+                channelCount: inputChannels)
+            let converter = try RuntimePlaybackConverter(input: inputFormat,
+                deviceSampleRate: 44_100, deviceChannels: 2)
+            let inputFrames = inputRate / 2
+            var consumed: UInt32 = 0
+            var outputFrames: UInt32 = 0
+            var sequence: UInt64 = 0
+            while consumed < inputFrames {
+                let frames = min(inputRate / 50, inputFrames - consumed)
+                let samples = [Int16](repeating: 1_024,
+                    count: Int(frames) * Int(inputChannels))
+                let payload = samples.withUnsafeBytes { Data($0) }
+                let header = RuntimePCMFrameHeader(payloadByteCount: UInt32(payload.count),
+                    streamID: UUID(), sequence: sequence, timestampNanoseconds: 0,
+                    sampleRate: inputRate, frameCount: frames,
+                    channelCount: inputChannels)
+                outputFrames &+= try converter.convert(
+                    RuntimePCMFrame(header: header, payload: payload)).1
+                consumed &+= frames
+                sequence &+= 1
+            }
+            outputFrames &+= try converter.drain().1
+            expect(outputFrames == 22_050,
+                   "converter did not preserve 500 ms \(inputRate) Hz/\(inputChannels)ch to 44.1 kHz: \(outputFrames)")
+        }
+    }
+
+    let unsafeFloatFormat = RuntimePCMFormatDTO(sampleRate: 48_000,
+        channelCount: 1, sampleFormat: .float32LE)
+    let unsafeFloatConverter = try RuntimePlaybackConverter(input: unsafeFloatFormat,
+        deviceSampleRate: 48_000, deviceChannels: 1)
+    let unsafeSamples: [Float] = [.nan, .infinity, -.infinity, 2, -2, 0.5]
+    let unsafePayload = unsafeSamples.withUnsafeBytes { Data($0) }
+    let unsafeHeader = RuntimePCMFrameHeader(payloadByteCount: UInt32(unsafePayload.count),
+        streamID: UUID(), sequence: 0, timestampNanoseconds: 0,
+        sampleRate: 48_000, frameCount: UInt32(unsafeSamples.count),
+        channelCount: 1, sampleFormat: .float32LE)
+    let safeOutput = try unsafeFloatConverter.convert(
+        RuntimePCMFrame(header: unsafeHeader, payload: unsafePayload))
+    let safeSamples = UnsafeBufferPointer(start: safeOutput.0, count: Int(safeOutput.1))
+    expect(safeSamples.allSatisfy { $0.isFinite && (-1...1).contains($0) },
+           "non-finite or out-of-range Float32 samples reached the playback ring")
 
     print("Runtime output core tests passed")
 } catch {

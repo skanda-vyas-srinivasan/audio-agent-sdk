@@ -7,12 +7,21 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import {
   AudioFormats,
+  AudioOutput,
   AudioOutputDestination,
+  CaptureStream,
+  DuplexSession,
   encodeOutputFrame,
   OutputInfo,
+  RuntimeEventTypes,
   Sonexis,
   SonexisError,
 } from "../src/index.js";
+
+test("default event set includes v0.4 output lifecycle events", () => {
+  assert.ok(RuntimeEventTypes.includes("output_failed"));
+  assert.ok(RuntimeEventTypes.includes("output_destination_changed"));
+});
 
 interface FakeRuntimeOptions {
   outputCapability?: boolean;
@@ -228,6 +237,7 @@ test("splits writes at 200 ms with ordered timestamps and sends one EOS", async 
   assert.equal(packets[1].readUInt16BE(6), 0);
   assert.equal(packets[3].readUInt16BE(6), 2);
   assert.equal(packets[3].readUInt32BE(12), 0);
+  assert.equal(packets[3].readUInt16BE(58), 1);
   assert.equal(runtime.commands.filter((value) => value === "stop_output").length, 0);
   await client.close();
 });
@@ -310,6 +320,34 @@ test("reports capability, control, validation, and malformed-session errors", as
   await assert.rejects(output.write(Buffer.alloc(3)), RangeError);
   await output.cancel();
   await validClient.close();
+});
+
+test("duplex composes capture and output and closes both sides", async () => {
+  let inputClosed = 0;
+  let outputClosed = 0;
+  let drained: boolean | undefined;
+  const input = { close: async () => { inputClosed++; } } as unknown as CaptureStream;
+  const output = {
+    close: async (options: { drain?: boolean }) => {
+      outputClosed++;
+      drained = options.drain;
+    },
+  } as unknown as AudioOutput;
+  const client = {
+    capture: async () => input,
+    playback: async () => output,
+  } as unknown as Sonexis;
+
+  const duplex = await DuplexSession.open(client, "Discord", {
+    inputFormat: AudioFormats.geminiLive(),
+    output: { format: AudioFormats.geminiLiveOutput() },
+  });
+  assert.equal(duplex.input, input);
+  assert.equal(duplex.output, output);
+  await duplex.close(false);
+  assert.equal(inputClosed, 1);
+  assert.equal(outputClosed, 1);
+  assert.equal(drained, false);
 });
 
 async function startRuntime(context: test.TestContext,

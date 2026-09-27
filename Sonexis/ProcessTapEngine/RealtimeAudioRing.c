@@ -2,8 +2,22 @@
 
 #include <stdatomic.h>
 #include <math.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <string.h>
+
+_Static_assert(
+    ATOMIC_INT_LOCK_FREE == 2,
+    "Sonexis realtime read gates require lock-free unsigned atomics"
+);
+_Static_assert(
+    ATOMIC_LLONG_LOCK_FREE == 2,
+    "Sonexis realtime counters require lock-free 64-bit atomics"
+);
+_Static_assert(
+    ATOMIC_BOOL_LOCK_FREE == 2,
+    "Sonexis realtime playback gates require lock-free boolean atomics"
+);
 
 struct SonexisAudioRingBuffer {
     float *samples;
@@ -16,6 +30,7 @@ struct SonexisAudioRingBuffer {
     atomic_ullong writtenFrames;
     atomic_ullong writeOperations;
     atomic_ullong readFrames;
+    atomic_ullong renderedFrames;
     atomic_uint lastInputPeakPPM;
     atomic_uint targetFillFrames;
     atomic_uint requestedTargetGainPPM;
@@ -23,6 +38,7 @@ struct SonexisAudioRingBuffer {
     atomic_uint gainRampRequestID;
     atomic_uint currentGainPPM;
     atomic_bool readEnabled;
+    atomic_uint activeReaders;
     float currentGain;
     float rampTargetGain;
     uint32_t rampRemainingFrames;
@@ -89,13 +105,16 @@ SonexisAudioRingBuffer *SonexisAudioRingBufferCreate(uint32_t capacityFrames, ui
     if (capacityFrames == 0 || channels == 0) {
         return NULL;
     }
+    if ((size_t)capacityFrames > SIZE_MAX / (size_t)channels / sizeof(float)) {
+        return NULL;
+    }
 
     SonexisAudioRingBuffer *ringBuffer = calloc(1, sizeof(SonexisAudioRingBuffer));
     if (ringBuffer == NULL) {
         return NULL;
     }
 
-    ringBuffer->samples = calloc((size_t)capacityFrames * channels, sizeof(float));
+    ringBuffer->samples = calloc((size_t)capacityFrames * (size_t)channels, sizeof(float));
     if (ringBuffer->samples == NULL) {
         free(ringBuffer);
         return NULL;
@@ -110,6 +129,7 @@ SonexisAudioRingBuffer *SonexisAudioRingBufferCreate(uint32_t capacityFrames, ui
     atomic_init(&ringBuffer->writtenFrames, 0);
     atomic_init(&ringBuffer->writeOperations, 0);
     atomic_init(&ringBuffer->readFrames, 0);
+    atomic_init(&ringBuffer->renderedFrames, 0);
     atomic_init(&ringBuffer->lastInputPeakPPM, 0);
     atomic_init(&ringBuffer->targetFillFrames, 0);
     atomic_init(&ringBuffer->requestedTargetGainPPM, gainToPPM(1.0f));
@@ -117,12 +137,30 @@ SonexisAudioRingBuffer *SonexisAudioRingBufferCreate(uint32_t capacityFrames, ui
     atomic_init(&ringBuffer->gainRampRequestID, 0);
     atomic_init(&ringBuffer->currentGainPPM, gainToPPM(1.0f));
     atomic_init(&ringBuffer->readEnabled, true);
+    atomic_init(&ringBuffer->activeReaders, 0);
     ringBuffer->currentGain = 1.0f;
     ringBuffer->rampTargetGain = 1.0f;
     ringBuffer->rampRemainingFrames = 0;
     ringBuffer->appliedGainRampRequestID = 0;
 
     return ringBuffer;
+}
+
+static bool beginRead(SonexisAudioRingBuffer *ringBuffer) {
+    if (!atomic_load_explicit(&ringBuffer->readEnabled, memory_order_acquire)) {
+        return false;
+    }
+
+    atomic_fetch_add_explicit(&ringBuffer->activeReaders, 1, memory_order_acq_rel);
+    if (!atomic_load_explicit(&ringBuffer->readEnabled, memory_order_acquire)) {
+        atomic_fetch_sub_explicit(&ringBuffer->activeReaders, 1, memory_order_release);
+        return false;
+    }
+    return true;
+}
+
+static void endRead(SonexisAudioRingBuffer *ringBuffer) {
+    atomic_fetch_sub_explicit(&ringBuffer->activeReaders, 1, memory_order_release);
 }
 
 static void copyRingFrameToAudioBufferList(
@@ -487,7 +525,7 @@ uint32_t SonexisAudioRingBufferReadToAudioBufferList(
     }
 
     zeroAudioBufferList(outputData);
-    if (!atomic_load_explicit(&ringBuffer->readEnabled, memory_order_acquire)) {
+    if (!beginRead(ringBuffer)) {
         return 0;
     }
 
@@ -544,11 +582,17 @@ uint32_t SonexisAudioRingBufferReadToAudioBufferList(
         (unsigned long long)framesToConsume,
         memory_order_relaxed
     );
+    atomic_fetch_add_explicit(
+        &ringBuffer->renderedFrames,
+        (unsigned long long)framesToCopy,
+        memory_order_relaxed
+    );
     atomic_store_explicit(
         &ringBuffer->readFrame,
         readFrame + (uint64_t)framesToConsume,
         memory_order_release
     );
+    endRead(ringBuffer);
     return framesToCopy;
 }
 
@@ -562,7 +606,7 @@ uint32_t SonexisAudioRingBufferReadInterleaved(
     }
 
     memset(outputSamples, 0, (size_t)frames * ringBuffer->channels * sizeof(float));
-    if (!atomic_load_explicit(&ringBuffer->readEnabled, memory_order_acquire)) {
+    if (!beginRead(ringBuffer)) {
         return 0;
     }
 
@@ -619,17 +663,59 @@ uint32_t SonexisAudioRingBufferReadInterleaved(
         (unsigned long long)framesToConsume,
         memory_order_relaxed
     );
+    atomic_fetch_add_explicit(
+        &ringBuffer->renderedFrames,
+        (unsigned long long)framesToCopy,
+        memory_order_relaxed
+    );
     atomic_store_explicit(
         &ringBuffer->readFrame,
         readFrame + (uint64_t)framesToConsume,
         memory_order_release
     );
+    endRead(ringBuffer);
     return framesToCopy;
+}
+
+OSStatus SonexisAudioRingBufferIOProc(
+    AudioObjectID inDevice,
+    const AudioTimeStamp *inNow,
+    const AudioBufferList *inInputData,
+    const AudioTimeStamp *inInputTime,
+    AudioBufferList *outOutputData,
+    const AudioTimeStamp *inOutputTime,
+    void *inClientData
+) {
+    (void)inDevice;
+    (void)inNow;
+    (void)inInputData;
+    (void)inInputTime;
+    (void)inOutputTime;
+    if (inClientData != NULL && outOutputData != NULL) {
+        SonexisAudioRingBufferReadToAudioBufferList(
+            (SonexisAudioRingBuffer *)inClientData,
+            outOutputData
+        );
+    }
+    return noErr;
 }
 
 uint32_t SonexisAudioRingBufferFlush(SonexisAudioRingBuffer *ringBuffer) {
     if (ringBuffer == NULL) {
         return 0;
+    }
+
+    // A renderer can already be copying after observing readEnabled. Closing
+    // the gate and waiting for that bounded callback prevents flush from
+    // rewinding its read cursor or allowing the producer to overwrite samples
+    // still being read. This function is control-thread-only.
+    bool restoreReads = atomic_exchange_explicit(
+        &ringBuffer->readEnabled,
+        false,
+        memory_order_acq_rel
+    );
+    while (atomic_load_explicit(&ringBuffer->activeReaders, memory_order_acquire) != 0) {
+        sched_yield();
     }
     uint64_t writeFrame = atomic_load_explicit(&ringBuffer->writeFrame, memory_order_acquire);
     uint64_t readFrame = atomic_load_explicit(&ringBuffer->readFrame, memory_order_relaxed);
@@ -638,6 +724,9 @@ uint32_t SonexisAudioRingBufferFlush(SonexisAudioRingBuffer *ringBuffer) {
         readable = ringBuffer->capacityFrames;
     }
     atomic_store_explicit(&ringBuffer->readFrame, writeFrame, memory_order_release);
+    if (restoreReads) {
+        atomic_store_explicit(&ringBuffer->readEnabled, true, memory_order_release);
+    }
     return (uint32_t)readable;
 }
 
@@ -722,6 +811,14 @@ uint64_t SonexisAudioRingBufferGetReadFrames(SonexisAudioRingBuffer *ringBuffer)
     }
 
     return atomic_load_explicit(&ringBuffer->readFrames, memory_order_relaxed);
+}
+
+uint64_t SonexisAudioRingBufferGetRenderedFrames(SonexisAudioRingBuffer *ringBuffer) {
+    if (ringBuffer == NULL) {
+        return 0;
+    }
+
+    return atomic_load_explicit(&ringBuffer->renderedFrames, memory_order_relaxed);
 }
 
 uint32_t SonexisAudioRingBufferGetLastInputPeakPPM(SonexisAudioRingBuffer *ringBuffer) {

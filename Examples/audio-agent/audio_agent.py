@@ -482,11 +482,13 @@ async def main() -> None:
     finally:
         try:
             await sink.aclose()
-            if response_player is not None:
-                await response_player.close()
         finally:
-            if response_client is not None:
-                await response_client.close()
+            try:
+                if response_player is not None:
+                    await response_player.close()
+            finally:
+                if response_client is not None:
+                    await response_client.close()
 
 
 if __name__ == "__main__":

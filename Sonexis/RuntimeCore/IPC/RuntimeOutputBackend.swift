@@ -72,6 +72,10 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
         var finalBackendMetrics = RuntimeOutputMetricsDTO()
         var state: RuntimeOutputSessionStateDTO = .starting
         var terminalError: RuntimeErrorDTO?
+        var retiredPacketsReceived: UInt64 = 0
+        var retiredInputFramesReceived: UInt64 = 0
+        var retiredInputBytesReceived: UInt64 = 0
+        var retiredDiscontinuities: UInt64 = 0
 
         init(id: String, destinationID: String, ownerID: String, startedAt: UInt64,
              format: RuntimePCMFormatDTO, targetBufferMilliseconds: UInt32,
@@ -202,6 +206,10 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
     public func flush(outputSessionID: String, ownerID: String) throws -> RuntimeOutputSessionDTO {
         let resources: (Record, RuntimeOutputDataPlane, RuntimeBackendOutputSession) = try queue.sync {
             guard let record = records[outputSessionID] else { throw notFound(outputSessionID) }
+            guard record.ownerID == ownerID else {
+                throw RuntimeErrorDTO(code: "output_session_not_owned",
+                    message: "Only the creating client can flush an active output session")
+            }
             guard record.state == .ready, let session = record.backendSession else {
                 throw RuntimeErrorDTO(code: "output_not_writable",
                     message: "Only a ready output session can be flushed")
@@ -210,6 +218,7 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
             return (record, record.dataPlane, session)
         }
         resources.1.stop()
+        let retired = resources.1.metrics()
         do { try resources.2.flush() }
         catch {
             let failure = RuntimeErrorDTO(code: "output_flush_failed",
@@ -236,6 +245,10 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
             }
             resources.0.streamID = nextStreamID
             resources.0.dataPlane = nextPlane
+            resources.0.retiredPacketsReceived &+= retired.packetsReceived
+            resources.0.retiredInputFramesReceived &+= retired.inputFramesReceived
+            resources.0.retiredInputBytesReceived &+= retired.inputBytesReceived
+            resources.0.retiredDiscontinuities &+= retired.discontinuitiesReceived
             resources.0.state = .ready
             return snapshot(resources.0)
         }
@@ -442,14 +455,16 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
     private func snapshot(_ record: Record) -> RuntimeOutputSessionDTO {
         let plane = record.dataPlane.metrics()
         let backendMetrics = record.backendSession?.metrics() ?? record.finalBackendMetrics
-        let metrics = RuntimeOutputMetricsDTO(packetsReceived: plane.packetsReceived,
-            inputFramesReceived: plane.inputFramesReceived,
-            inputBytesReceived: plane.inputBytesReceived,
+        let metrics = RuntimeOutputMetricsDTO(
+            packetsReceived: record.retiredPacketsReceived &+ plane.packetsReceived,
+            inputFramesReceived: record.retiredInputFramesReceived &+ plane.inputFramesReceived,
+            inputBytesReceived: record.retiredInputBytesReceived &+ plane.inputBytesReceived,
             deviceFramesEnqueued: backendMetrics.deviceFramesEnqueued,
             deviceFramesRendered: backendMetrics.deviceFramesRendered,
             droppedFrames: backendMetrics.droppedFrames,
             flushedFrames: backendMetrics.flushedFrames,
-            lateFrames: backendMetrics.lateFrames &+ plane.discontinuitiesReceived,
+            lateFrames: backendMetrics.lateFrames &+ record.retiredDiscontinuities
+                &+ plane.discontinuitiesReceived,
             underrunFrames: backendMetrics.underrunFrames,
             underrunEvents: backendMetrics.underrunEvents,
             overrunEvents: backendMetrics.overrunEvents,
@@ -460,7 +475,12 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
             conversionBatches: backendMetrics.conversionBatches,
             conversionNanoseconds: backendMetrics.conversionNanoseconds,
             routeChanges: backendMetrics.routeChanges,
-            producerConnected: plane.producerConnected)
+            producerConnected: plane.producerConnected,
+            deviceSampleRate: backendMetrics.deviceSampleRate,
+            deviceChannelCount: backendMetrics.deviceChannelCount,
+            estimatedOutputLatencyMilliseconds:
+                backendMetrics.estimatedOutputLatencyMilliseconds,
+            uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds &- record.startedAt)
         return RuntimeOutputSessionDTO(id: record.id,
             streamID: record.streamID.uuidString.lowercased(),
             destinationID: record.destinationID, state: record.state, format: record.format,
@@ -491,4 +511,3 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
             message: "No output session named \(id)")
     }
 }
-

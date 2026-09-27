@@ -2,33 +2,6 @@ import AVFoundation
 import CoreAudio
 import Foundation
 
-private func runtimePlaybackIOProc(
-    _ inDevice: AudioObjectID,
-    _ inNow: UnsafePointer<AudioTimeStamp>,
-    _ inInputData: UnsafePointer<AudioBufferList>,
-    _ inInputTime: UnsafePointer<AudioTimeStamp>,
-    _ outOutputData: UnsafeMutablePointer<AudioBufferList>,
-    _ inOutputTime: UnsafePointer<AudioTimeStamp>,
-    _ inClientData: UnsafeMutableRawPointer?
-) -> OSStatus {
-    guard let inClientData else { return noErr }
-    let context = Unmanaged<RuntimePlaybackCallbackContext>
-        .fromOpaque(inClientData).takeUnretainedValue()
-    context.render(outputData: outOutputData)
-    return noErr
-}
-
-/// Immutable callback-visible owner. HAL retains it explicitly until an IOProc
-/// is successfully destroyed; no session property lookup or lock occurs on the
-/// realtime thread.
-private final class RuntimePlaybackCallbackContext {
-    let ring: RealtimeRingBuffer
-    init(ring: RealtimeRingBuffer) { self.ring = ring }
-    func render(outputData: UnsafeMutablePointer<AudioBufferList>) {
-        _ = ring.read(outputData: outputData)
-    }
-}
-
 final class RuntimePlaybackConverter {
     let inputFormat: AVAudioFormat
     let outputFormat: AVAudioFormat
@@ -36,6 +9,12 @@ final class RuntimePlaybackConverter {
     private let inputBuffer: AVAudioPCMBuffer
     private let outputBuffer: AVAudioPCMBuffer
     private let maximumInputFrames: AVAudioFrameCount
+    private let directSamples: UnsafeMutablePointer<Float>
+    private let drainSamples: UnsafeMutablePointer<Float>
+    private let drainCapacityFrames: AVAudioFrameCount
+    private let directConversion: Bool
+    private var inputFramesReceived: UInt64 = 0
+    private var outputFramesProduced: UInt64 = 0
 
     init(input: RuntimePCMFormatDTO, deviceSampleRate: Double,
          deviceChannels: UInt32, maximumPacketMilliseconds: UInt32 = 200) throws {
@@ -69,6 +48,16 @@ final class RuntimePlaybackConverter {
         self.inputBuffer = inputBuffer
         self.outputBuffer = outputBuffer
         self.maximumInputFrames = maximumInputFrames
+        directConversion = abs(deviceSampleRate - Double(input.sampleRate)) < 0.5
+            && deviceChannels <= 2
+        directSamples = .allocate(capacity: Int(maximumInputFrames) * Int(deviceChannels))
+        drainCapacityFrames = outputCapacity
+        drainSamples = .allocate(capacity: Int(outputCapacity) * Int(deviceChannels))
+    }
+
+    deinit {
+        directSamples.deallocate()
+        drainSamples.deallocate()
     }
 
     func convert(_ frame: RuntimePCMFrame) throws -> (UnsafePointer<Float>, UInt32) {
@@ -76,13 +65,29 @@ final class RuntimePlaybackConverter {
             throw RuntimeErrorDTO(code: "output_packet_too_long",
                 message: "Output packet exceeded the prepared converter capacity")
         }
+        if directConversion {
+            convertDirect(frame)
+            return (UnsafePointer(directSamples), frame.header.frameCount)
+        }
         inputBuffer.frameLength = AVAudioFrameCount(frame.header.frameCount)
         guard let inputData = inputBuffer.mutableAudioBufferList.pointee.mBuffers.mData else {
             throw RuntimeErrorDTO(code: "output_conversion_failed",
                 message: "Playback input buffer is unavailable")
         }
         frame.payload.withUnsafeBytes { bytes in
-            if let base = bytes.baseAddress { inputData.copyMemory(from: base, byteCount: bytes.count) }
+            if frame.header.sampleFormat == .float32LE {
+                let output = inputData.assumingMemoryBound(to: Float.self)
+                let sampleCount = Int(frame.header.frameCount)
+                    * Int(frame.header.channelCount)
+                for index in 0..<sampleCount {
+                    let bits = bytes.loadUnaligned(
+                        fromByteOffset: index * 4, as: UInt32.self)
+                    output[index] = sanitizedSample(
+                        Float(bitPattern: UInt32(littleEndian: bits)))
+                }
+            } else if let base = bytes.baseAddress {
+                inputData.copyMemory(from: base, byteCount: bytes.count)
+            }
         }
         outputBuffer.frameLength = 0
         var suppliedInput = false
@@ -101,11 +106,95 @@ final class RuntimePlaybackConverter {
             throw RuntimeErrorDTO(code: "output_conversion_failed",
                 message: conversionError?.localizedDescription ?? "AVAudioConverter failed")
         }
+        inputFramesReceived &+= UInt64(frame.header.frameCount)
+        outputFramesProduced &+= UInt64(outputBuffer.frameLength)
         return (UnsafePointer(outputData.assumingMemoryBound(to: Float.self)),
                 UInt32(outputBuffer.frameLength))
     }
 
-    func reset() { converter.reset() }
+    func reset() {
+        converter.reset()
+        inputFramesReceived = 0
+        outputFramesProduced = 0
+    }
+
+    func drain() throws -> (UnsafePointer<Float>, UInt32) {
+        guard !directConversion else { return (UnsafePointer(directSamples), 0) }
+        let expected = UInt64((Double(inputFramesReceived)
+            * outputFormat.sampleRate / inputFormat.sampleRate).rounded())
+        var remaining = expected > outputFramesProduced ? expected - outputFramesProduced : 0
+        var collected: UInt32 = 0
+        var attempts = 0
+        while remaining > 0, attempts < 8 {
+            attempts += 1
+            outputBuffer.frameLength = 0
+            var conversionError: NSError?
+            let status = converter.convert(to: outputBuffer, error: &conversionError) {
+                _, inputStatus in
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            guard status != .error, conversionError == nil,
+                  let outputData = outputBuffer.audioBufferList.pointee.mBuffers.mData else {
+                throw RuntimeErrorDTO(code: "output_conversion_failed",
+                    message: conversionError?.localizedDescription
+                        ?? "AVAudioConverter failed while draining")
+            }
+            let available = UInt32(min(UInt64(outputBuffer.frameLength), remaining))
+            guard available > 0 else { break }
+            guard UInt64(collected) + UInt64(available) <= UInt64(drainCapacityFrames) else {
+                throw RuntimeErrorDTO(code: "output_conversion_failed",
+                    message: "Playback converter tail exceeded its prepared capacity")
+            }
+            let channels = Int(outputFormat.channelCount)
+            drainSamples.advanced(by: Int(collected) * channels).update(
+                from: outputData.assumingMemoryBound(to: Float.self),
+                count: Int(available) * channels)
+            collected &+= available
+            remaining -= UInt64(available)
+            if status == .endOfStream { break }
+        }
+        outputFramesProduced &+= UInt64(collected)
+        return (UnsafePointer(drainSamples), collected)
+    }
+
+    private func convertDirect(_ frame: RuntimePCMFrame) {
+        let inputChannels = Int(frame.header.channelCount)
+        let outputChannels = Int(outputFormat.channelCount)
+        frame.payload.withUnsafeBytes { bytes in
+            for frameIndex in 0..<Int(frame.header.frameCount) {
+                let inputBase = frameIndex * inputChannels
+                let left = sample(bytes, index: inputBase, format: frame.header.sampleFormat)
+                let right = inputChannels > 1
+                    ? sample(bytes, index: inputBase + 1, format: frame.header.sampleFormat)
+                    : left
+                let outputBase = frameIndex * outputChannels
+                if outputChannels == 1 {
+                    directSamples[outputBase] = inputChannels == 1 ? left : (left + right) * 0.5
+                } else {
+                    directSamples[outputBase] = left
+                    directSamples[outputBase + 1] = right
+                }
+            }
+        }
+    }
+
+    private func sample(_ bytes: UnsafeRawBufferPointer, index: Int,
+                        format: RuntimeSampleFormatDTO) -> Float {
+        switch format {
+        case .pcmS16LE:
+            let value = bytes.loadUnaligned(fromByteOffset: index * 2, as: Int16.self)
+            return Float(Int16(littleEndian: value)) / 32_768
+        case .float32LE:
+            let bits = bytes.loadUnaligned(fromByteOffset: index * 4, as: UInt32.self)
+            return sanitizedSample(Float(bitPattern: UInt32(littleEndian: bits)))
+        }
+    }
+
+    private func sanitizedSample(_ value: Float) -> Float {
+        guard value.isFinite else { return 0 }
+        return min(1, max(-1, value))
+    }
 }
 
 public final class RuntimeHALPlaybackBackend: RuntimeOutputBackend, @unchecked Sendable {
@@ -120,7 +209,7 @@ public final class RuntimeHALPlaybackBackend: RuntimeOutputBackend, @unchecked S
             destinations.append(value)
         }
         let devices = try CoreAudioSupport.audioDeviceIDs()
-        for deviceID in devices where deviceID != defaultID {
+        for deviceID in devices {
             guard let summary = try? CoreAudioSupport.deviceSummary(deviceID),
                   let value = try? destination(deviceID: deviceID,
                     id: "coreaudio:\(summary.uid)", name: summary.name,
@@ -145,19 +234,33 @@ public final class RuntimeHALPlaybackBackend: RuntimeOutputBackend, @unchecked S
                              isDefault: Bool, followsSystemDefault: Bool) throws
         -> RuntimeOutputDestinationDTO? {
         let streams = try CoreAudioSupport.outputStreamIDs(deviceID)
-        guard let stream = streams.first else { return nil }
+        guard streams.count == 1, let stream = streams.first else { return nil }
         let summary = try CoreAudioSupport.deviceSummary(deviceID)
         let native = try CoreAudioSupport.streamVirtualFormat(stream)
-        let nativeFormat = RuntimePCMFormatDTO(sampleRate: UInt32(native.mSampleRate.rounded()),
-            channelCount: UInt16(clamping: native.mChannelsPerFrame), sampleFormat: .float32LE)
+        let deviceFormat = try Self.validatedDeviceFormat(native)
+        let nativeFormat = RuntimePCMFormatDTO(sampleRate: deviceFormat.sampleRate,
+            channelCount: UInt16(deviceFormat.channels), sampleFormat: .float32LE)
         let signature = "\(summary.name) \(summary.uid)".lowercased()
         let looksVirtual = signature.contains("sonexis") || signature.contains("blackhole")
-            || signature.contains("loopback") || signature.contains("virtual")
+            || signature.contains("loopback") || signature.contains("soundflower")
+        let hasInput = !(try CoreAudioSupport.inputStreamIDs(deviceID)).isEmpty
         return RuntimeOutputDestinationDTO(id: id,
-            kind: looksVirtual ? .virtualInput : .playback,
+            kind: id != "default" && looksVirtual && hasInput ? .virtualInput : .playback,
             name: name, isAvailable: true, isDefault: isDefault,
             followsSystemDefault: followsSystemDefault, activeDeviceName: summary.name,
             nativeFormat: nativeFormat)
+    }
+
+    static func validatedDeviceFormat(_ format: AudioStreamBasicDescription) throws
+        -> (sampleRate: UInt32, channels: UInt32) {
+        guard format.isFloat32LinearPCM, format.mSampleRate.isFinite,
+              (8_000...192_000).contains(format.mSampleRate),
+              (1...2).contains(format.mChannelsPerFrame) else {
+            throw RuntimeErrorDTO(code: "unsupported_output_device_format",
+                message: "Output device format is outside the supported realtime bounds",
+                retryable: true)
+        }
+        return (UInt32(format.mSampleRate.rounded()), format.mChannelsPerFrame)
     }
 }
 
@@ -166,24 +269,29 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         let deviceID: AudioDeviceID
         let deviceName: String
         let deviceSampleRate: Double
+        let deviceChannels: UInt32
+        let hardwareLatencyMilliseconds: Double
         let ring: RealtimeRingBuffer
         let converter: RuntimePlaybackConverter
         let ioProcID: AudioDeviceIOProcID
-        let callbackOpaque: UnsafeMutableRawPointer
+        let retainedRingOpaque: UnsafeMutableRawPointer
         let targetFillFrames: UInt32
         var primed = false
 
         init(deviceID: AudioDeviceID, deviceName: String, deviceSampleRate: Double,
+             deviceChannels: UInt32, hardwareLatencyMilliseconds: Double,
              ring: RealtimeRingBuffer, converter: RuntimePlaybackConverter,
-             ioProcID: AudioDeviceIOProcID, callbackOpaque: UnsafeMutableRawPointer,
+             ioProcID: AudioDeviceIOProcID, retainedRingOpaque: UnsafeMutableRawPointer,
              targetFillFrames: UInt32) {
             self.deviceID = deviceID
             self.deviceName = deviceName
             self.deviceSampleRate = deviceSampleRate
+            self.deviceChannels = deviceChannels
+            self.hardwareLatencyMilliseconds = hardwareLatencyMilliseconds
             self.ring = ring
             self.converter = converter
             self.ioProcID = ioProcID
-            self.callbackOpaque = callbackOpaque
+            self.retainedRingOpaque = retainedRingOpaque
             self.targetFillFrames = targetFillFrames
         }
     }
@@ -197,11 +305,14 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
     private let onEnded: @Sendable (RuntimeErrorDTO?) -> Void
     private let lifecycleQueue = DispatchQueue(label: "com.sonexis.runtime.hal-playback")
     private let lifecycleKey = DispatchSpecificKey<UInt8>()
+    private let ingestLock = NSLock()
     private let routeLock = NSLock()
     private var route: Route?
     private var defaultOutputListener: AudioObjectPropertyListenerBlock?
     private var fixedDeviceListener: AudioObjectPropertyListenerBlock?
     private var fixedDeviceID: AudioDeviceID?
+    private var formatListener: AudioObjectPropertyListenerBlock?
+    private var formatListenerRegistrations: [(AudioObjectID, AudioObjectPropertyAddress)] = []
     private var metricsTimer: DispatchSourceTimer?
     private var drainDeadline: DispatchTime?
     private var running = true
@@ -237,9 +348,10 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         let summary = try CoreAudioSupport.deviceSummary(deviceID)
         let signature = "\(summary.name) \(summary.uid)".lowercased()
         let looksVirtual = signature.contains("sonexis") || signature.contains("blackhole")
-            || signature.contains("loopback") || signature.contains("virtual")
+            || signature.contains("loopback") || signature.contains("soundflower")
+        let hasInput = !(try CoreAudioSupport.inputStreamIDs(deviceID)).isEmpty
         destination = RuntimeOutputDestinationDTO(id: destinationID,
-            kind: looksVirtual ? .virtualInput : .playback,
+            kind: destinationID != "default" && looksVirtual && hasInput ? .virtualInput : .playback,
             name: destinationID == "default" ? "Default macOS Output" : summary.name,
             isAvailable: true, isDefault: destinationID == "default",
             followsSystemDefault: destinationID == "default", activeDeviceName: summary.name)
@@ -261,6 +373,8 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
     }
 
     func write(_ frame: RuntimePCMFrame) throws {
+        ingestLock.lock()
+        defer { ingestLock.unlock() }
         routeLock.lock()
         guard running, !finishing, let route else {
             routeLock.unlock()
@@ -269,19 +383,29 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         }
         let started = DispatchTime.now().uptimeNanoseconds
         let converted: (UnsafePointer<Float>, UInt32)
-        do { converted = try route.converter.convert(frame) }
-        catch { routeLock.unlock(); throw error }
+        routeLock.unlock()
+        converted = try route.converter.convert(frame)
         // Backpressure the socket reader while a bounded burst drains. This is
         // never reached from the HAL callback. The timeout prevents a stalled
         // device from pinning a client forever; any remaining tail is dropped
         // explicitly by the bounded ring.
         let writableDeadline = DispatchTime.now() + .seconds(2)
         while route.ring.writableFrames < converted.1,
-              DispatchTime.now() < writableDeadline {
+              isWritable(route), DispatchTime.now() < writableDeadline {
             usleep(2_000)
+        }
+        guard isWritable(route) else {
+            throw RuntimeErrorDTO(code: "output_not_writable",
+                message: "Playback stopped while waiting for device capacity", retryable: true)
         }
         let written = route.ring.writeInterleaved(converted.0, frames: converted.1)
         let fill = route.ring.fillFrames
+        routeLock.lock()
+        guard running, self.route === route else {
+            routeLock.unlock()
+            throw RuntimeErrorDTO(code: "output_not_writable",
+                message: "Playback route changed while accepting audio", retryable: true)
+        }
         queueHighWater = max(queueHighWater, fill)
         if !route.primed, fill >= route.targetFillFrames {
             route.primed = true
@@ -305,23 +429,51 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
     func finish() {
         performLifecycle { [weak self] in
             guard let self else { return }
+            self.ingestLock.lock()
             self.routeLock.lock()
             guard self.running, !self.finishing else {
                 self.routeLock.unlock()
+                self.ingestLock.unlock()
                 return
             }
             self.finishing = true
             self.drainDeadline = .now() + .seconds(2)
-            if let route = self.route, route.ring.fillFrames > 0 {
-                route.primed = true
-                route.ring.setReadEnabled(true)
+            var conversionFailure: RuntimeErrorDTO?
+            var drainDropped: UInt64 = 0
+            if let route = self.route {
+                do {
+                    let tail = try route.converter.drain()
+                    if tail.1 > 0 {
+                        let written = route.ring.writeInterleaved(tail.0, frames: tail.1)
+                        drainDropped = UInt64(tail.1 - written)
+                        if drainDropped > 0 { self.overrunEvents &+= 1 }
+                    }
+                } catch {
+                    conversionFailure = RuntimeErrorDTO(code: "output_conversion_failed",
+                        message: String(describing: error), retryable: true)
+                }
+                if route.ring.fillFrames > 0 {
+                    route.primed = true
+                    route.ring.setReadEnabled(true)
+                }
             }
             self.routeLock.unlock()
+            self.ingestLock.unlock()
+            if let conversionFailure {
+                self.stopInternal(notify: true, error: conversionFailure)
+                return
+            }
+            if drainDropped > 0 {
+                self.onEvent(RuntimeOutputBackendEvent(kind: .overrun, frames: drainDropped,
+                    message: "Playback ring dropped converter tail frames during drain"))
+            }
             self.checkDrain()
         }
     }
 
     func flush() throws {
+        ingestLock.lock()
+        defer { ingestLock.unlock() }
         routeLock.lock()
         defer { routeLock.unlock() }
         guard running, !finishing, let route else {
@@ -344,7 +496,7 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         routeLock.lock()
         let current = route
         let enqueued = archivedEnqueued &+ (current?.ring.writtenFrames ?? 0)
-        let rendered = archivedRendered &+ (current?.ring.readFrames ?? 0)
+        let rendered = archivedRendered &+ (current?.ring.renderedFrames ?? 0)
         let dropped = archivedDropped &+ (current?.ring.droppedFrames ?? 0)
         let underflow = archivedUnderflows &+ (current?.ring.underflowFrames ?? 0)
         let fill = current?.ring.fillFrames ?? 0
@@ -358,7 +510,12 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
             queueHighWaterFrames: queueHighWater, bufferedMilliseconds: buffered,
             targetBufferMilliseconds: targetBufferMilliseconds,
             conversionBatches: conversionBatches,
-            conversionNanoseconds: conversionNanoseconds, routeChanges: routeChanges)
+            conversionNanoseconds: conversionNanoseconds, routeChanges: routeChanges,
+            deviceSampleRate: current.map { UInt32($0.deviceSampleRate.rounded()) },
+            deviceChannelCount: current.map { UInt16($0.deviceChannels) },
+            estimatedOutputLatencyMilliseconds: current.map {
+                buffered + $0.hardwareLatencyMilliseconds
+            })
         routeLock.unlock()
         return snapshot
     }
@@ -367,37 +524,51 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         let deviceID = try Self.resolveDevice(destinationID)
         let summary = try CoreAudioSupport.deviceSummary(deviceID)
         let streams = try CoreAudioSupport.outputStreamIDs(deviceID)
-        guard let streamID = streams.first else {
+        guard streams.count == 1, let streamID = streams.first else {
             throw RuntimeErrorDTO(code: "output_device_unavailable",
-                message: "Default output device has no output stream", retryable: true)
+                message: "Output devices must expose one compatible output stream",
+                retryable: true)
         }
         let format = try CoreAudioSupport.streamVirtualFormat(streamID)
-        guard format.isFloat32LinearPCM, format.mSampleRate > 0,
-              format.mChannelsPerFrame > 0 else {
-            throw RuntimeErrorDTO(code: "unsupported_output_device_format",
-                message: "Default output device does not expose Float32 linear PCM", retryable: true)
-        }
-        let capacityFrames = UInt32(max(format.mSampleRate * 0.5, 4_096))
-        let targetFrames = UInt32(format.mSampleRate * Double(targetBufferMilliseconds) / 1_000)
+        let deviceFormat = try RuntimeHALPlaybackBackend.validatedDeviceFormat(format)
+        let capacityFrames = max(deviceFormat.sampleRate / 2, 4_096)
+        let targetFrames = UInt32(UInt64(deviceFormat.sampleRate)
+            * UInt64(targetBufferMilliseconds) / 1_000)
         let ring = try RealtimeRingBuffer(capacityFrames: capacityFrames,
-            channels: format.mChannelsPerFrame)
+            channels: deviceFormat.channels)
         ring.setTargetFillFrames(targetFrames)
         ring.setReadEnabled(false)
         let converter = try RuntimePlaybackConverter(input: inputFormat,
             deviceSampleRate: format.mSampleRate,
-            deviceChannels: format.mChannelsPerFrame)
-        let context = RuntimePlaybackCallbackContext(ring: ring)
-        let opaque = Unmanaged.passRetained(context).toOpaque()
+            deviceChannels: deviceFormat.channels)
+        let latencyFrames: UInt32 = (try? CoreAudioSupport.readScalar(
+            objectID: deviceID, selector: kAudioDevicePropertyLatency,
+            scope: kAudioDevicePropertyScopeOutput, defaultValue: 0,
+            operation: "Read output-device latency")) ?? 0
+        let safetyFrames: UInt32 = (try? CoreAudioSupport.readScalar(
+            objectID: deviceID, selector: kAudioDevicePropertySafetyOffset,
+            scope: kAudioDevicePropertyScopeOutput, defaultValue: 0,
+            operation: "Read output-device safety offset")) ?? 0
+        let hardwareLatencyMilliseconds = Double(UInt64(latencyFrames) + UInt64(safetyFrames))
+            * 1_000 / format.mSampleRate
+        guard let ringPointer = ring.realtimePointer else {
+            throw RuntimeErrorDTO(code: "output_buffer_allocation_failed",
+                message: "Playback ring became unavailable")
+        }
+        let retainedRingOpaque = Unmanaged.passRetained(ring).toOpaque()
         var ioProc: AudioDeviceIOProcID?
-        let createStatus = AudioDeviceCreateIOProcID(deviceID, runtimePlaybackIOProc,
-            opaque, &ioProc)
+        let createStatus = AudioDeviceCreateIOProcID(deviceID,
+            SonexisAudioRingBufferIOProc, UnsafeMutableRawPointer(ringPointer), &ioProc)
         guard createStatus == noErr, let ioProc else {
-            Unmanaged<RuntimePlaybackCallbackContext>.fromOpaque(opaque).release()
+            Unmanaged<RealtimeRingBuffer>.fromOpaque(retainedRingOpaque).release()
             throw CoreAudioError(operation: "Create Runtime playback IOProc", status: createStatus)
         }
         let next = Route(deviceID: deviceID, deviceName: summary.name,
-            deviceSampleRate: format.mSampleRate, ring: ring, converter: converter,
-            ioProcID: ioProc, callbackOpaque: opaque, targetFillFrames: targetFrames)
+            deviceSampleRate: format.mSampleRate, deviceChannels: deviceFormat.channels,
+            hardwareLatencyMilliseconds: hardwareLatencyMilliseconds,
+            ring: ring, converter: converter,
+            ioProcID: ioProc, retainedRingOpaque: retainedRingOpaque,
+            targetFillFrames: targetFrames)
         routeLock.lock()
         route = next
         lastUnderflowFrames = 0
@@ -406,30 +577,84 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         if startStatus != noErr {
             let destroyStatus = AudioDeviceDestroyIOProcID(deviceID, ioProc)
             if destroyStatus == noErr {
-                Unmanaged<RuntimePlaybackCallbackContext>.fromOpaque(opaque).release()
+                Unmanaged<RealtimeRingBuffer>.fromOpaque(retainedRingOpaque).release()
             }
             routeLock.lock(); route = nil; routeLock.unlock()
             throw CoreAudioError(operation: "Start Runtime playback IOProc", status: startStatus)
         }
+        try installDeviceFormatListeners(deviceID: deviceID, streamIDs: streams)
     }
 
     private func teardownRoute() {
         routeLock.lock()
         guard let old = route else { routeLock.unlock(); return }
+        route = nil
+        routeLock.unlock()
+        removeDeviceFormatListeners()
+        ingestLock.lock()
+        defer { ingestLock.unlock() }
         old.ring.setReadEnabled(false)
         _ = AudioDeviceStop(old.deviceID, old.ioProcID)
         let destroyStatus = AudioDeviceDestroyIOProcID(old.deviceID, old.ioProcID)
-        archivedRendered &+= old.ring.readFrames
+        routeLock.lock()
+        archivedRendered &+= old.ring.renderedFrames
         archivedEnqueued &+= old.ring.writtenFrames
         archivedDropped &+= old.ring.droppedFrames &+ UInt64(old.ring.fillFrames)
         archivedUnderflows &+= old.ring.underflowFrames
-        route = nil
         routeLock.unlock()
         if destroyStatus == noErr {
-            Unmanaged<RuntimePlaybackCallbackContext>.fromOpaque(old.callbackOpaque).release()
+            Unmanaged<RealtimeRingBuffer>.fromOpaque(old.retainedRingOpaque).release()
         }
         // On destroy failure the retained callback context deliberately owns
         // the ring forever. Leaking is safer than freeing HAL-visible memory.
+    }
+
+    private func installDeviceFormatListeners(deviceID: AudioDeviceID,
+                                              streamIDs: [AudioObjectID]) throws {
+        removeDeviceFormatListeners()
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleRouteChange()
+        }
+        var registrations: [(AudioObjectID, AudioObjectPropertyAddress)] = [
+            (deviceID, AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyNominalSampleRate,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)),
+        ]
+        registrations += streamIDs.map {
+            ($0, AudioObjectPropertyAddress(
+                mSelector: kAudioStreamPropertyVirtualFormat,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain))
+        }
+        for (objectID, storedAddress) in registrations {
+            var address = storedAddress
+            do {
+                try checkOSStatus(AudioObjectAddPropertyListenerBlock(
+                    objectID, &address, lifecycleQueue, listener),
+                    operation: "Install Runtime output-format listener")
+                formatListenerRegistrations.append((objectID, storedAddress))
+            } catch {
+                formatListener = listener
+                removeDeviceFormatListeners()
+                throw error
+            }
+        }
+        formatListener = listener
+    }
+
+    private func removeDeviceFormatListeners() {
+        guard let listener = formatListener else {
+            formatListenerRegistrations.removeAll()
+            return
+        }
+        for (objectID, storedAddress) in formatListenerRegistrations {
+            var address = storedAddress
+            _ = AudioObjectRemovePropertyListenerBlock(
+                objectID, &address, lifecycleQueue, listener)
+        }
+        formatListenerRegistrations.removeAll()
+        formatListener = nil
     }
 
     private func installDefaultOutputListener() throws {
@@ -513,6 +738,12 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         }
     }
 
+    private func isWritable(_ candidate: Route) -> Bool {
+        routeLock.lock()
+        defer { routeLock.unlock() }
+        return running && !finishing && route === candidate
+    }
+
     private static func resolveDevice(_ destinationID: String) throws -> AudioDeviceID {
         if destinationID == "default" { return try CoreAudioSupport.defaultOutputDevice() }
         let prefix = "coreaudio:"
@@ -544,7 +775,7 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         routeLock.lock()
         if let route {
             let current = route.ring.underflowFrames
-            if current > lastUnderflowFrames, route.primed {
+            if current > lastUnderflowFrames, route.primed, !finishing {
                 underflowDelta = current - lastUnderflowFrames
                 if route.ring.fillFrames == 0, !finishing {
                     route.primed = false

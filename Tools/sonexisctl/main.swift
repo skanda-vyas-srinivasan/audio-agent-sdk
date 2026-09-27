@@ -101,7 +101,6 @@ private struct Arguments {
       sonexisctl play <file.wav|file.pcm> [--destination ID] [--target-buffer-ms 20...250] \
         [--sample-rate Hz] [--channels 1|2] [--sample-format pcm_s16le|float32_le] [--debug]
       sonexisctl output-status <session-id> [--json]
-      sonexisctl output-flush <session-id> [--json]
       sonexisctl output-stop <session-id> [--json]
       append --socket PATH to any command
     """
@@ -118,7 +117,10 @@ private func printSession(_ session: RuntimeSessionDTO) {
 
 private func printOutputSession(_ session: RuntimeOutputSessionDTO) {
     let metrics = session.metrics
-    print("output_session=\(session.id) stream=\(session.streamID) state=\(session.state.rawValue) destination=\(session.destinationID) format=\(session.format.sampleFormat.rawValue)/\(session.format.sampleRate)Hz/\(session.format.channelCount)ch received=\(metrics.inputFramesReceived) rendered=\(metrics.deviceFramesRendered) dropped=\(metrics.droppedFrames) buffered_ms=\(String(format: "%.2f", metrics.bufferedMilliseconds))")
+    let device = metrics.deviceSampleRate.map { "\($0)Hz/\(metrics.deviceChannelCount ?? 0)ch" } ?? "unavailable"
+    let latency = metrics.estimatedOutputLatencyMilliseconds
+        .map { String(format: "%.2f", $0) } ?? "unavailable"
+    print("output_session=\(session.id) stream=\(session.streamID) state=\(session.state.rawValue) destination=\(session.destinationID) format=\(session.format.sampleFormat.rawValue)/\(session.format.sampleRate)Hz/\(session.format.channelCount)ch device_format=\(device) received=\(metrics.inputFramesReceived) enqueued=\(metrics.deviceFramesEnqueued) rendered=\(metrics.deviceFramesRendered) dropped=\(metrics.droppedFrames) late=\(metrics.lateFrames) underruns=\(metrics.underrunEvents) overruns=\(metrics.overrunEvents) queue_frames=\(metrics.queueDepthFrames) buffered_ms=\(String(format: "%.2f", metrics.bufferedMilliseconds)) estimated_output_latency_ms=\(latency) conversion_us=\(String(format: "%.2f", metrics.averageConversionMicroseconds))")
 }
 
 private struct AudioFilePayload {
@@ -127,6 +129,7 @@ private struct AudioFilePayload {
 }
 
 private func readPrivateRegularFile(path: String) throws -> Data {
+    let maximumInputBytes: off_t = 256 * 1_024 * 1_024
     let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
     guard descriptor >= 0 else {
         throw RuntimeErrorDTO(code: "input_error",
@@ -139,8 +142,24 @@ private func readPrivateRegularFile(path: String) throws -> Data {
         throw RuntimeErrorDTO(code: "input_error",
             message: "Input must be a regular file: \(String(cString: strerror(savedError)))")
     }
+    guard status.st_size >= 0, status.st_size <= maximumInputBytes else {
+        close(descriptor)
+        throw RuntimeErrorDTO(code: "input_too_large",
+            message: "Playback input exceeds the 256 MiB CLI safety limit")
+    }
     let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-    return try handle.readToEnd() ?? Data()
+    var data = Data()
+    while data.count <= Int(maximumInputBytes) {
+        let remaining = Int(maximumInputBytes) + 1 - data.count
+        guard let chunk = try handle.read(upToCount: min(1_048_576, remaining)),
+              !chunk.isEmpty else { break }
+        data.append(chunk)
+    }
+    guard data.count <= Int(maximumInputBytes) else {
+        throw RuntimeErrorDTO(code: "input_too_large",
+            message: "Playback input exceeds the 256 MiB CLI safety limit")
+    }
+    return data
 }
 
 private func littleUInt16(_ data: Data, _ offset: Int) -> UInt16 {
@@ -333,10 +352,6 @@ do {
     case "output-status":
         guard let id = arguments.value else { throw RuntimeErrorDTO(code: "usage", message: Arguments.usage) }
         let session = try client.outputStatus(outputSessionID: id)
-        if arguments.json { try printJSON(session) } else { printOutputSession(session) }
-    case "output-flush":
-        guard let id = arguments.value else { throw RuntimeErrorDTO(code: "usage", message: Arguments.usage) }
-        let session = try client.flushOutput(outputSessionID: id)
         if arguments.json { try printJSON(session) } else { printOutputSession(session) }
     case "output-stop":
         guard let id = arguments.value else { throw RuntimeErrorDTO(code: "usage", message: Arguments.usage) }

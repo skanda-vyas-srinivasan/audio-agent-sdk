@@ -122,8 +122,8 @@ packet-duration bound.
 
 There is no unbounded application queue. The data socket has the operating
 system's bounded buffer and feeds a fixed-capacity native ring. The default
-playback reservoir targets approximately 60 ms and has a hard capacity of
-approximately 250 ms, configurable within safe limits at session creation.
+playback reservoir targets approximately 60-80 ms and has a hard device-ring
+capacity of 500 ms; the target is configurable within safe limits.
 
 When a producer outruns playback, the newest incoming tail is dropped. This
 keeps already queued ordering stable and prevents old responses from growing
@@ -149,9 +149,10 @@ Python is the primary public API:
 
 ```python
 async with Sonexis() as sx:
-    async with await sx.playback(sample_rate=24_000, channels=1) as output:
+    async with await sx.playback(
+        format=AudioFormat.gemini_live_output()
+    ) as output:
         await output.write(pcm)
-        await output.drain()
 ```
 
 `write` splits large aligned buffers into bounded packets, serializes writes,
@@ -220,7 +221,7 @@ policy hooks. It does not claim full AEC or force one conversation policy.
 
 - fixed memory per output session;
 - no realtime-thread allocation, lock, IPC, logging, or conversion;
-- default buffering near 60 ms, hard buffered-audio cap near 250 ms;
+- default buffering near 60-80 ms, hard device-ring cap of 500 ms;
 - offline ingest/conversion faster than realtime for all advertised formats;
 - observable zero-drop steady playback with a correctly paced producer;
 - bounded behavior and explicit counters for an arbitrarily fast producer; and
@@ -256,4 +257,3 @@ bundle. Sonexis does not hide microphone selection or auto-install a driver.
    explicit development install/uninstall tooling.
 6. Run all regressions and signed builds, then publish v0.4 documentation,
    manual validation instructions, and the final report.
-

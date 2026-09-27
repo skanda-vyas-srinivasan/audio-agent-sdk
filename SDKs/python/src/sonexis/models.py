@@ -213,6 +213,10 @@ class OutputMetrics:
     conversion_nanoseconds: int = 0
     route_changes: int = 0
     producer_connected: bool = False
+    device_sample_rate: Optional[int] = None
+    device_channel_count: Optional[int] = None
+    estimated_output_latency_milliseconds: Optional[float] = None
+    uptime_nanoseconds: Optional[int] = None
 
     @property
     def frames_received(self) -> int:
@@ -256,6 +260,18 @@ class OutputMetrics:
         converted = {name: int(value.get(name, 0)) for name in integer_fields}
         converted["buffered_milliseconds"] = float(value.get("buffered_milliseconds", 0.0))
         converted["producer_connected"] = bool(value.get("producer_connected", False))
+        converted["device_sample_rate"] = (int(value["device_sample_rate"])
+                                             if value.get("device_sample_rate") is not None
+                                             else None)
+        converted["device_channel_count"] = (int(value["device_channel_count"])
+                                               if value.get("device_channel_count") is not None
+                                               else None)
+        converted["estimated_output_latency_milliseconds"] = (
+            float(value["estimated_output_latency_milliseconds"])
+            if value.get("estimated_output_latency_milliseconds") is not None else None)
+        converted["uptime_nanoseconds"] = (int(value["uptime_nanoseconds"])
+                                            if value.get("uptime_nanoseconds") is not None
+                                            else None)
         return cls(**converted)
 
 

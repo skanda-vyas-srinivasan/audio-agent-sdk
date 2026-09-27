@@ -1,5 +1,46 @@
 # Sonexis Runtime benchmarks
 
+## v0.4 output benchmark
+
+The repeatable output benchmark was collected on 2026-09-26 on the Apple M4
+host described below with optimized Swift/C code:
+
+```sh
+Scripts/benchmark-runtime-v04.sh
+```
+
+It feeds 10,000 20 ms packets (200 seconds of represented audio) through the
+exact Runtime playback converter without opening a device, drains converter
+tail, and separately cycles 20,000 10 ms stereo blocks through the C SPSC
+ring. It excludes socket scheduling, HAL callback scheduling, and audible
+device latency.
+
+| Path | Represented audio | Wall time | Realtime factor | Device frames |
+| --- | ---: | ---: | ---: | ---: |
+| PCM16 24 kHz mono → Float32 48 kHz stereo | 200 s | 0.025717 s | 7,777.0× | 9,600,000 |
+| PCM16 48 kHz stereo → Float32 48 kHz stereo | 200 s | 0.007713 s | 25,929.3× | 9,600,000 |
+| Float32 48 kHz mono → Float32 44.1 kHz stereo | 200 s | 0.027031 s | 7,398.9× | 8,820,000 |
+| two-channel ring write/read | 200 s | 0.017768 s | 11,256.1× | 9,600,000 |
+
+The exact frame totals are part of the benchmark result. During live HAL
+validation, a 0.5-second 24 kHz mono fixture produced exactly 22,050 device
+frames on the current 44.1 kHz headphone output and exactly 24,000 frames on
+the installed 48 kHz BlackHole loopback, with zero drops or overruns. Average
+conversion time reported by those Debug sessions was 209.18 µs and 81.79 µs
+per input packet respectively. These commands verified Runtime-to-HAL delivery;
+they are not a listening or receiving-application latency measurement.
+
+The v0.4 synthetic Runtime stress adds 1,000 output start/stop cycles to the
+existing 1,000 capture cycles, 200 control connections, and 16 parallel capture
+sessions. The final recorded values are reported in `RUNTIME_V0_4_REPORT.md`.
+SDK tests additionally force a non-reading output socket, verify write
+backpressure, and prove cancellation unblocks the producer.
+
+Output latency is separated from provider latency. Runtime metrics expose
+buffer target/depth, conversion work, device frames, underruns, overruns, and
+drops; they do not claim model/network time. The default 60 ms target (or
+configured 20–250 ms value) intentionally trades latency for burst tolerance.
+
 ## v0.3 AI pipeline benchmark
 
 The v0.3 benchmark was collected on 2026-09-25 on the same Apple M4 host

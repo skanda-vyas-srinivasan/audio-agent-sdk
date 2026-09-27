@@ -4,15 +4,16 @@
 
 Sonexis supplies local, source-aware audio infrastructure. It discovers macOS
 applications, captures them with Process Taps, normalizes PCM, preserves source
-identity, and delivers bounded realtime streams. It does not transcribe audio,
-run a model, remember conversations, synthesize speech, or send data to a cloud
-service unless application code explicitly adds a provider adapter.
+identity, delivers bounded realtime streams, and accepts generated PCM for
+bounded HAL playback or an installed loopback input. It does not transcribe
+audio, run a model, remember conversations, synthesize speech, or send data to
+a cloud service unless application code explicitly adds a provider adapter.
 
 ```text
-application audio -> Sonexis Runtime -> public SDK -> optional provider adapter
+application -> Sonexis input -> SDK -> provider -> SDK -> Sonexis output -> device
 ```
 
-Provider code never enters the capture core or Runtime protocol.
+Provider code never enters the capture/output core or Runtime protocol.
 
 ## Quickstart
 
@@ -90,6 +91,8 @@ base64-encodes complete PCM samples and uses the official SDK's GPT-Live
 `session.input_audio.append` interface. The current implementation follows the
 official server WebSocket guide:
 <https://developers.openai.com/api/docs/guides/voice-websockets>.
+Returned audio events declare `AudioFormat.openai_realtime_output()` and can be
+routed through the common Runtime output plane with `--response-output default`.
 
 ## Gemini Live
 
@@ -98,7 +101,8 @@ python -m pip install -e 'SDKs/python[gemini]'
 export GEMINI_API_KEY='...'
 export GEMINI_LIVE_MODEL='gemini-3.8-live'  # optional/current model selection
 python Examples/audio-agent/audio_agent.py \
-  --provider gemini --source 'Google Chrome' --debug
+  --provider gemini --source 'Google Chrome' \
+  --response-output default --debug
 ```
 
 `AudioFormat.gemini_live()` requests raw mono PCM16LE at 16 kHz. The adapter
@@ -121,6 +125,10 @@ sent, Gemini understood and referenced the captured commentary, readable output
 transcription arrived, the Gemini turn completed, and Sonexis reported zero
 dropped frames.
 
+Gemini returned-audio events declare 24 kHz mono PCM16. The reference app sends
+that PCM through `sx.playback()`; no Python playback package or provider-specific
+Runtime path is involved.
+
 Both adapters require Python 3.10+, accept one ordered source stream per sink,
 and accept injected sessions/transports for credential-free tests.
 OpenAI network behavior and provider failure cases still require manual
@@ -133,7 +141,34 @@ validated; quota failure and network-interruption behavior remain manual.
 public SDK APIs. It selects and switches sources, sends frames to OpenAI,
 Gemini, or an offline mock, prints provider events and stream/drop/latency
 statistics, watches source/runtime lifecycle events, optionally writes PCM/WAV,
-and shuts down cleanly. Its README contains exact commands.
+and shuts down cleanly. `--response-output default` plays Gemini or OpenAI
+speech through Sonexis; an installed loopback destination ID sends the same
+audio to an application's selected microphone. Its README contains exact
+commands.
+
+## Duplex and barge-in
+
+`sx.duplex(...)` owns one independent capture and output session. It is a small
+lifecycle helper, not an agent framework:
+
+```python
+async with sx.duplex(
+    "Discord",
+    input_format=AudioFormat.gemini_live(),
+    output_format=AudioFormat.gemini_live_output(),
+) as session:
+    async for frame in session.input:
+        await model.send_audio(frame)
+        # A separate response task writes provider PCM:
+        await session.output.write(response_pcm)
+```
+
+Applications choose when to interrupt. `await session.output.flush()` drops
+buffered speech and starts a fresh stream epoch while keeping capture active;
+`cancel()` tears output down immediately. Process-specific capture does not
+digitally recapture Runtime playback, but Sonexis does not provide acoustic
+echo cancellation. Prefer headphones and treat loopback/remote echo policy as
+an application concern.
 
 ## Replay and activity
 
@@ -172,20 +207,24 @@ estimate is not true Process Tap latency.
 
 Structured SDK errors distinguish source not found/ambiguous/unavailable,
 permission denial, unsupported format, session limits, slow consumers,
-terminal capture failure, Runtime connection/protocol failure, and provider
-failure. `retryable` is advisory. Reconnection never silently restarts captures
-or rebinds a relaunched application.
+terminal capture/output failure, unavailable/disconnected destinations, Runtime
+connection/protocol failure, and provider failure. `retryable` is advisory.
+Reconnection never silently restarts captures, rebinds a relaunched
+application, or resumes partially played output.
 
 ## Privacy and security
 
 - Runtime and MCP are local-only; Runtime authenticates the peer UID.
 - The macOS user account is the trust boundary. Same-UID unsandboxed processes
-  can use Runtime's granted capture permission.
+  can use Runtime's granted capture permission and inject output audio.
 - MCP mutation is disabled by default.
 - Provider keys stay in environment/process configuration and are never logged.
 - Audio is not persisted unless the application explicitly chooses an output.
 - Example/CLI recordings use mode `0600` and refuse symbolic links; they remain
   sensitive files and are not automatically deleted or excluded from Git.
 - Diagnostics contain counters and metadata, not PCM payloads.
+- Selecting a loopback device as another application's microphone makes
+  injected audio available to that application; this is an explicit user
+  routing decision.
 - Source names may reveal which applications are running; treat diagnostic
   output as private local data.

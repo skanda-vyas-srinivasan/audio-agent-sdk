@@ -31,7 +31,9 @@ python Examples/audio-agent/audio_agent.py --provider openai --source Spotify
 
 python -m pip install -e 'SDKs/python[gemini]'
 export GEMINI_API_KEY='...'
-python Examples/audio-agent/audio_agent.py --provider gemini --source 'Google Chrome' --debug
+python Examples/audio-agent/audio_agent.py \
+  --provider gemini --source 'Google Chrome' \
+  --response-output default --debug
 ```
 
 Gemini mode keeps Gemini's automatic VAD enabled and adds local end detection.
@@ -54,6 +56,13 @@ The start/end thresholds are normalized PCM RMS values. Raise them when steady
 background audio opens turns; lower them when quiet speech is missed. Keep the
 end threshold below the start threshold. A custom `VoiceActivityDetector` can
 be supplied to `GeminiLiveSink` when energy thresholds are insufficient.
+
+`--response-output DESTINATION` routes returned provider PCM through Sonexis
+Runtime's bounded output plane. `--play-response` is shorthand for destination
+`default`. This works for both Gemini and OpenAI and never imports a Python
+playback library. Use `sonexisctl outputs` to select a fixed speaker/headphone
+or an installed loopback device. Raw returned-audio byte diagnostics stay
+behind `--debug`.
 
 Provider modes select their required Sonexis format preset automatically. No credential or captured audio is logged or stored unless `--output` is explicitly supplied. Recordings are created as private regular files (`0600`), and symbolic-link targets are refused.
 

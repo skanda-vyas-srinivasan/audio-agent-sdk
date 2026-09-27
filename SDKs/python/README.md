@@ -55,17 +55,17 @@ The Runtime, rather than the Python process, owns the selected output device:
 import asyncio
 from sonexis import AudioFormat, Sonexis
 
-async def main(model_audio):
+async def play(model_audio):
     async with Sonexis() as sx:
         async with await sx.playback(
             destination="default",
-            format=AudioFormat.openai_realtime(),
-            target_buffer_milliseconds=80,
+            format=AudioFormat.openai_realtime_output(),
+            target_buffer_milliseconds=60,
         ) as output:
             async for pcm_chunk in model_audio:
                 await output.write(pcm_chunk)
 
-asyncio.run(main(...))
+# Call `await play(model_audio)` from your application's async entry point.
 ```
 
 `write()` accepts `bytes`, `bytearray`, or `memoryview` containing whole,
@@ -90,6 +90,52 @@ producer is attached. The `default` destination follows the current macOS
 default output device. A Runtime without the v0.4 `output_sessions` capability
 fails these calls with `unsupported_capability` instead of sending unsupported
 commands.
+
+Installed loopback HAL devices are returned as `virtual_input` destinations
+when recognizable and can be selected by their `coreaudio:<UID>` ID. Sonexis
+v0.4 does not install a virtual driver; destination enumeration is the
+authoritative source of availability.
+
+Capture and output can also be owned together without imposing agent policy:
+
+```python
+async with Sonexis() as sx:
+    async with sx.duplex(
+        "Discord",
+        input_format=AudioFormat.gemini_live(),
+        output_format=AudioFormat.gemini_live_output(),
+    ) as session:
+        async for frame in session.input:
+            ...
+            await session.output.write(response_pcm)
+```
+
+The application still decides turn-taking and feedback behavior. Call
+`await session.output.flush()` to discard a partial response while keeping the
+duplex session, or `cancel()` to tear output down immediately.
+
+For a public-API-only loop with a fake passthrough model, negotiate the same
+format on both sides. Real model output must instead match `output_format`:
+
+```python
+import asyncio
+from sonexis import AudioFormat, Sonexis
+
+async def main():
+    format = AudioFormat.speech_16k()
+    async with Sonexis() as sx:
+        async with sx.duplex(
+            "Discord", input_format=format, output_format=format
+        ) as session:
+            async for frame in session.input:
+                # Replace this passthrough with a model producing `format`.
+                await session.output.write(frame.data)
+
+asyncio.run(main())
+```
+
+Use headphones for passthrough/duplex experiments; Sonexis does not implement
+acoustic echo cancellation.
 
 The output data plane uses the same 64-byte SXPC v2 PCM envelope as capture,
 but in the client-to-Runtime direction. Continuous audio never travels in JSON
@@ -121,6 +167,8 @@ from sonexis import AudioFormat
 AudioFormat.speech_16k()
 AudioFormat.openai_realtime()  # PCM16 mono, 24 kHz
 AudioFormat.gemini_live()      # PCM16 mono, 16 kHz
+AudioFormat.openai_realtime_output()  # PCM16 mono, 24 kHz
+AudioFormat.gemini_live_output()      # PCM16 mono, 24 kHz
 ```
 
 These are convenience values. The Runtime handshake remains authoritative for

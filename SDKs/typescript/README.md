@@ -58,9 +58,10 @@ for await (const frame of stream) {
 }
 ```
 
-Available helpers are `speech16k()`, `openAIRealtime()`, `geminiLive()`, `pcm48kMono()`, and
-`pcm48kStereo()`. They return new mutable format values, so changing one request cannot modify a
-later request.
+Available helpers are `speech16k()`, `openAIRealtime()`,
+`openAIRealtimeOutput()`, `geminiLive()`, `geminiLiveOutput()`,
+`pcm48kMono()`, and `pcm48kStereo()`. They return new mutable format values, so
+changing one request cannot modify a later request.
 
 ## Labeled multi-source capture
 
@@ -98,8 +99,8 @@ console.log(destinations.map((destination) => destination.name));
 
 const output = await sx.playback({
   destination: "default", // or a typed AudioOutputDestination
-  format: AudioFormats.openAIRealtime(),
-  targetBufferMilliseconds: 80,
+  format: AudioFormats.openAIRealtimeOutput(),
+  targetBufferMilliseconds: 60,
 });
 
 try {
@@ -133,9 +134,31 @@ fresh stream epoch, and resets sequence/timestamp numbering. `cancel()` is the i
 primitive. Closing the owning `Sonexis` client cancels every output it created before closing the
 control connection.
 
-`default` follows the current system default output device. Other destinations, including a future
-virtual input, are discoverable through `outputDestinations()` when advertised by the Runtime.
+`default` follows the current system default output device. Fixed HAL outputs use
+stable `coreaudio:<UID>` IDs. Recognized installed loopback devices are exposed
+as `virtual_input`; v0.4 does not install a driver.
 Output APIs fail with `unsupported_capability` against a pre-v0.4 Runtime.
+
+For ownership convenience, `await sx.duplex(source, options)` creates one
+capture and one output. It does not choose a model or turn policy:
+
+```ts
+const duplex = await sx.duplex("Discord", {
+  inputFormat: AudioFormats.geminiLive(),
+  output: { format: AudioFormats.geminiLiveOutput(), destination: "default" },
+});
+try {
+  for await (const frame of duplex.input) {
+    // Send input to a model and write returned PCM to duplex.output.
+  }
+} finally {
+  await duplex.close(); // pass false to discard buffered output during barge-in
+}
+```
+
+Input and output formats are independent. A passthrough/fake-model test must
+set both to the same format before writing `frame.data` directly; model response
+PCM must match `output.format`.
 
 ## Lifecycle
 
@@ -150,8 +173,12 @@ toolchain; nothing was installed system-wide. Re-run with any supported Node too
 ```sh
 cd SDKs/typescript
 npm install
+npm run build
 npm test
 ```
+
+For an external local project, build first and install the repository package
+without publishing it, for example `npm install /absolute/path/to/SDKs/typescript`.
 
 Binary audio sequence/timestamp fields and local frame receipt timestamps are `bigint`.
 Protocol-v2 JSON nanosecond timestamps and lifetime counters remain JSON numbers, so JavaScript

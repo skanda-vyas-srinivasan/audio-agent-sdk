@@ -16,7 +16,16 @@ from .protocol import FLAG_EOS, MAX_CONTROL_BYTES, PROTOCOL_VERSION, read_frame
 
 SourceSelector = Union[str, int, AudioSource]
 
+RUNTIME_EVENT_TYPES = (
+    "source_added", "source_removed", "source_updated", "capture_started",
+    "capture_stopped", "capture_failed", "client_warning", "device_changed",
+    "runtime_warning", "runtime_shutting_down", "output_started", "output_stopped",
+    "output_cancelled", "output_failed", "output_underrun", "output_overrun",
+    "output_dropped", "output_destination_changed",
+)
+
 if TYPE_CHECKING:
+    from .duplex import DuplexSession
     from .output import AudioOutput
 
 
@@ -317,10 +326,11 @@ class Sonexis:
         from .multi import MultiSourceSession
         return MultiSourceSession(self, max_queue_frames=max_queue_frames)
 
-    def duplex(self, input_source: SourceSelector, *, output_destination: str = "default",
+    def duplex(self, input_source: SourceSelector, *,
+               output_destination: Union[str, AudioOutputDestination] = "default",
                input_format: AudioFormat = AudioFormat(),
                output_format: AudioFormat = AudioFormat.openai_realtime_output(),
-               target_buffer_milliseconds: int = 60):
+               target_buffer_milliseconds: int = 60) -> "DuplexSession":
         """Compose one independent capture and output session."""
         from .duplex import DuplexSession
         return DuplexSession(self, input_source,
@@ -337,9 +347,9 @@ class Sonexis:
 
     async def events(self, event_types: Optional[Iterable[str]] = None) -> "EventSubscription":
         """Subscribe to a bounded Runtime lifecycle event stream."""
-        params: Dict[str, Any] = {}
-        if event_types is not None:
-            params["event_types"] = list(event_types)
+        params: Dict[str, Any] = {
+            "event_types": list(RUNTIME_EVENT_TYPES if event_types is None else event_types)
+        }
         response = await self._request("subscribe_events", **params)
         try:
             subscription = EventSubscription(self, response["subscription"])
@@ -381,8 +391,8 @@ class Sonexis:
         self,
         *,
         destination: Union[str, AudioOutputDestination] = "default",
-        format: AudioFormat = AudioFormat.openai_realtime(),
-        target_buffer_milliseconds: int = 80,
+        format: AudioFormat = AudioFormat.openai_realtime_output(),
+        target_buffer_milliseconds: int = 60,
     ) -> "AudioOutput":
         """Create and attach a bounded client-to-Runtime PCM output stream."""
         from .output import AudioOutput
@@ -415,8 +425,8 @@ class Sonexis:
         self,
         *,
         destination: Union[str, AudioOutputDestination] = "default",
-        format: AudioFormat = AudioFormat.openai_realtime(),
-        target_buffer_milliseconds: int = 80,
+        format: AudioFormat = AudioFormat.openai_realtime_output(),
+        target_buffer_milliseconds: int = 60,
     ) -> "AudioOutput":
         """Convenience alias for :meth:`create_output`."""
         return await self.create_output(

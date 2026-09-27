@@ -8,7 +8,7 @@ import uuid
 from typing import Any, AsyncIterator, List, Optional
 
 from ..diagnostics import AudioSendReceipt, send_receipt
-from ..errors import ProviderError
+from ..errors import ProviderError, sanitized_provider_error
 from ..models import AudioFormat, AudioFrame
 from .base import ProviderEvent
 
@@ -82,12 +82,15 @@ class OpenAIRealtimeSink:
                        prefetched_events=[first], close_timeout=close_timeout)
             sink._event_iterator = iterator
             return sink
-        except BaseException:
+        except BaseException as error:
             try:
                 await context.__aexit__(None, None, None)
             finally:
                 await client.close()
-            raise
+            if isinstance(error, (asyncio.CancelledError, ProviderError)):
+                raise
+            raise ProviderError("provider_handshake_failed",
+                                sanitized_provider_error(error), retryable=True) from error
 
     async def __aenter__(self) -> "OpenAIRealtimeSink":
         return self
@@ -124,7 +127,8 @@ class OpenAIRealtimeSink:
             except asyncio.CancelledError:
                 raise
             except BaseException as error:
-                raise ProviderError("provider_send_failed", str(error), retryable=True) from error
+                raise ProviderError("provider_send_failed",
+                                    sanitized_provider_error(error), retryable=True) from error
             if self._closed:
                 raise ProviderError("provider_closed", "OpenAI session closed during send")
             self._last_sequence = frame.sequence
@@ -139,7 +143,8 @@ class OpenAIRealtimeSink:
             async for value in iterator:
                 if getattr(value, "type", None) == "error":
                     message = getattr(getattr(value, "error", None), "message", None)
-                    raise ProviderError("provider_error", str(message or "OpenAI session error"))
+                    raise ProviderError("provider_error", sanitized_provider_error(
+                        RuntimeError(str(message or "OpenAI session error"))))
                 yield self._event(value)
         except asyncio.CancelledError:
             raise
@@ -148,7 +153,8 @@ class OpenAIRealtimeSink:
                 raise
             if self._closed:
                 return
-            raise ProviderError("provider_receive_failed", str(error), retryable=True) from error
+            raise ProviderError("provider_receive_failed",
+                                sanitized_provider_error(error), retryable=True) from error
 
     @staticmethod
     def _event(value: Any) -> ProviderEvent:

@@ -155,6 +155,7 @@ public enum RuntimePCMFrameCodec {
 /// Bounded incremental decoder for one PCM stream.
 public struct RuntimePCMStreamDecoder {
     private var buffer = Data()
+    private var readOffset = 0
     private var pendingHeader: RuntimePCMFrameHeader?
     private var lastSequence: UInt64?
     private let expectedStreamID: UUID?
@@ -167,8 +168,12 @@ public struct RuntimePCMStreamDecoder {
             throw RuntimeErrorDTO(code: "pcm_after_eos", message: "PCM bytes arrived after end-of-stream")
         }
         let maximumBuffered = RuntimePCMFrameHeader.maximumPayloadBytes + RuntimePCMFrameHeader.encodedSize
-        guard bytes.count <= maximumBuffered, buffer.count <= maximumBuffered - bytes.count else {
+        compactIfNeeded(force: buffer.count + bytes.count > maximumBuffered)
+        let bufferedBytes = buffer.count - readOffset
+        guard bytes.count <= maximumBuffered,
+              bufferedBytes <= maximumBuffered - bytes.count else {
             buffer.removeAll(keepingCapacity: true)
+            readOffset = 0
             pendingHeader = nil
             throw RuntimeErrorDTO(code: "pcm_buffer_overflow", message: "PCM stream exceeded the frame size limit")
         }
@@ -176,8 +181,9 @@ public struct RuntimePCMStreamDecoder {
         var frames: [RuntimePCMFrame] = []
         while true {
             if pendingHeader == nil {
-                guard buffer.count >= RuntimePCMFrameHeader.encodedSize else { break }
-                let header = try RuntimePCMFrameCodec.decodeHeader(Data(buffer.prefix(RuntimePCMFrameHeader.encodedSize)))
+                guard buffer.count - readOffset >= RuntimePCMFrameHeader.encodedSize else { break }
+                let headerRange = readOffset..<(readOffset + RuntimePCMFrameHeader.encodedSize)
+                let header = try RuntimePCMFrameCodec.decodeHeader(Data(buffer[headerRange]))
                 if let expectedStreamID, header.streamID != expectedStreamID {
                     throw RuntimeErrorDTO(code: "stream_id_mismatch", message: "PCM frame belongs to a different stream")
                 }
@@ -191,32 +197,45 @@ public struct RuntimePCMStreamDecoder {
                     }
                 }
                 pendingHeader = header
-                buffer.removeFirst(RuntimePCMFrameHeader.encodedSize)
+                readOffset += RuntimePCMFrameHeader.encodedSize
             }
             guard let header = pendingHeader,
-                  buffer.count >= Int(header.payloadByteCount) else { break }
-            let payload = Data(buffer.prefix(Int(header.payloadByteCount)))
-            buffer.removeFirst(Int(header.payloadByteCount))
+                  buffer.count - readOffset >= Int(header.payloadByteCount) else { break }
+            let payloadEnd = readOffset + Int(header.payloadByteCount)
+            let payload = Data(buffer[readOffset..<payloadEnd])
+            readOffset = payloadEnd
             pendingHeader = nil
             lastSequence = header.sequence
             frames.append(RuntimePCMFrame(header: header, payload: payload))
             if header.flags.contains(.endOfStream) {
                 ended = true
-                if !buffer.isEmpty {
+                if buffer.count != readOffset {
                     throw RuntimeErrorDTO(code: "pcm_after_eos", message: "PCM bytes followed end-of-stream")
                 }
                 break
             }
         }
+        compactIfNeeded(force: readOffset == buffer.count)
         return frames
     }
 
     public mutating func finish(requireEndOfStream: Bool = false) throws {
-        guard buffer.isEmpty, pendingHeader == nil else {
+        guard buffer.count == readOffset, pendingHeader == nil else {
             throw RuntimeErrorDTO(code: "truncated_pcm_stream", message: "PCM stream ended mid-frame")
         }
         if requireEndOfStream, !ended {
             throw RuntimeErrorDTO(code: "unexpected_pcm_eof", message: "PCM stream ended without an end-of-stream frame")
         }
+    }
+
+    private mutating func compactIfNeeded(force: Bool = false) {
+        guard readOffset > 0,
+              force || readOffset >= 64 * 1_024 || readOffset * 2 >= buffer.count else { return }
+        if readOffset == buffer.count {
+            buffer.removeAll(keepingCapacity: true)
+        } else {
+            buffer.removeSubrange(0..<readOffset)
+        }
+        readOffset = 0
     }
 }

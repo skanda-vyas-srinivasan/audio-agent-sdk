@@ -234,7 +234,8 @@ public final class SonexisRuntimeClient: @unchecked Sendable {
 public final class RuntimeOutputWriter: @unchecked Sendable {
     public let session: RuntimeOutputSessionDTO
     private let connection: UnixSocketConnection
-    private let lock = NSLock()
+    private let writeLock = NSLock()
+    private let stateLock = NSLock()
     private var sequence: UInt64 = 0
     private var nextTimestampNanoseconds: UInt64 = 0
     private var closed = false
@@ -252,8 +253,11 @@ public final class RuntimeOutputWriter: @unchecked Sendable {
 
     public func write(_ pcm: Data, timestampNanoseconds: UInt64? = nil,
                       discontinuity: Bool = false) throws {
-        lock.lock(); defer { lock.unlock() }
-        guard !closed else {
+        writeLock.lock(); defer { writeLock.unlock() }
+        stateLock.lock()
+        let isClosed = closed
+        stateLock.unlock()
+        guard !isClosed else {
             throw RuntimeErrorDTO(code: "output_closed", message: "Output writer is closed")
         }
         let format = session.format
@@ -287,22 +291,26 @@ public final class RuntimeOutputWriter: @unchecked Sendable {
     }
 
     public func finish() throws {
-        lock.lock(); defer { lock.unlock() }
-        guard !closed else { return }
+        writeLock.lock(); defer { writeLock.unlock() }
+        stateLock.lock()
+        guard !closed else { stateLock.unlock(); return }
+        closed = true
+        stateLock.unlock()
+        defer { connection.close() }
         let header = RuntimePCMFrameHeader(flags: [.endOfStream], payloadByteCount: 0,
             streamID: UUID(uuidString: session.streamID)!, sequence: sequence,
             timestampNanoseconds: nextTimestampNanoseconds, sampleRate: 0,
             frameCount: 0, channelCount: 0)
         try connection.write(RuntimePCMFrameCodec.encode(header: header, payload: Data()))
-        closed = true
-        connection.close()
     }
 
     public func cancel() {
-        lock.lock()
-        guard !closed else { lock.unlock(); return }
+        stateLock.lock()
+        guard !closed else { stateLock.unlock(); return }
         closed = true
-        lock.unlock()
+        stateLock.unlock()
+        // Closing outside writeLock deliberately interrupts a blocking socket
+        // write. The writer then fails instead of delaying cancellation.
         connection.close()
     }
 }

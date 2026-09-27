@@ -27,6 +27,7 @@ class FakeRuntime:
         self.stream_server = None
         self.event_server = None
         self.commands = []
+        self.requests = []
         self.malformed_handshake = False
         self.sources = [{"id": "app.test", "kind": "application",
             "name": "Test Audio", "process_ids": [123], "bundle_identifier": "test",
@@ -52,6 +53,7 @@ class FakeRuntime:
         try:
             while line := await reader.readline():
                 request = json.loads(line)
+                self.requests.append(request)
                 request_id = request["request_id"]
                 command = request["command"]
                 self.commands.append(command)
@@ -185,6 +187,10 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
                     await events.__anext__()
                 self.assertEqual(ended.exception.code, "event_stream_closed")
             self.assertEqual(self.runtime.commands.count("unsubscribe_events"), 1)
+            subscription = next(request for request in self.runtime.requests
+                                if request["command"] == "subscribe_events")
+            self.assertIn("output_failed", subscription["event_types"])
+            self.assertIn("output_destination_changed", subscription["event_types"])
 
     async def test_concurrent_requests_are_correlated(self):
         async with Sonexis(self.runtime.control_path) as client:

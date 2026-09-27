@@ -1,11 +1,12 @@
 """Small composition helper for independent Sonexis capture and output."""
 
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING, Union
 
 from .models import AudioFormat
 
 if TYPE_CHECKING:
     from .client import CaptureSession, Sonexis, SourceSelector
+    from .models import AudioOutputDestination
     from .output import AudioOutput
 
 
@@ -21,7 +22,7 @@ class DuplexSession:
         client: "Sonexis",
         input_source: "SourceSelector",
         *,
-        output_destination: str = "default",
+        output_destination: Union[str, "AudioOutputDestination"] = "default",
         input_format: AudioFormat = AudioFormat(),
         output_format: AudioFormat = AudioFormat.openai_realtime_output(),
         target_buffer_milliseconds: int = 60,
@@ -32,32 +33,54 @@ class DuplexSession:
         self.input_format = input_format
         self.output_format = output_format
         self.target_buffer_milliseconds = target_buffer_milliseconds
-        self.input: Optional["CaptureSession"] = None
-        self.output: Optional["AudioOutput"] = None
+        self._input: Optional["CaptureSession"] = None
+        self._output: Optional["AudioOutput"] = None
+
+    @property
+    def input(self) -> "CaptureSession":
+        if self._input is None:
+            raise RuntimeError("Duplex session has not been entered or is already closed")
+        return self._input
+
+    @property
+    def output(self) -> "AudioOutput":
+        if self._output is None:
+            raise RuntimeError("Duplex session has not been entered or is already closed")
+        return self._output
 
     async def __aenter__(self) -> "DuplexSession":
-        self.input = await self.client.capture(
+        self._input = await self.client.capture(
             self.input_source, format=self.input_format)
         try:
-            self.output = await self.client.playback(
+            self._output = await self.client.playback(
                 destination=self.output_destination,
                 format=self.output_format,
                 target_buffer_milliseconds=self.target_buffer_milliseconds,
             )
         except BaseException:
-            await self.input.aclose()
-            self.input = None
+            await self._input.aclose()
+            self._input = None
             raise
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         await self.aclose(drain_output=exc_type is None)
 
-    async def aclose(self, *, drain_output: bool = False) -> None:
-        output, capture = self.output, self.input
-        self.output = None
-        self.input = None
-        if output is not None:
-            await output.aclose(drain=drain_output)
-        if capture is not None:
-            await capture.aclose()
+    async def aclose(self, *, drain_output: bool = True) -> None:
+        output, capture = self._output, self._input
+        self._output = None
+        self._input = None
+        first_error: Optional[BaseException] = None
+        try:
+            if capture is not None:
+                await capture.aclose()
+        except BaseException as error:
+            first_error = error
+        try:
+            if output is not None:
+                await output.aclose(drain=drain_output)
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        if first_error is not None:
+            raise first_error

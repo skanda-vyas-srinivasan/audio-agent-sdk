@@ -161,6 +161,11 @@ public final class RuntimeOutputDataPlane: @unchecked Sendable {
                 message: "Output packet format differs from the negotiated session format")
         }
         let durationProduct = UInt64(header.frameCount) * 1_000
+        let minimumFrames = max(1, header.sampleRate / 1_000)
+        guard header.frameCount >= minimumFrames else {
+            throw RuntimeErrorDTO(code: "output_packet_too_short",
+                message: "Output packets must contain at least one millisecond of audio")
+        }
         guard durationProduct <= UInt64(maximumPacketMilliseconds) * UInt64(header.sampleRate) else {
             throw RuntimeErrorDTO(code: "output_packet_too_long",
                 message: "Output packets may contain at most \(maximumPacketMilliseconds) ms of audio")
@@ -195,4 +200,3 @@ public final class RuntimeOutputDataPlane: @unchecked Sendable {
         if shouldStopListener { listener.stop() }
     }
 }
-

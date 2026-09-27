@@ -406,6 +406,16 @@ do {
     let flushable = try client.startOutput(destinationID: "default")
     let staleWriter = try client.outputWriter(session: flushable)
     try staleWriter.write(Data(repeating: 2, count: 320))
+    let flushIntruder = SonexisRuntimeClient(controlSocketPath: server.paths.controlSocketPath)
+    try flushIntruder.connect()
+    do {
+        _ = try flushIntruder.flushOutput(outputSessionID: flushable.id)
+        fatalError("a non-owner rotated an active producer stream")
+    } catch let error as RuntimeErrorDTO {
+        expect(error.code == "output_session_not_owned",
+               "non-owner flush returned the wrong structured error")
+    }
+    flushIntruder.disconnect()
     let flushed = try client.flushOutput(outputSessionID: flushable.id)
     expect(flushed.streamID != flushable.streamID,
            "flush did not rotate the output stream epoch")
@@ -449,6 +459,24 @@ do {
         malformedFailed = value.state == .failed && value.error?.code == "output_format_mismatch"
     }
     expect(malformedFailed, "malformed output did not fail only its session")
+
+    let tinyOutput = try client.startOutput(format:
+        RuntimePCMFormatDTO(sampleRate: 24_000, channelCount: 1))
+    let tinyConnection = try UnixSocketSystem.connect(path: tinyOutput.dataSocketPath)
+    let tinyHeader = RuntimePCMFrameHeader(payloadByteCount: 2,
+        streamID: UUID(uuidString: tinyOutput.streamID)!, sequence: 0,
+        timestampNanoseconds: 0, sampleRate: 24_000, frameCount: 1,
+        channelCount: 1)
+    try tinyConnection.write(RuntimePCMFrameCodec.encode(
+        header: tinyHeader, payload: Data([0, 0])))
+    tinyConnection.close()
+    var tinyFailed = false
+    for _ in 0..<50 where !tinyFailed {
+        usleep(10_000)
+        let value = try client.outputStatus(outputSessionID: tinyOutput.id)
+        tinyFailed = value.state == .failed && value.error?.code == "output_packet_too_short"
+    }
+    expect(tinyFailed, "sub-millisecond packet amplification was not rejected")
 
     let outputRuntimeStatus = try client.runtimeStatus()
     expect((outputRuntimeStatus.totalOutputSessionsStarted ?? 0) >= 4,
