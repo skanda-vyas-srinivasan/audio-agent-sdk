@@ -179,26 +179,42 @@ signing does not replace Developer ID/notarization.
 ## 17. Performance
 
 The 1.0 audio data planes intentionally retain the measured v0.8/v0.9 design;
-no speculative DSP or protocol rewrite was introduced. The final automated
-gate measurements are recorded below after the clean candidate run. Physical
-capture-to-speaker and provider/network latency remain manual measurements and
-are not attributed to Sonexis.
+no speculative DSP or protocol rewrite was introduced. The definitive gate at
+`43dc343` completed the optimized 1,000-capture/1,000-output/100-burst,
+200-connection, 16-parallel-session workload in 1.525 seconds. Current RSS was
+12,877,824 bytes from a 6,651,904-byte baseline (6,225,920 retained); peak RSS
+was 12,926,976 bytes and in-scope descriptor growth was two.
+
+Under Thread Sanitizer the same workload completed in 4.083 seconds. Current
+RSS was 94,846,976 bytes from a 53,641,216-byte baseline (41,205,760 retained),
+peak RSS was 94,928,896 bytes, and descriptor growth was two. These are
+deterministic lifecycle/resource results, not live capture-to-speaker latency.
+Physical HAL and provider/network latency remain manual measurements and are
+not attributed to Sonexis. Full methodology and prior throughput measurements
+are in `docs/runtime-benchmarks.md`.
 
 ## 18. Stress and automated test results
 
-Focused 1.0 qualification before the final gate passed:
+The clean `Scripts/test-runtime-release.sh` gate passed on 2026-09-27 against
+exact committed source `43dc3433d6de780f97a924a30647eb802faf939c`:
 
-- Runtime protocol and capture-core tests;
-- 86 Python SDK tests;
-- 27 TypeScript SDK tests;
-- Python wheel/sdist and TypeScript tarball clean-install tests;
-- packed TypeScript public-declaration inspection;
-- TypeScript public duplex example compilation;
+- Sonexis application Debug build and every offline application regression;
+- Runtime protocol/core/output/integration tests plus the fuzz/adversarial
+  corpus;
+- optimized and TSan stress workloads described in the performance section;
+- concurrent output-ring and focused application lifecycle/graph TSan checks;
+- all 86 Python SDK tests and all 27 TypeScript SDK tests;
+- public example smoke tests, TypeScript public duplex compilation, and packed
+  declaration inspection;
+- clean Python wheel/sdist and TypeScript tarball installs;
+- Apple Development-signed universal Runtime and CLI Release builds, stable
+  identifiers, permission metadata, version metadata, architectures, and no
+  debug entitlement;
+- install/reinstall/start/status/crash-recovery/stop/uninstall lifecycle,
+  including unsafe state-parent and symlink rejection;
+- reproducible artifact construction plus manifest-anchor, tamper, inventory,
+  writable-path, malformed-digest, and symlink rejection;
 - version, documentation-link, shell-syntax, and diff checks.
-
-The final clean full-gate counts, stress timing, RSS/descriptor accounting,
-TSan result, signed build result, and artifact result are added only after that
-gate runs against a committed candidate.
 
 ## 19. Independent review
 
@@ -207,14 +223,18 @@ lifecycle declarations, stale Python beta metadata, unvalidated MCP server
 version metadata, and inaccurate permission/protocol wording. The
 security/privacy review found and prompted native capture-format bounds,
 lifecycle-state hardening, MCP input bounds, non-executing bounded artifact
-verification, and explicit artifact trust semantics. The external-developer
-review prompted a validated TypeScript duplex example, canonical queue names,
-minimum-write and fail-fast documentation, explicit fixture paths, and clearer
-ESM/local-build instructions.
+verification, out-of-band manifest anchoring, immutable-input checks, and
+explicit artifact trust semantics. Its final pass found and closed state-path
+and manifest hash/parse TOCTOU windows. The external-developer review prompted
+a validated TypeScript duplex example, canonical queue names, minimum-write and
+fail-fast documentation, explicit fixture paths, and clearer ESM/local-build
+instructions.
 
-Follow-up reviewers confirmed those code/documentation findings were closed.
-Public distribution remains intentionally blocked on external signing,
-notarization, publication, and installer work.
+Follow-up architecture, release, security, and external-developer reviewers
+confirmed all credible release-relevant findings were closed. The final
+security re-review found no remaining P0/P1/P2 issue under the documented
+same-UID trust boundary. Public distribution remains intentionally blocked on
+external signing, notarization, publication, and installer work.
 
 ## 20. Known limitations
 
@@ -259,14 +279,19 @@ Runtime 1.0 started from v0.9 checkpoint
 `f6c2817cb762759b3f4b5aef4fea7fc5719e2dfb`.
 
 - `684c1c7` — scope and release plan;
-- `0b972cc` — promote and harden the 1.0 public surface.
+- `0b972cc` — promote and harden the 1.0 public surface;
+- `f668e53` — add 1.0 release records;
+- `170dedd` — anchor copied artifacts and harden state creation;
+- `43dc343` — close final state/artifact verification race windows.
 
-Final documentation and release-gate checkpoint commits are appended after
-they exist.
+The commit containing this report and `AUTONOMOUS_RUNTIME_HANDOFF.md` is a
+documentation-only release record after the tested implementation checkpoint.
 
 ## 25. Final HEAD
 
-Pending the clean automated release-gate checkpoint.
+The exact implementation/source revision exercised by the final clean release
+gate is `43dc3433d6de780f97a924a30647eb802faf939c`. The final report/handoff commit
+contains no Runtime, SDK, protocol, build, test, or packaging behavior change.
 
 ## 26. Exact quickstart
 

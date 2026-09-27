@@ -1,5 +1,29 @@
 # Sonexis Runtime benchmarks
 
+## 1.0 release-candidate gate
+
+The definitive automated 1.0 gate ran on 2026-09-27 against committed source
+`43dc3433d6de780f97a924a30647eb802faf939c` on the Apple M4/macOS 27.0 host.
+The audio data planes are unchanged from the v0.8 measurements below; this run
+is release qualification rather than a new throughput claim.
+
+The optimized stress executable completed 1,000 capture cycles, 1,000 output
+cycles, 100 framed PCM burst cycles, 200 control connections, and 16 parallel
+sessions in 1.525 seconds. Descriptor growth was two while deferred shutdown
+resources remained in scope. Current RSS moved from 6,651,904 to 12,877,824
+bytes (6,225,920 bytes retained), and peak RSS was 12,926,976 bytes.
+
+The same workload under Thread Sanitizer completed in 4.083 seconds with two
+in-scope descriptors. Current RSS moved from 53,641,216 to 94,846,976 bytes
+(41,205,760 bytes retained), and peak RSS was 94,928,896 bytes. The concurrent
+output-ring flush/read/write test and focused application lifecycle/graph tests
+also passed under TSan.
+
+These are deterministic lifecycle/resource bounds, not live HAL latency or an
+hours-long physical-device soak. Live Process Tap, output-device, loopback, and
+provider timing remain the explicit manual matrix in
+`runtime-v1.0-manual-validation.md`.
+
 ## v0.8 reliability checkpoint
 
 The v0.8 offline benchmark set was rerun on 2026-09-27 on the Apple M4/macOS
