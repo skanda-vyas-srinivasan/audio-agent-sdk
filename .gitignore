@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.pcm
+*.raw
+*.wav
+SDKs/python/.venv/
+SDKs/typescript/node_modules/
+SDKs/typescript/dist/
+SDKs/typescript/dist-test/

@@ -1,0 +1,296 @@
+import CoreAudio
+import Foundation
+
+private func tapDebugLog(_ message: @autoclosure () -> String) {
+    guard ProcessInfo.processInfo.environment["SONEXIS_AUDIO_DEBUG"] == "1" else { return }
+    print(message())
+}
+
+private func tapInputIOProc(
+    _ inDevice: AudioObjectID,
+    _ inNow: UnsafePointer<AudioTimeStamp>,
+    _ inInputData: UnsafePointer<AudioBufferList>,
+    _ inInputTime: UnsafePointer<AudioTimeStamp>,
+    _ outOutputData: UnsafeMutablePointer<AudioBufferList>,
+    _ inOutputTime: UnsafePointer<AudioTimeStamp>,
+    _ inClientData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let inClientData else { return noErr }
+    let engine = Unmanaged<TapCaptureEngine>
+        .fromOpaque(inClientData)
+        .takeUnretainedValue()
+    engine.captureCallback(inputData: inInputData)
+    return noErr
+}
+
+public struct TapCaptureConfiguration {
+    public let sourceDevice: AudioDeviceSummary
+    public let tapFormat: AudioStreamBasicDescription
+
+    public init(sourceDevice: AudioDeviceSummary, tapFormat: AudioStreamBasicDescription) {
+        self.sourceDevice = sourceDevice
+        self.tapFormat = tapFormat
+    }
+}
+
+public final class TapCaptureEngine {
+    private let lifecycleQueue: DispatchQueue
+    public init(lifecycleQueue: DispatchQueue = .main) { self.lifecycleQueue = lifecycleQueue }
+
+    public var processSelectionDidChange: (() -> Void)?
+    private var captureTarget: AudioCaptureTarget?
+    private var ownProcessID: AudioObjectID = kAudioObjectUnknown
+    private var processRefreshTimer: DispatchSourceTimer?
+    private var selectedProcessIDs: [AudioObjectID] = []
+    private var lastRefreshError: String?
+    private var tapID: AudioObjectID = kAudioObjectUnknown
+    private var aggregateDeviceID: AudioDeviceID = kAudioObjectUnknown
+    private var ioProcID: AudioDeviceIOProcID?
+    private var callbackRetainActive = false
+    private var ringBuffer: RealtimeRingBuffer?
+
+    public private(set) var sourceDevice: AudioDeviceSummary?
+    public private(set) var tapFormat: AudioStreamBasicDescription?
+
+    public func prepare(
+        sourceDevice defaultOutput: AudioDeviceSummary,
+        outputStreamFormat: AudioStreamBasicDescription? = nil,
+        ownProcessObjectID: AudioObjectID,
+        captureTarget: AudioCaptureTarget? = nil,
+        fixedSelection: ProcessTapSelection? = nil,
+        muteBehavior: CATapMuteBehavior = CATapMuteBehavior(rawValue: 2)!
+    ) throws -> TapCaptureConfiguration {
+        self.ownProcessID = ownProcessObjectID
+        self.captureTarget = captureTarget
+        let selectedIDs = try fixedSelection?.safeProcessIDs(ownProcessID: ownProcessObjectID)
+            ?? captureTarget?.processObjectIDs(excluding: ownProcessObjectID) ?? [ownProcessObjectID]
+        let isExclusive = fixedSelection?.isExclusive ?? (captureTarget == nil)
+        let tapDescription = Self.makeDescription(sourceDeviceUID: defaultOutput.uid,
+            ownProcessID: ownProcessObjectID, selectedProcesses: isExclusive ? nil : selectedIDs)
+        if fixedSelection != nil {
+            tapDescription.isExclusive = isExclusive
+            tapDescription.processes = selectedIDs
+        }
+        selectedProcessIDs = selectedIDs
+        tapDescription.name = "ProcessTapDSP System Output Tap"
+        tapDescription.isPrivate = true
+        tapDescription.muteBehavior = muteBehavior
+
+        var createdTapID = kAudioObjectUnknown
+        try checkOSStatus(
+            AudioHardwareCreateProcessTap(tapDescription, &createdTapID),
+            operation: "AudioHardwareCreateProcessTap"
+        )
+        tapID = createdTapID
+        tapDebugLog("Created process tap: AudioObjectID \(tapID)")
+
+        let installedTapDescription = try CoreAudioSupport.tapDescription(tapID)
+        guard installedTapDescription.isExclusive == isExclusive,
+              Set(installedTapDescription.processes) == Set(selectedIDs),
+              isExclusive || !installedTapDescription.processes.contains(ownProcessObjectID) else {
+            throw SonexisError(
+                message: "Process tap self-exclusion verification failed. Refusing to start playback to avoid recursive capture."
+            )
+        }
+        guard installedTapDescription.deviceUID == defaultOutput.uid else {
+            throw SonexisError(
+                message: "Process tap source UID mismatch. Expected \(defaultOutput.uid), got \(installedTapDescription.deviceUID ?? "nil")."
+            )
+        }
+        tapDebugLog("Verified tap source selection excludes Sonexis playback.")
+        tapDebugLog("Tap source device: \(defaultOutput)")
+
+        let createdTapFormat = try CoreAudioSupport.tapFormat(tapID)
+        tapDebugLog("Tap format: \(createdTapFormat.formatSummary)")
+        if let outputStreamFormat {
+            guard createdTapFormat.isPlaybackCompatible(with: outputStreamFormat) else {
+                throw SonexisError(
+                    message: "Sonexis requires matching Float32 tap/output formats and does not perform sample-rate conversion. Tap: \(createdTapFormat.formatSummary). Output: \(outputStreamFormat.formatSummary)"
+                )
+            }
+        }
+
+        let tapUID = try CoreAudioSupport.tapUID(tapID)
+        aggregateDeviceID = try createPrivateAggregateDevice(tapUID: tapUID)
+        tapDebugLog("Created private aggregate device: AudioDeviceID \(aggregateDeviceID)")
+
+        sourceDevice = defaultOutput
+        tapFormat = createdTapFormat
+
+        let timer = DispatchSource.makeTimerSource(queue: lifecycleQueue)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in
+            guard let self, fixedSelection == nil, self.captureTarget != nil else { return }
+            do {
+                let ids = try self.captureTarget?.processObjectIDs(excluding: self.ownProcessID) ?? []
+                if ids != self.selectedProcessIDs { self.processSelectionDidChange?() }
+                self.lastRefreshError = nil
+            } catch {
+                let message = String(describing: error)
+                if self.lastRefreshError != message {
+                    tapDebugLog("Audio source refresh failed: \(message)")
+                }
+                self.lastRefreshError = message
+            }
+        }
+
+        processRefreshTimer = timer
+        timer.resume()
+
+        return TapCaptureConfiguration(
+            sourceDevice: defaultOutput,
+            tapFormat: createdTapFormat
+        )
+    }
+
+    // nil means all audio; an empty list means a selected app has no audio
+    // processes. Never turn that empty selection into a global tap.
+    public static func configureSelection(_ description: CATapDescription,
+                                   selectedProcesses: [AudioObjectID]?, ownProcessID: AudioObjectID) {
+        description.isExclusive = selectedProcesses == nil
+        description.processes = selectedProcesses.map {
+            Array(Set($0.filter { $0 != ownProcessID && $0 != kAudioObjectUnknown })).sorted()
+        } ?? [ownProcessID]
+    }
+
+    public static func makeDescription(sourceDeviceUID: String, ownProcessID: AudioObjectID,
+                                selectedProcesses: [AudioObjectID]?) -> CATapDescription {
+        let description: CATapDescription
+        if let selectedProcesses {
+            description = CATapDescription(processes: selectedProcesses.filter { $0 != ownProcessID },
+                                           deviceUID: sourceDeviceUID, stream: 0)
+        } else {
+            description = CATapDescription(excludingProcesses: [ownProcessID],
+                                           deviceUID: sourceDeviceUID, stream: 0)
+        }
+        configureSelection(description, selectedProcesses: selectedProcesses, ownProcessID: ownProcessID)
+        return description
+    }
+
+    public func createIOProc(ringBuffer: RealtimeRingBuffer) throws {
+        // The HAL owns one retain until IOProc destruction succeeds. If Core
+        // Audio refuses teardown, leaking this small capture owner is safer than
+        // allowing a late realtime callback to dereference freed Swift objects.
+        let retainedSelf = Unmanaged.passRetained(self)
+        let clientData = retainedSelf.toOpaque()
+
+        var createdIOProcID: AudioDeviceIOProcID?
+        let status = AudioDeviceCreateIOProcID(
+            aggregateDeviceID,
+            tapInputIOProc,
+            clientData,
+            &createdIOProcID
+        )
+        guard status == noErr else {
+            retainedSelf.release()
+            try checkOSStatus(status, operation: "Create tap aggregate IOProc")
+            return
+        }
+
+        guard let createdIOProcID else {
+            retainedSelf.release()
+            throw SonexisError(message: "Create tap aggregate IOProc returned nil IOProcID")
+        }
+
+        self.ringBuffer = ringBuffer
+        ioProcID = createdIOProcID
+        callbackRetainActive = true
+    }
+
+    public func start() throws {
+        guard let ioProcID else {
+            throw SonexisError(message: "Tap aggregate IOProc was not created")
+        }
+
+        try checkOSStatus(
+            AudioDeviceStart(aggregateDeviceID, ioProcID),
+            operation: "Start tap aggregate IOProc"
+        )
+    }
+
+    public func stop(log: Bool) {
+        if aggregateDeviceID != kAudioObjectUnknown, let ioProcID {
+            let status = AudioDeviceStop(aggregateDeviceID, ioProcID)
+            if log { printCleanupResult("stopped tap aggregate IOProc", status: status) }
+        } else if log {
+            print("Cleanup: no tap aggregate IOProc to stop.")
+        }
+    }
+
+    @discardableResult
+    public func destroyIOProc(log: Bool) -> Bool {
+        if aggregateDeviceID != kAudioObjectUnknown, let ioProcID {
+            let status = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+            if log { printCleanupResult("destroyed tap aggregate IOProc ID", status: status) }
+            guard status == noErr else { return false }
+            self.ioProcID = nil
+            ringBuffer = nil
+            if callbackRetainActive {
+                callbackRetainActive = false
+                Unmanaged.passUnretained(self).release()
+            }
+        } else if log {
+            print("Cleanup: no tap aggregate IOProc ID to destroy.")
+        }
+        return true
+    }
+
+    public func destroyAggregateDevice(log: Bool) {
+        if aggregateDeviceID != kAudioObjectUnknown {
+            let status = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            if log { printCleanupResult("destroyed private aggregate device", status: status) }
+            aggregateDeviceID = kAudioObjectUnknown
+        } else if log {
+            print("Cleanup: no private aggregate device to destroy.")
+        }
+    }
+
+    public func destroyTap(log: Bool) {
+        processRefreshTimer?.cancel()
+        processRefreshTimer = nil
+        if tapID != kAudioObjectUnknown {
+            let status = AudioHardwareDestroyProcessTap(tapID)
+            if log { printCleanupResult("destroyed Process Tap", status: status) }
+            tapID = kAudioObjectUnknown
+        } else if log {
+            print("Cleanup: no Process Tap to destroy.")
+        }
+    }
+
+    @discardableResult
+    public func teardown(log: Bool) -> Bool {
+        stop(log: log)
+        guard destroyIOProc(log: log) else { return false }
+        destroyAggregateDevice(log: log)
+        destroyTap(log: log)
+        sourceDevice = nil
+        tapFormat = nil
+        return true
+    }
+
+    fileprivate func captureCallback(inputData: UnsafePointer<AudioBufferList>) {
+        _ = ringBuffer?.write(inputData: inputData)
+    }
+
+    private func createPrivateAggregateDevice(tapUID: String) throws -> AudioDeviceID {
+        let aggregateUID = "com.sonexis.runtime.ProcessTapDSP.aggregate.\(UUID().uuidString)"
+        let tapEntry: [String: Any] = [
+            kAudioSubTapUIDKey: tapUID,
+            kAudioSubTapDriftCompensationKey: true
+        ]
+        let aggregateDescription: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "ProcessTapDSP Private Aggregate",
+            kAudioAggregateDeviceUIDKey: aggregateUID,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceTapListKey: [tapEntry],
+            kAudioAggregateDeviceTapAutoStartKey: true
+        ]
+
+        var deviceID = kAudioObjectUnknown
+        try checkOSStatus(
+            AudioHardwareCreateAggregateDevice(aggregateDescription as CFDictionary, &deviceID),
+            operation: "AudioHardwareCreateAggregateDevice"
+        )
+        return deviceID
+    }
+}

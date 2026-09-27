@@ -1,0 +1,4 @@
+module SonexisAudioEngineC {
+    header "RealtimeAudioRing.h"
+    export *
+}
