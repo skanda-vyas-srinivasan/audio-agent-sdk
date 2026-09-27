@@ -16,6 +16,7 @@ PCM_HEADER = struct.Struct(">IHHII16sQQIIHHI")
 FLAG_DISCONTINUITY = 1
 FLAG_EOS = 2
 KNOWN_FLAGS = FLAG_DISCONTINUITY | FLAG_EOS
+FORMAT_CODES = {SampleFormat.PCM_S16LE: 1, SampleFormat.FLOAT32_LE: 2}
 
 
 async def read_frame(
@@ -42,7 +43,7 @@ async def read_frame(
             raise SonexisProtocolError("invalid_pcm_sequence", "PCM sequence did not advance")
         if sequence != previous_sequence + 1 and not flags & FLAG_DISCONTINUITY:
             raise SonexisProtocolError("unmarked_pcm_gap", "PCM sequence gap lacks discontinuity")
-    formats = {1: SampleFormat.PCM_S16LE, 2: SampleFormat.FLOAT32_LE}
+    formats = {code: sample_format for sample_format, code in FORMAT_CODES.items()}
     if format_code not in formats:
         raise SonexisProtocolError("invalid_pcm_header", "Unknown PCM sample format")
     sample_format = formats[format_code]
@@ -67,3 +68,38 @@ async def read_frame(
                       data=payload,
                       discontinuity=bool(flags & FLAG_DISCONTINUITY),
                       dropped_frames_before=dropped_before)
+
+
+def encode_frame_header(
+    *,
+    stream_id: uuid.UUID,
+    sequence: int,
+    timestamp_ns: int,
+    format: AudioFormat,
+    frame_count: int,
+    payload_size: int,
+    discontinuity: bool = False,
+    eos: bool = False,
+) -> bytes:
+    """Encode the shared v2 PCM header for a client-to-Runtime packet."""
+    if sequence < 0 or timestamp_ns < 0:
+        raise ValueError("sequence and timestamp_ns must be non-negative")
+    if eos:
+        if payload_size or frame_count:
+            raise ValueError("EOS packets cannot contain audio")
+        sample_rate = 0
+        channels = 0
+    else:
+        if format.sample_rate <= 0 or format.channels <= 0 or frame_count <= 0:
+            raise ValueError("audio packets require a positive format and frame count")
+        expected_size = frame_count * format.channels * format.sample_format.bytes_per_sample
+        if payload_size != expected_size or payload_size > MAX_PCM_BYTES:
+            raise ValueError("PCM payload and frame count are inconsistent")
+        sample_rate = format.sample_rate
+        channels = format.channels
+    flags = (FLAG_DISCONTINUITY if discontinuity else 0) | (FLAG_EOS if eos else 0)
+    return PCM_HEADER.pack(
+        PCM_MAGIC, PROTOCOL_VERSION, flags, PCM_HEADER.size, payload_size,
+        stream_id.bytes, sequence, timestamp_ns, sample_rate, frame_count,
+        channels, FORMAT_CODES[format.sample_format], 0,
+    )

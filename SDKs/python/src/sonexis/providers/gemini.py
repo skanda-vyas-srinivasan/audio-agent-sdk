@@ -262,7 +262,10 @@ class GeminiLiveSink:
                 event_type = "output_transcription" if isinstance(text, str) else "message"
                 yield ProviderEvent("gemini", event_type,
                                     text=text if isinstance(text, str) else None,
-                                    audio=b"".join(audio_parts) or None, raw=value)
+                                    audio=b"".join(audio_parts) or None,
+                                    audio_format=(AudioFormat.gemini_live_output()
+                                                  if audio_parts else None),
+                                    raw=value)
         except asyncio.CancelledError:
             raise
         except GeneratorExit:

@@ -319,7 +319,15 @@ public final class RuntimeEventHub: @unchecked Sendable {
 
     public func subscribe(ownerID: String, eventTypes: [RuntimeEventTypeDTO]?) throws -> RuntimeEventSubscriptionDTO {
         let id = UUID().uuidString.lowercased()
-        let selected = Set(eventTypes ?? RuntimeEventTypeDTO.allCases)
+        // Protocol-v2 clients from v0.3 cannot decode output event enum values.
+        // Preserve the original wildcard set and require v0.4 clients to opt in
+        // to output events explicitly.
+        let legacyDefaults: [RuntimeEventTypeDTO] = [
+            .sourceAdded, .sourceRemoved, .sourceUpdated, .captureStarted,
+            .captureStopped, .captureFailed, .clientWarning, .deviceChanged,
+            .runtimeWarning, .runtimeShuttingDown,
+        ]
+        let selected = Set(eventTypes ?? legacyDefaults)
         guard !selected.isEmpty else {
             throw RuntimeErrorDTO(code: "invalid_event_filter", message: "At least one event type is required")
         }

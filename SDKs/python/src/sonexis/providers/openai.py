@@ -164,7 +164,10 @@ class OpenAIRealtimeSink:
             except ValueError:
                 pass
         return ProviderEvent("openai", event_type, text=text if isinstance(text, str) else None,
-                             audio=audio, raw=value)
+                             audio=audio,
+                             audio_format=(AudioFormat.openai_realtime_output()
+                                           if audio is not None else None),
+                             raw=value)
 
     async def aclose(self) -> None:
         if self._close_task is None:

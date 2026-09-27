@@ -60,8 +60,85 @@ private final class FakeBackend: RuntimeCaptureBackend, @unchecked Sendable {
     }
 }
 
+private final class FakeOutputSession: RuntimeBackendOutputSession, @unchecked Sendable {
+    let inputFormat: RuntimePCMFormatDTO
+    let destination: RuntimeOutputDestinationDTO
+    private let lock = NSLock()
+    private let onEnded: @Sendable (RuntimeErrorDTO?) -> Void
+    private var frames: UInt64 = 0
+    private var writes: UInt64 = 0
+    private var flushed: UInt64 = 0
+    private var ended = false
+
+    init(format: RuntimePCMFormatDTO,
+         onEnded: @escaping @Sendable (RuntimeErrorDTO?) -> Void) {
+        inputFormat = format
+        destination = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+            name: "Synthetic Output", isAvailable: true, isDefault: true,
+            followsSystemDefault: true)
+        self.onEnded = onEnded
+    }
+
+    func write(_ frame: RuntimePCMFrame) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !ended else {
+            throw RuntimeErrorDTO(code: "output_not_writable", message: "Synthetic output ended")
+        }
+        frames &+= UInt64(frame.header.frameCount)
+        writes &+= 1
+    }
+
+    func finish() {
+        lock.lock()
+        guard !ended else { lock.unlock(); return }
+        ended = true
+        lock.unlock()
+        onEnded(nil)
+    }
+
+    func flush() throws {
+        lock.lock()
+        flushed &+= frames
+        frames = 0
+        lock.unlock()
+    }
+
+    func stop() {
+        lock.lock(); ended = true; lock.unlock()
+    }
+
+    func metrics() -> RuntimeOutputMetricsDTO {
+        lock.lock(); defer { lock.unlock() }
+        return RuntimeOutputMetricsDTO(deviceFramesEnqueued: frames,
+            deviceFramesRendered: frames, flushedFrames: flushed,
+            queueHighWaterFrames: UInt32(clamping: frames),
+            targetBufferMilliseconds: 60, conversionBatches: writes)
+    }
+}
+
+private final class FakeOutputBackend: RuntimeOutputBackend, @unchecked Sendable {
+    func availableOutputDestinations() throws -> [RuntimeOutputDestinationDTO] {
+        [RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+            name: "Synthetic Output", isAvailable: true, isDefault: true,
+            followsSystemDefault: true)]
+    }
+
+    func startOutput(destinationID: String, format: RuntimePCMFormatDTO,
+                     targetBufferMilliseconds: UInt32,
+                     onEvent: @escaping @Sendable (RuntimeOutputBackendEvent) -> Void,
+                     onEnded: @escaping @Sendable (RuntimeErrorDTO?) -> Void)
+        throws -> RuntimeBackendOutputSession {
+        guard destinationID == "default" else {
+            throw RuntimeErrorDTO(code: "output_destination_unavailable",
+                message: "Unknown synthetic output")
+        }
+        return FakeOutputSession(format: format, onEnded: onEnded)
+    }
+}
+
 let directory = URL(fileURLWithPath: "/tmp/sxr-\(UUID().uuidString)", isDirectory: true)
-let server = SonexisRuntimeServer(socketDirectory: directory, backend: FakeBackend())
+let server = SonexisRuntimeServer(socketDirectory: directory, backend: FakeBackend(),
+    outputBackend: FakeOutputBackend())
 
 do {
     try server.start()
@@ -74,6 +151,8 @@ do {
     expect(client.handshake?.protocolVersion == 2, "protocol v2 handshake failed")
     expect(client.handshake?.capabilities.contains("event_stream") == true,
            "handshake did not advertise events")
+    expect(client.handshake?.capabilities.contains("output_sessions") == true,
+           "handshake did not advertise output")
     let sources = try client.listSources()
     expect(sources.map(\.id) == ["app.test.audio"], "source enumeration failed")
 
@@ -231,7 +310,7 @@ do {
     for item in cappedSubscriptions { try client.unsubscribeEvents(id: item.id) }
 
     let runtimeStatus = try client.runtimeStatus()
-    expect(runtimeStatus.runtimeVersion == "0.3.0", "runtime status omitted version")
+    expect(runtimeStatus.runtimeVersion == "0.4.0", "runtime status omitted version")
     expect(runtimeStatus.totalSessionsStarted >= 10, "runtime session counter did not advance")
 
     let firstTerminal = try client.startCapture(sourceID: sources[0].id)
@@ -299,6 +378,81 @@ do {
     expect(sharedStop.state == .stopped,
            "same-user session stop was not shared")
     secondClient.disconnect()
+
+    let destinations = try client.listOutputDestinations()
+    expect(destinations.map(\.id) == ["default"], "output destinations were not listed")
+    let output = try client.startOutput(destinationID: "default",
+        format: RuntimePCMFormatDTO(sampleRate: 24_000, channelCount: 1),
+        targetBufferMilliseconds: 80)
+    expect(output.state == .ready && output.streamID != output.id,
+           "output session did not become ready")
+    let outputWriter = try client.outputWriter(session: output)
+    try outputWriter.write(Data(repeating: 1, count: 4_800))
+    try outputWriter.finish()
+    var drained = false
+    for _ in 0..<100 where !drained {
+        usleep(5_000)
+        let status = try client.outputStatus(outputSessionID: output.id)
+        drained = status.state == .stopped
+        if drained {
+            expect(status.metrics.inputFramesReceived == 2_400,
+                   "output input-frame metrics were wrong")
+            expect(status.metrics.deviceFramesRendered == 2_400,
+                   "synthetic rendered-frame metrics were wrong")
+        }
+    }
+    expect(drained, "output EOS did not drain and stop")
+
+    let flushable = try client.startOutput(destinationID: "default")
+    let staleWriter = try client.outputWriter(session: flushable)
+    try staleWriter.write(Data(repeating: 2, count: 320))
+    let flushed = try client.flushOutput(outputSessionID: flushable.id)
+    expect(flushed.streamID != flushable.streamID,
+           "flush did not rotate the output stream epoch")
+    staleWriter.cancel()
+    let currentWriter = try client.outputWriter(session: flushed)
+    try currentWriter.write(Data(repeating: 3, count: 320), discontinuity: true)
+    currentWriter.cancel()
+    let cancelled = try client.stopOutput(outputSessionID: flushed.id)
+    expect(cancelled.state == .cancelled, "output stop did not cancel buffered playback")
+    let cancelledAgain = try client.stopOutput(outputSessionID: flushed.id)
+    expect(cancelledAgain.state == .cancelled, "duplicate output stop was not idempotent")
+
+    let abandonedOutputClient = SonexisRuntimeClient(controlSocketPath: server.paths.controlSocketPath)
+    try abandonedOutputClient.connect()
+    let abandonedOutput = try abandonedOutputClient.startOutput()
+    abandonedOutputClient.disconnect()
+    var abandonedOutputCleaned = false
+    for _ in 0..<50 where !abandonedOutputCleaned {
+        usleep(10_000)
+        do { _ = try client.outputStatus(outputSessionID: abandonedOutput.id) }
+        catch let error as RuntimeErrorDTO where error.code == "output_session_not_found" {
+            abandonedOutputCleaned = true
+        }
+    }
+    expect(abandonedOutputCleaned, "control disconnect did not clean output ownership")
+
+    let malformedOutput = try client.startOutput()
+    let malformedConnection = try UnixSocketSystem.connect(path: malformedOutput.dataSocketPath)
+    let wrongFormatPayload = Data(repeating: 0, count: 320)
+    let wrongFormatHeader = RuntimePCMFrameHeader(payloadByteCount: 320,
+        streamID: UUID(uuidString: malformedOutput.streamID)!, sequence: 0,
+        timestampNanoseconds: 0, sampleRate: 24_000, frameCount: 160,
+        channelCount: 1)
+    try malformedConnection.write(RuntimePCMFrameCodec.encode(
+        header: wrongFormatHeader, payload: wrongFormatPayload))
+    malformedConnection.close()
+    var malformedFailed = false
+    for _ in 0..<50 where !malformedFailed {
+        usleep(10_000)
+        let value = try client.outputStatus(outputSessionID: malformedOutput.id)
+        malformedFailed = value.state == .failed && value.error?.code == "output_format_mismatch"
+    }
+    expect(malformedFailed, "malformed output did not fail only its session")
+
+    let outputRuntimeStatus = try client.runtimeStatus()
+    expect((outputRuntimeStatus.totalOutputSessionsStarted ?? 0) >= 4,
+           "runtime output diagnostics did not advance")
 
     let eventPressurePath = directory.appendingPathComponent("event-pressure.sock").path
     let eventPressure = RuntimeEventPlane(path: eventPressurePath)

@@ -32,9 +32,14 @@ uint32_t SonexisAudioRingBufferReadInterleaved(
     uint32_t frames
 );
 
+/// Discards all currently readable frames. The caller should gate reads while
+/// flushing when an exact barge-in boundary is required.
+uint32_t SonexisAudioRingBufferFlush(SonexisAudioRingBuffer *ringBuffer);
+
 void SonexisAudioRingBufferSetReadEnabled(SonexisAudioRingBuffer *ringBuffer, bool enabled);
 void SonexisAudioRingBufferSetTargetFillFrames(SonexisAudioRingBuffer *ringBuffer, uint32_t targetFillFrames);
 uint32_t SonexisAudioRingBufferGetFillFrames(SonexisAudioRingBuffer *ringBuffer);
+uint32_t SonexisAudioRingBufferGetWritableFrames(SonexisAudioRingBuffer *ringBuffer);
 uint64_t SonexisAudioRingBufferGetDroppedFrames(SonexisAudioRingBuffer *ringBuffer);
 uint64_t SonexisAudioRingBufferGetUnderflowFrames(SonexisAudioRingBuffer *ringBuffer);
 uint64_t SonexisAudioRingBufferGetWrittenFrames(SonexisAudioRingBuffer *ringBuffer);

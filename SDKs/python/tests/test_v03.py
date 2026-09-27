@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import importlib.util
 import io
@@ -395,6 +396,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             output_transcription=SimpleNamespace(text="hello"), model_turn=None)))
         event = await sink.events().__anext__()
         self.assertEqual((event.type, event.text), ("output_transcription", "hello"))
+        self.assertIsNone(event.audio_format)
         await sink.aclose()
         self.assertTrue(session.values[-1]["audio_stream_end"])
 
@@ -490,6 +492,25 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.text, "A concise English response.")
         self.assertEqual(debug, ["Gemini response start", "Gemini turn complete"])
         await sink.aclose()
+
+    async def test_provider_output_audio_declares_playback_format(self):
+        gemini_session = FakeGeminiSession()
+        gemini_session.received.append(SimpleNamespace(server_content=SimpleNamespace(
+            output_transcription=None,
+            model_turn=SimpleNamespace(parts=[SimpleNamespace(inline_data=SimpleNamespace(
+                data=b"gemini", mime_type="audio/pcm"))]),
+            turn_complete=False)))
+        gemini = GeminiLiveSink(gemini_session, blob_factory=lambda **value: value)
+        gemini_event = await gemini.events().__anext__()
+        self.assertEqual(gemini_event.audio, b"gemini")
+        self.assertEqual(gemini_event.audio_format, AudioFormat.gemini_live_output())
+        await gemini.aclose()
+
+        openai_event = OpenAIRealtimeSink._event(SimpleNamespace(
+            type="session.output_audio.delta",
+            delta=base64.b64encode(b"openai").decode("ascii")))
+        self.assertEqual(openai_event.audio, b"openai")
+        self.assertEqual(openai_event.audio_format, AudioFormat.openai_realtime_output())
 
     async def test_provider_stream_affinity_and_bounded_close(self):
         connection = FakeOpenAIConnection()

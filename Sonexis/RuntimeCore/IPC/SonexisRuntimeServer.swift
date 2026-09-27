@@ -36,6 +36,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     public let limits: RuntimeResourceLimitsDTO
     public let runtimeInstanceID = UUID().uuidString.lowercased()
     private let coordinator: RuntimeSessionCoordinator
+    private let outputCoordinator: RuntimeOutputCoordinator
     private let eventHub: RuntimeEventHub
     private let acceptQueue = DispatchQueue(label: "com.sonexis.runtime.control.accept")
     private let clientQueue = DispatchQueue(label: "com.sonexis.runtime.control.clients", attributes: .concurrent)
@@ -49,18 +50,24 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     private var generation: UInt64 = 0
 
     public init(socketDirectory: URL = RuntimeSocketPaths.userDefault.directory,
-                backend: RuntimeCaptureBackend, limits: RuntimeResourceLimitsDTO = .init()) {
+                backend: RuntimeCaptureBackend,
+                outputBackend: RuntimeOutputBackend = UnavailableRuntimeOutputBackend(),
+                limits: RuntimeResourceLimitsDTO = .init()) {
         paths = RuntimeSocketPaths(directory: socketDirectory)
         self.limits = limits
         let hub = RuntimeEventHub(directory: socketDirectory, limits: limits)
         eventHub = hub
         coordinator = RuntimeSessionCoordinator(backend: backend, socketDirectory: socketDirectory,
             limits: limits, eventHandler: { event in hub.publish(event) })
+        outputCoordinator = RuntimeOutputCoordinator(backend: outputBackend,
+            socketDirectory: socketDirectory, limits: limits,
+            eventHandler: { event in hub.publish(event) })
     }
 
     public func start() throws {
         try paths.prepareDirectory()
         coordinator.resume()
+        outputCoordinator.resume()
         stateLock.lock()
         guard listener == nil else { stateLock.unlock(); return }
         let newListener = UnixSocketListener(path: paths.controlSocketPath, queue: acceptQueue)
@@ -84,6 +91,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
 
     public func stop() {
         coordinator.prepareForShutdown()
+        outputCoordinator.prepareForShutdown()
         monitorQueue.sync {
             sourceTimer?.setEventHandler {}
             sourceTimer?.cancel()
@@ -91,6 +99,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             sourceSnapshot.removeAll()
         }
         coordinator.stopAll()
+        outputCoordinator.stopAll()
         eventHub.publish(RuntimeEventDTO(type: .runtimeShuttingDown, message: "Runtime is shutting down"))
         stateLock.lock()
         let oldListener = listener
@@ -131,6 +140,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     private func serve(connection: UnixSocketConnection, ownerID: String) {
         defer {
             coordinator.stopSessions(ownerID: ownerID)
+            outputCoordinator.stopSessions(ownerID: ownerID)
             eventHub.removeSubscriptions(ownerID: ownerID)
             stateLock.lock(); clients.removeValue(forKey: ownerID); stateLock.unlock()
             connection.close()
@@ -231,6 +241,32 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 }
                 try eventHub.unsubscribe(id: subscriptionID, ownerID: ownerID)
                 return RuntimeResponse(requestID: command.requestID, message: "unsubscribed")
+            case .listOutputDestinations:
+                return RuntimeResponse(requestID: command.requestID,
+                    outputDestinations: try outputCoordinator.availableDestinations())
+            case .startOutput:
+                guard let destinationID = command.destinationID else {
+                    throw RuntimeErrorDTO(code: "missing_output_destination",
+                        message: "start_output requires destination_id")
+                }
+                return RuntimeResponse(requestID: command.requestID,
+                    outputSession: try outputCoordinator.startOutput(
+                        destinationID: destinationID,
+                        format: command.format ?? .runtimeDefault,
+                        targetBufferMilliseconds: command.targetBufferMilliseconds ?? 60,
+                        ownerID: ownerID))
+            case .outputStatus:
+                return RuntimeResponse(requestID: command.requestID,
+                    outputSession: try outputCoordinator.session(
+                        outputSessionID: try requiredOutputSessionID(command), ownerID: ownerID))
+            case .flushOutput:
+                return RuntimeResponse(requestID: command.requestID,
+                    outputSession: try outputCoordinator.flush(
+                        outputSessionID: try requiredOutputSessionID(command), ownerID: ownerID))
+            case .stopOutput:
+                return RuntimeResponse(requestID: command.requestID,
+                    outputSession: try outputCoordinator.stopOutput(
+                        outputSessionID: try requiredOutputSessionID(command), ownerID: ownerID))
             case .ping:
                 return RuntimeResponse(requestID: command.requestID, message: "pong")
             case .unknown:
@@ -253,8 +289,18 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         return sessionID
     }
 
+    private func requiredOutputSessionID(_ command: RuntimeCommand) throws -> String {
+        guard let sessionID = command.outputSessionID, !sessionID.isEmpty,
+              sessionID.utf8.count <= 128 else {
+            throw RuntimeErrorDTO(code: "missing_output_session_id",
+                message: "A valid output_session_id is required")
+        }
+        return sessionID
+    }
+
     private func runtimeStatus() -> RuntimeStatusDTO {
         let metrics = coordinator.diagnostics()
+        let outputMetrics = outputCoordinator.diagnostics()
         stateLock.lock()
         let clientCount = clients.count
         stateLock.unlock()
@@ -264,7 +310,13 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             activeClients: clientCount, activeSessions: metrics.activeSessions,
             eventSubscribers: eventHub.count, totalSessionsStarted: metrics.totalSessionsStarted,
             totalFramesForwarded: metrics.frames, totalDroppedFrames: metrics.dropped,
-            totalBytesTransmitted: metrics.bytes, totalEventsDropped: eventHub.totalDroppedEvents)
+            totalBytesTransmitted: metrics.bytes, totalEventsDropped: eventHub.totalDroppedEvents,
+            activeOutputSessions: outputMetrics.activeSessions,
+            totalOutputSessionsStarted: outputMetrics.totalSessionsStarted,
+            totalOutputFramesReceived: outputMetrics.received,
+            totalOutputFramesRendered: outputMetrics.rendered,
+            totalOutputFramesDropped: outputMetrics.dropped,
+            totalOutputBytesReceived: outputMetrics.bytes)
     }
 
     private func startSourceMonitor(generation expectedGeneration: UInt64) {

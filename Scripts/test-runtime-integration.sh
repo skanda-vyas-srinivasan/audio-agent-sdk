@@ -19,6 +19,8 @@ xcrun swiftc \
     "$ROOT_DIR/Sonexis/RuntimeCore/IPC/UnixDomainSocket.swift" \
     "$ROOT_DIR/Sonexis/RuntimeCore/IPC/RuntimeDataPlane.swift" \
     "$ROOT_DIR/Sonexis/RuntimeCore/IPC/RuntimeCaptureBackend.swift" \
+    "$ROOT_DIR/Sonexis/RuntimeCore/IPC/RuntimeOutputDataPlane.swift" \
+    "$ROOT_DIR/Sonexis/RuntimeCore/IPC/RuntimeOutputBackend.swift" \
     "$ROOT_DIR/Sonexis/RuntimeCore/IPC/SonexisRuntimeServer.swift" \
     "$ROOT_DIR/Sonexis/RuntimeCore/IPC/SonexisRuntimeClient.swift" \
     "$ROOT_DIR/Tests/RuntimeIntegration/main.swift" \

@@ -152,6 +152,49 @@ class StreamStats:
                 f"bytes={self.bytes} dropped={self.dropped} {timing}")
 
 
+class RuntimeResponsePlayer:
+    """Routes provider audio through the public Sonexis output API."""
+
+    def __init__(self, client: Sonexis, destination: str, *, debug: bool) -> None:
+        self._client = client
+        self._destination = destination
+        self._debug = debug
+        self._output = None
+        self._format: Optional[AudioFormat] = None
+
+    async def write(self, event: ProviderEvent) -> None:
+        if not event.audio:
+            return
+        if event.audio_format is None:
+            raise RuntimeError(
+                f"{event.provider} returned audio without a declared PCM format")
+        if self._output is None:
+            self._format = event.audio_format
+            self._output = await self._client.playback(
+                destination=self._destination,
+                format=event.audio_format,
+            )
+            print(
+                f"\nPlaying {event.provider} responses through "
+                f"{self._output.info.destination_id} "
+                f"(output session {self._output.info.id})")
+        elif event.audio_format != self._format:
+            raise RuntimeError(
+                f"provider response format changed from {self._format!r} "
+                f"to {event.audio_format!r}")
+        await self._output.write(event.audio)
+        if self._debug:
+            print(f"\nOutput debug: queued {len(event.audio)} provider audio bytes")
+
+    async def close(self) -> None:
+        if self._output is None:
+            return
+        output, self._output = self._output, None
+        await output.aclose(drain=True)
+        if self._debug:
+            print(f"\nOutput debug: {output.metrics!r}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Feed a source-aware Sonexis stream to a realtime AI provider.")
@@ -159,6 +202,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", help="source ID, bundle ID, PID, or exact app name")
     parser.add_argument("--socket", help="Runtime control socket path")
     parser.add_argument("--output", type=Path, help="optional PCM or .wav recording")
+    parser.add_argument(
+        "--response-output", metavar="DESTINATION",
+        help="route generated provider audio through Sonexis (for example: default)")
+    parser.add_argument(
+        "--play-response", action="store_const", const="default",
+        dest="response_output",
+        help="shorthand for --response-output default")
     parser.add_argument("--replay", type=Path, help="use a PCM16 WAV/PCM file instead of live capture")
     parser.add_argument("--sample-rate", type=int, default=16_000,
                         help="mock/raw-replay rate; provider modes use their required preset")
@@ -226,18 +276,24 @@ async def print_provider_events(
     done: asyncio.Event,
     *,
     debug: bool = False,
+    response_player: Optional[RuntimeResponsePlayer] = None,
 ) -> None:
     try:
         async for event in sink.events():
             if event.text:
                 print(f"\nAgent ({event.provider}): {event.text}")
-            if event.audio and debug:
+            if event.audio and response_player is not None:
+                await response_player.write(event)
+            elif event.audio and debug:
                 print(f"\nAgent ({event.provider}): received {len(event.audio)} audio bytes")
             if (debug and not event.text and not event.audio
                     and event.type not in {"session.started", "session.updated"}):
                 print(f"\nProvider event: {event.type}")
     except ProviderError as error:
         print(f"\nProvider receive failed: {error.message} (retryable={error.retryable})")
+        done.set()
+    except (OSError, RuntimeError, SonexisError) as error:
+        print(f"\nResponse playback failed: {error}")
         done.set()
 
 
@@ -400,10 +456,19 @@ async def main() -> None:
         loop.add_signal_handler(sig, done.set)
 
     sink = await create_sink(args)
+    response_client: Optional[Sonexis] = None
+    response_player: Optional[RuntimeResponsePlayer] = None
     try:
+        if args.response_output:
+            response_client = Sonexis(
+                args.socket, client_name="sonexis-audio-agent-output")
+            await response_client.connect()
+            response_player = RuntimeResponsePlayer(
+                response_client, args.response_output, debug=args.debug)
         output = OutputWriter(args.output, sink.required_format)
         provider_events = asyncio.create_task(
-            print_provider_events(sink, done, debug=args.debug))
+            print_provider_events(
+                sink, done, debug=args.debug, response_player=response_player))
         try:
             if args.replay:
                 await run_replay(args, sink, output, done)
@@ -415,7 +480,13 @@ async def main() -> None:
             await asyncio.gather(provider_events, return_exceptions=True)
             output.close()
     finally:
-        await sink.aclose()
+        try:
+            await sink.aclose()
+            if response_player is not None:
+                await response_player.close()
+        finally:
+            if response_client is not None:
+                await response_client.close()
 
 
 if __name__ == "__main__":

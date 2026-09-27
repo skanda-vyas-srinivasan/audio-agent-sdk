@@ -180,6 +180,21 @@ enum CoreAudioSupport {
         return deviceID
     }
 
+    static func audioDeviceIDs() throws -> [AudioDeviceID] {
+        try readAudioObjectIDArray(
+            objectID: AudioObjectID(kAudioObjectSystemObject),
+            selector: kAudioHardwarePropertyDevices,
+            operation: "Read audio device list"
+        )
+    }
+
+    static func deviceID(forUID uid: String) throws -> AudioDeviceID? {
+        for deviceID in try audioDeviceIDs() where (try? deviceUID(deviceID)) == uid {
+            return deviceID
+        }
+        return nil
+    }
+
     static func deviceName(_ deviceID: AudioDeviceID) throws -> String {
         try readString(
             objectID: deviceID,
@@ -208,6 +223,15 @@ enum CoreAudioSupport {
             selector: kAudioDevicePropertyStreams,
             scope: kAudioDevicePropertyScopeOutput,
             operation: "Read output stream list"
+        )
+    }
+
+    static func inputStreamIDs(_ deviceID: AudioDeviceID) throws -> [AudioObjectID] {
+        try readAudioObjectIDArray(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyStreams,
+            scope: kAudioDevicePropertyScopeInput,
+            operation: "Read input stream list"
         )
     }
 

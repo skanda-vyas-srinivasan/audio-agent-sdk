@@ -4,8 +4,8 @@ from setuptools import find_packages, setup
 
 setup(
     name="sonexis",
-    version="0.3.0",
-    description="Source-aware async Python SDK for the local Sonexis audio Runtime",
+    version="0.4.0",
+    description="Source-aware bidirectional Python SDK for the local Sonexis audio Runtime",
     package_dir={"": "src"},
     packages=find_packages("src"),
     package_data={"sonexis": ["py.typed"]},

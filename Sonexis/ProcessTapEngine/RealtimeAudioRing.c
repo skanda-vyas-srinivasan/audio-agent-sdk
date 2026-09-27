@@ -627,6 +627,20 @@ uint32_t SonexisAudioRingBufferReadInterleaved(
     return framesToCopy;
 }
 
+uint32_t SonexisAudioRingBufferFlush(SonexisAudioRingBuffer *ringBuffer) {
+    if (ringBuffer == NULL) {
+        return 0;
+    }
+    uint64_t writeFrame = atomic_load_explicit(&ringBuffer->writeFrame, memory_order_acquire);
+    uint64_t readFrame = atomic_load_explicit(&ringBuffer->readFrame, memory_order_relaxed);
+    uint64_t readable = writeFrame - readFrame;
+    if (readable > ringBuffer->capacityFrames) {
+        readable = ringBuffer->capacityFrames;
+    }
+    atomic_store_explicit(&ringBuffer->readFrame, writeFrame, memory_order_release);
+    return (uint32_t)readable;
+}
+
 void SonexisAudioRingBufferSetReadEnabled(SonexisAudioRingBuffer *ringBuffer, bool enabled) {
     if (ringBuffer == NULL) {
         return;
@@ -660,6 +674,14 @@ uint32_t SonexisAudioRingBufferGetFillFrames(SonexisAudioRingBuffer *ringBuffer)
         return ringBuffer->capacityFrames;
     }
     return (uint32_t)fillFrames;
+}
+
+uint32_t SonexisAudioRingBufferGetWritableFrames(SonexisAudioRingBuffer *ringBuffer) {
+    if (ringBuffer == NULL) {
+        return 0;
+    }
+    uint32_t fill = SonexisAudioRingBufferGetFillFrames(ringBuffer);
+    return ringBuffer->capacityFrames - fill;
 }
 
 uint64_t SonexisAudioRingBufferGetDroppedFrames(SonexisAudioRingBuffer *ringBuffer) {

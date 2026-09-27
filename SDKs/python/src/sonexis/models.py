@@ -1,4 +1,4 @@
-"""Typed public models for Sonexis Runtime v0.3."""
+"""Typed public models for Sonexis Runtime."""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -40,9 +40,19 @@ class AudioFormat:
         return cls(24_000, 1, SampleFormat.PCM_S16LE)
 
     @classmethod
+    def openai_realtime_output(cls) -> "AudioFormat":
+        """PCM16 mono returned by OpenAI realtime audio responses."""
+        return cls(24_000, 1, SampleFormat.PCM_S16LE)
+
+    @classmethod
     def gemini_live(cls) -> "AudioFormat":
         """PCM16 mono accepted by Gemini Live realtime input."""
         return cls(16_000, 1, SampleFormat.PCM_S16LE)
+
+    @classmethod
+    def gemini_live_output(cls) -> "AudioFormat":
+        """PCM16 mono returned by Gemini Live native-audio responses."""
+        return cls(24_000, 1, SampleFormat.PCM_S16LE)
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "AudioFormat":
@@ -146,6 +156,141 @@ class CaptureInfo:
 
 
 @dataclass(frozen=True)
+class AudioOutputDestination:
+    """A Runtime-owned destination that can render client-provided audio."""
+
+    id: str
+    name: str
+    kind: str
+    available: bool
+    is_default: bool
+    follows_system_default: bool
+    active_device_name: Optional[str]
+    native_format: Optional[AudioFormat]
+    supported_formats: List[AudioFormat]
+
+    def __repr__(self) -> str:
+        return (f"AudioOutputDestination(id={self.id!r}, name={self.name!r}, "
+                f"kind={self.kind!r}, available={self.available!r})")
+
+    @classmethod
+    def from_wire(cls, value: Dict[str, Any]) -> "AudioOutputDestination":
+        formats = value.get("supported_formats", [])
+        native = value.get("native_format")
+        return cls(
+            str(value["id"]),
+            str(value["name"]),
+            str(value.get("kind", "device")),
+            bool(value.get("is_available", value.get("available", False))),
+            bool(value.get("is_default", False)),
+            bool(value.get("follows_system_default", False)),
+            str(value["active_device_name"]) if value.get("active_device_name") else None,
+            AudioFormat.from_wire(native) if native else None,
+            [AudioFormat.from_wire(item) for item in formats],
+        )
+
+
+@dataclass(frozen=True)
+class OutputMetrics:
+    """A point-in-time snapshot of one output session's bounded pipeline."""
+
+    packets_received: int = 0
+    input_frames_received: int = 0
+    input_bytes_received: int = 0
+    device_frames_enqueued: int = 0
+    device_frames_rendered: int = 0
+    dropped_frames: int = 0
+    flushed_frames: int = 0
+    late_frames: int = 0
+    underrun_frames: int = 0
+    underrun_events: int = 0
+    overrun_events: int = 0
+    queue_depth_frames: int = 0
+    queue_high_water_frames: int = 0
+    buffered_milliseconds: float = 0.0
+    target_buffer_milliseconds: int = 0
+    conversion_batches: int = 0
+    conversion_nanoseconds: int = 0
+    route_changes: int = 0
+    producer_connected: bool = False
+
+    @property
+    def frames_received(self) -> int:
+        return self.input_frames_received
+
+    @property
+    def frames_rendered(self) -> int:
+        return self.device_frames_rendered
+
+    @property
+    def frames_dropped(self) -> int:
+        return self.dropped_frames
+
+    @property
+    def frames_late(self) -> int:
+        return self.late_frames
+
+    @property
+    def underruns(self) -> int:
+        return self.underrun_events
+
+    @property
+    def overruns(self) -> int:
+        return self.overrun_events
+
+    @property
+    def average_conversion_us(self) -> float:
+        return (self.conversion_nanoseconds / self.conversion_batches / 1000
+                if self.conversion_batches else 0.0)
+
+    @classmethod
+    def from_wire(cls, value: Dict[str, Any]) -> "OutputMetrics":
+        integer_fields = {
+            "packets_received", "input_frames_received", "input_bytes_received",
+            "device_frames_enqueued", "device_frames_rendered", "dropped_frames",
+            "flushed_frames", "late_frames", "underrun_frames", "underrun_events",
+            "overrun_events", "queue_depth_frames", "queue_high_water_frames",
+            "target_buffer_milliseconds", "conversion_batches", "conversion_nanoseconds",
+            "route_changes",
+        }
+        converted = {name: int(value.get(name, 0)) for name in integer_fields}
+        converted["buffered_milliseconds"] = float(value.get("buffered_milliseconds", 0.0))
+        converted["producer_connected"] = bool(value.get("producer_connected", False))
+        return cls(**converted)
+
+
+@dataclass(frozen=True)
+class OutputInfo:
+    """Runtime state and negotiated data-plane details for an audio output."""
+
+    id: str
+    stream_id: str
+    destination_id: str
+    state: str
+    format: AudioFormat
+    data_socket_path: str
+    started_at_ns: int
+    target_buffer_milliseconds: int
+    metrics: OutputMetrics
+    error: Optional[RuntimeErrorInfo] = None
+
+    @classmethod
+    def from_wire(cls, value: Dict[str, Any]) -> "OutputInfo":
+        return cls(
+            str(value["id"]),
+            str(value["stream_id"]),
+            str(value["destination_id"]),
+            str(value["state"]),
+            AudioFormat.from_wire(value["format"]),
+            str(value["data_socket_path"]),
+            int(value["started_at_nanoseconds"]),
+            int(value.get("target_buffer_milliseconds", 0)),
+            OutputMetrics.from_wire(value.get("metrics", {})),
+            RuntimeErrorInfo.from_wire(value["error"]) if value.get("error") else None,
+        )
+
+
+@dataclass(frozen=True)
 class AudioFrame:
     stream_id: str
     sequence: int
@@ -202,6 +347,7 @@ class RuntimeEvent:
     source: Optional[AudioSource] = None
     session: Optional[CaptureInfo] = None
     error: Optional[RuntimeErrorInfo] = None
+    output_session: Optional[OutputInfo] = None
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "RuntimeEvent":
@@ -220,6 +366,7 @@ class RuntimeEvent:
             AudioSource.from_wire(value["source"]) if value.get("source") else None,
             CaptureInfo.from_wire(value["session"]) if value.get("session") else None,
             RuntimeErrorInfo.from_wire(value["error"]) if value.get("error") else None,
+            OutputInfo.from_wire(value["output_session"]) if value.get("output_session") else None,
         )
 
 
@@ -236,6 +383,12 @@ class RuntimeStatus:
     total_dropped_frames: int
     total_bytes_transmitted: int
     total_events_dropped: int = 0
+    active_output_sessions: int = 0
+    total_output_sessions_started: int = 0
+    total_output_frames_received: int = 0
+    total_output_frames_rendered: int = 0
+    total_output_frames_dropped: int = 0
+    total_output_bytes_received: int = 0
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "RuntimeStatus":
@@ -244,7 +397,13 @@ class RuntimeStatus:
                    int(value["active_sessions"]), int(value["event_subscribers"]),
                    int(value["total_sessions_started"]), int(value["total_frames_forwarded"]),
                    int(value["total_dropped_frames"]), int(value["total_bytes_transmitted"]),
-                   int(value.get("total_events_dropped", 0)))
+                   int(value.get("total_events_dropped", 0)),
+                   int(value.get("active_output_sessions", 0)),
+                   int(value.get("total_output_sessions_started", 0)),
+                   int(value.get("total_output_frames_received", 0)),
+                   int(value.get("total_output_frames_rendered", 0)),
+                   int(value.get("total_output_frames_dropped", 0)),
+                   int(value.get("total_output_bytes_received", 0)))
 
 
 @dataclass(frozen=True)
@@ -254,6 +413,7 @@ class Handshake:
     runtime_instance_id: str
     capabilities: List[str]
     supported_formats: List[AudioFormat]
+    supported_output_formats: List[AudioFormat]
     limits: Dict[str, int]
 
     @classmethod
@@ -261,4 +421,6 @@ class Handshake:
         return cls(int(value["protocol_version"]), str(value["runtime_version"]),
                    str(value["runtime_instance_id"]), list(value["capabilities"]),
                    [AudioFormat.from_wire(item) for item in value["supported_formats"]],
+                   [AudioFormat.from_wire(item)
+                    for item in value.get("supported_output_formats", [])],
                    {str(k): int(v) for k, v in value["limits"].items()})

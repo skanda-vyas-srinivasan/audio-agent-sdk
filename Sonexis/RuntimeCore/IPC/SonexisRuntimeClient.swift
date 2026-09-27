@@ -92,6 +92,57 @@ public final class SonexisRuntimeClient: @unchecked Sendable {
         return status
     }
 
+    public func listOutputDestinations() throws -> [RuntimeOutputDestinationDTO] {
+        try request(RuntimeCommand(command: .listOutputDestinations)).outputDestinations ?? []
+    }
+
+    public func startOutput(destinationID: String = "default",
+                            format: RuntimePCMFormatDTO = .runtimeDefault,
+                            targetBufferMilliseconds: UInt32 = 60) throws -> RuntimeOutputSessionDTO {
+        let response = try request(RuntimeCommand(command: .startOutput,
+            format: format, destinationID: destinationID,
+            targetBufferMilliseconds: targetBufferMilliseconds))
+        guard let session = response.outputSession else {
+            throw RuntimeErrorDTO(code: "invalid_response",
+                message: "Runtime omitted the output session")
+        }
+        return session
+    }
+
+    public func outputStatus(outputSessionID: String) throws -> RuntimeOutputSessionDTO {
+        let response = try request(RuntimeCommand(command: .outputStatus,
+            outputSessionID: outputSessionID))
+        guard let session = response.outputSession else {
+            throw RuntimeErrorDTO(code: "invalid_response",
+                message: "Runtime omitted the output session")
+        }
+        return session
+    }
+
+    public func flushOutput(outputSessionID: String) throws -> RuntimeOutputSessionDTO {
+        let response = try request(RuntimeCommand(command: .flushOutput,
+            outputSessionID: outputSessionID))
+        guard let session = response.outputSession else {
+            throw RuntimeErrorDTO(code: "invalid_response",
+                message: "Runtime omitted the flushed output session")
+        }
+        return session
+    }
+
+    public func stopOutput(outputSessionID: String) throws -> RuntimeOutputSessionDTO {
+        let response = try request(RuntimeCommand(command: .stopOutput,
+            outputSessionID: outputSessionID))
+        guard let session = response.outputSession else {
+            throw RuntimeErrorDTO(code: "invalid_response",
+                message: "Runtime omitted the stopped output session")
+        }
+        return session
+    }
+
+    public func outputWriter(session: RuntimeOutputSessionDTO) throws -> RuntimeOutputWriter {
+        try RuntimeOutputWriter(session: session)
+    }
+
     public func subscribeEvents(_ types: [RuntimeEventTypeDTO]? = nil) throws -> RuntimeEventSubscriptionDTO {
         let response = try request(RuntimeCommand(command: .subscribeEvents, eventTypes: types))
         guard let subscription = response.subscription else {
@@ -175,5 +226,83 @@ public final class SonexisRuntimeClient: @unchecked Sendable {
                 return first
             }
         }
+    }
+}
+
+/// Blocking Swift output producer used by sonexisctl and native integrations.
+/// Socket backpressure occurs on the caller's non-realtime thread.
+public final class RuntimeOutputWriter: @unchecked Sendable {
+    public let session: RuntimeOutputSessionDTO
+    private let connection: UnixSocketConnection
+    private let lock = NSLock()
+    private var sequence: UInt64 = 0
+    private var nextTimestampNanoseconds: UInt64 = 0
+    private var closed = false
+
+    init(session: RuntimeOutputSessionDTO) throws {
+        guard UUID(uuidString: session.streamID) != nil else {
+            throw RuntimeErrorDTO(code: "invalid_stream_id",
+                message: "Output session has an invalid stream UUID")
+        }
+        self.session = session
+        connection = try UnixSocketSystem.connect(path: session.dataSocketPath)
+    }
+
+    deinit { cancel() }
+
+    public func write(_ pcm: Data, timestampNanoseconds: UInt64? = nil,
+                      discontinuity: Bool = false) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else {
+            throw RuntimeErrorDTO(code: "output_closed", message: "Output writer is closed")
+        }
+        let format = session.format
+        guard !pcm.isEmpty, pcm.count % format.bytesPerFrame == 0 else {
+            throw RuntimeErrorDTO(code: "invalid_output_audio",
+                message: "Output PCM must contain complete non-empty sample frames")
+        }
+        var offset = 0
+        let maximumFrames = max(1, Int(format.sampleRate) / 5)
+        let maximumBytes = maximumFrames * format.bytesPerFrame
+        var timestamp = timestampNanoseconds ?? nextTimestampNanoseconds
+        var first = true
+        let streamID = UUID(uuidString: session.streamID)!
+        while offset < pcm.count {
+            let byteCount = min(maximumBytes, pcm.count - offset)
+            let payload = pcm.subdata(in: offset..<(offset + byteCount))
+            let frameCount = UInt32(byteCount / format.bytesPerFrame)
+            let flags: RuntimePCMFrameFlags = discontinuity && first ? [.discontinuity] : []
+            let header = RuntimePCMFrameHeader(flags: flags,
+                payloadByteCount: UInt32(payload.count), streamID: streamID,
+                sequence: sequence, timestampNanoseconds: timestamp,
+                sampleRate: format.sampleRate, frameCount: frameCount,
+                channelCount: format.channelCount, sampleFormat: format.sampleFormat)
+            try connection.write(RuntimePCMFrameCodec.encode(header: header, payload: payload))
+            sequence &+= 1
+            timestamp &+= UInt64(frameCount) * 1_000_000_000 / UInt64(format.sampleRate)
+            offset += byteCount
+            first = false
+        }
+        nextTimestampNanoseconds = timestamp
+    }
+
+    public func finish() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return }
+        let header = RuntimePCMFrameHeader(flags: [.endOfStream], payloadByteCount: 0,
+            streamID: UUID(uuidString: session.streamID)!, sequence: sequence,
+            timestampNanoseconds: nextTimestampNanoseconds, sampleRate: 0,
+            frameCount: 0, channelCount: 0)
+        try connection.write(RuntimePCMFrameCodec.encode(header: header, payload: Data()))
+        closed = true
+        connection.close()
+    }
+
+    public func cancel() {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        closed = true
+        lock.unlock()
+        connection.close()
     }
 }

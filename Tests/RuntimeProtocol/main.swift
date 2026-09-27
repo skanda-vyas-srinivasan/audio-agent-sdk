@@ -26,6 +26,27 @@ do {
     expect(decodedCommand == command,
            "control command did not round trip")
 
+    let outputCommand = RuntimeCommand(requestID: "output-1", command: .startOutput,
+        format: RuntimePCMFormatDTO(sampleRate: 24_000, channelCount: 1),
+        destinationID: "default", targetBufferMilliseconds: 80)
+    let decodedOutputCommand = try RuntimeProtocolCodec.decodeLine(RuntimeCommand.self,
+        from: RuntimeProtocolCodec.encodeLine(outputCommand))
+    expect(decodedOutputCommand == outputCommand, "output command did not round trip")
+
+    let outputSession = RuntimeOutputSessionDTO(id: "output-session", streamID: UUID().uuidString,
+        destinationID: "default", state: .ready,
+        format: RuntimePCMFormatDTO(sampleRate: 24_000, channelCount: 1),
+        dataSocketPath: "/tmp/output.sock", startedAtNanoseconds: 1,
+        targetBufferMilliseconds: 80,
+        metrics: RuntimeOutputMetricsDTO(packetsReceived: 2, inputFramesReceived: 480,
+            inputBytesReceived: 960, deviceFramesEnqueued: 960,
+            deviceFramesRendered: 720, queueDepthFrames: 240,
+            bufferedMilliseconds: 5, targetBufferMilliseconds: 80,
+            producerConnected: true))
+    let decodedOutput = try RuntimeProtocolCodec.decodeLine(RuntimeOutputSessionDTO.self,
+        from: RuntimeProtocolCodec.encodeLine(outputSession))
+    expect(decodedOutput == outputSession, "output session did not round trip")
+
     let source = RuntimeSourceDTO(id: "app.example", processID: 42,
         bundleIdentifier: "com.example", name: "Example")
     let sourceLine = try RuntimeProtocolCodec.encodeLine(source)

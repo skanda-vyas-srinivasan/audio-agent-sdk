@@ -76,6 +76,63 @@ export interface CaptureInfo {
   metrics: SessionMetrics;
   error?: RuntimeErrorInfo;
 }
+export type OutputDestinationKind = "playback" | "virtual_input";
+export interface AudioOutputDestination {
+  id: string;
+  kind: OutputDestinationKind;
+  name: string;
+  is_available: boolean;
+  is_default: boolean;
+  follows_system_default: boolean;
+  active_device_name?: string;
+  native_format?: AudioFormat;
+  supported_formats: AudioFormat[];
+}
+export interface OutputMetrics {
+  packets_received: number;
+  input_frames_received: number;
+  input_bytes_received: number;
+  device_frames_enqueued: number;
+  device_frames_rendered: number;
+  dropped_frames: number;
+  flushed_frames: number;
+  late_frames: number;
+  underrun_frames: number;
+  underrun_events: number;
+  overrun_events: number;
+  queue_depth_frames: number;
+  queue_high_water_frames: number;
+  buffered_milliseconds: number;
+  target_buffer_milliseconds: number;
+  conversion_batches: number;
+  conversion_nanoseconds: number;
+  route_changes: number;
+  producer_connected: boolean;
+}
+export type OutputSessionState =
+  "starting" | "ready" | "draining" | "stopped" | "cancelled" | "failed";
+export interface OutputInfo {
+  id: string;
+  stream_id: string;
+  destination_id: string;
+  state: OutputSessionState;
+  format: AudioFormat;
+  data_socket_path: string;
+  started_at_nanoseconds: number;
+  target_buffer_milliseconds: number;
+  metrics: OutputMetrics;
+  error?: RuntimeErrorInfo;
+}
+export interface OutputOptions {
+  destination?: string | AudioOutputDestination;
+  format?: AudioFormat;
+  targetBufferMilliseconds?: number;
+}
+export interface OutputWriteOptions {
+  timestampNs?: bigint | number;
+  discontinuity?: boolean;
+  signal?: AbortSignal;
+}
 export interface RuntimeErrorInfo {
   code: string;
   message: string;
@@ -118,6 +175,7 @@ export interface RuntimeEvent {
   dropped_events_before?: number;
   source?: AudioSource;
   session?: CaptureInfo;
+  output_session?: OutputInfo;
   error?: RuntimeErrorInfo;
 }
 export interface RuntimeStatus {
@@ -132,6 +190,12 @@ export interface RuntimeStatus {
   total_dropped_frames: number;
   total_bytes_transmitted: number;
   total_events_dropped: number;
+  active_output_sessions?: number;
+  total_output_sessions_started?: number;
+  total_output_frames_received?: number;
+  total_output_frames_rendered?: number;
+  total_output_frames_dropped?: number;
+  total_output_bytes_received?: number;
 }
 export interface Handshake {
   protocol_version: 2;
@@ -172,6 +236,14 @@ export class CaptureFailedError extends SonexisError {
               details: Record<string, string> = {}) {
     super(code, message, retryable, details);
     this.name = "CaptureFailedError";
+  }
+}
+
+export class OutputFailedError extends SonexisError {
+  constructor(message: string, code = "output_failed", retryable = false,
+              details: Record<string, string> = {}) {
+    super(code, message, retryable, details);
+    this.name = "OutputFailedError";
   }
 }
 
@@ -263,6 +335,7 @@ export class Sonexis extends EventEmitter {
   private readonly pending = new Map<string, {
     resolve: (value: WireResponse) => void; reject: (error: Error) => void;
   }>();
+  private readonly outputs = new Set<AudioOutput>();
 
   constructor(socketPath = defaultSocketPath()) {
     super();
@@ -291,7 +364,7 @@ export class Sonexis extends EventEmitter {
     socket.on("error", (error) => this.handleDisconnect(socket, error));
     try {
       const response = await this.request("hello", {
-        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.3.0",
+        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.4.0",
       });
       const handshake = response.handshake as Handshake;
       if (handshake?.protocol_version !== 2) {
@@ -306,6 +379,7 @@ export class Sonexis extends EventEmitter {
   }
 
   async close(): Promise<void> {
+    await Promise.allSettled([...this.outputs].map((output) => output.cancel()));
     const socket = this.socket;
     this.socket = undefined;
     this.handshake = undefined;
@@ -383,6 +457,73 @@ export class Sonexis extends EventEmitter {
 
   async stop(sessionId: string): Promise<CaptureInfo> {
     return (await this.request("stop_capture", { session_id: sessionId })).session as CaptureInfo;
+  }
+
+  /** Enumerate Runtime-owned destinations for client-provided PCM. */
+  async outputDestinations(): Promise<AudioOutputDestination[]> {
+    this.requireOutputCapability();
+    const response = await this.request("list_output_destinations");
+    if (!Array.isArray(response.output_destinations)) {
+      throw new SonexisError(
+        "invalid_output_destinations", "Runtime omitted output destinations");
+    }
+    return response.output_destinations.map(parseOutputDestination);
+  }
+
+  /** Create and attach a bounded client-to-Runtime PCM output stream. */
+  async createOutput(options: OutputOptions = {}): Promise<AudioOutput> {
+    this.requireOutputCapability();
+    const targetBufferMilliseconds = options.targetBufferMilliseconds ?? 80;
+    if (!Number.isInteger(targetBufferMilliseconds)
+        || targetBufferMilliseconds < 20 || targetBufferMilliseconds > 250) {
+      throw new RangeError("targetBufferMilliseconds must be an integer between 20 and 250");
+    }
+    const destinationId = typeof options.destination === "string"
+      ? options.destination : options.destination?.id ?? "default";
+    const response = await this.request("start_output", {
+      destination_id: destinationId,
+      format: options.format ?? AudioFormats.openAIRealtime(),
+      target_buffer_milliseconds: targetBufferMilliseconds,
+    });
+    let info: OutputInfo;
+    try { info = parseOutputInfo(response.output_session); }
+    catch (error) {
+      throw new SonexisError("invalid_output_session", "Runtime sent a malformed output session",
+        false, { cause: error instanceof Error ? error.message : String(error) });
+    }
+    try {
+      const output = await AudioOutput.open(this, info);
+      this.outputs.add(output);
+      return output;
+    } catch (error) {
+      await this.cleanupOutput(info.id);
+      throw error;
+    }
+  }
+
+  /** Convenience alias for createOutput(). */
+  playback(options: OutputOptions = {}): Promise<AudioOutput> {
+    return this.createOutput(options);
+  }
+
+  async outputStatus(outputSessionId: string): Promise<OutputInfo> {
+    this.requireOutputCapability();
+    const response = await this.request("output_status", { output_session_id: outputSessionId });
+    try { return parseOutputInfo(response.output_session); }
+    catch (error) {
+      throw new SonexisError("invalid_output_session", "Runtime sent a malformed output session",
+        false, { cause: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async stopOutput(outputSessionId: string): Promise<OutputInfo> {
+    this.requireOutputCapability();
+    const response = await this.request("stop_output", { output_session_id: outputSessionId });
+    try { return parseOutputInfo(response.output_session); }
+    catch (error) {
+      throw new SonexisError("invalid_output_session", "Runtime sent a malformed output session",
+        false, { cause: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   async events(eventTypes?: string[]): Promise<EventStream> {
@@ -488,6 +629,7 @@ export class Sonexis extends EventEmitter {
     this.controlBuffer = Buffer.alloc(0);
     this.discardedRequestIds.clear();
     this.failPending(error);
+    for (const output of [...this.outputs]) output.runtimeDisconnected(error);
   }
 
   async unsubscribe(subscriptionId: string): Promise<void> {
@@ -501,6 +643,542 @@ export class Sonexis extends EventEmitter {
   async cleanupSubscription(subscriptionId: string): Promise<void> {
     await boundedCleanup(this.unsubscribe(subscriptionId));
   }
+
+  async flushOutput(outputSessionId: string): Promise<OutputInfo> {
+    this.requireOutputCapability();
+    const response = await this.request("flush_output", { output_session_id: outputSessionId });
+    try { return parseOutputInfo(response.output_session); }
+    catch (error) {
+      throw new SonexisError("invalid_output_session", "Runtime sent a malformed output session",
+        false, { cause: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async cleanupOutput(outputSessionId: string): Promise<void> {
+    if (!this.socket) return;
+    await boundedCleanup(this.stopOutput(outputSessionId));
+  }
+
+  untrackOutput(output: AudioOutput): void {
+    this.outputs.delete(output);
+  }
+
+  private requireOutputCapability(): void {
+    if (!this.handshake) throw new SonexisError("not_connected", "Connect first");
+    if (!this.handshake.capabilities.includes("output_sessions")) {
+      throw new SonexisError("unsupported_capability",
+        "This Runtime does not support client-to-Runtime audio output; Runtime v0.4 is required");
+    }
+  }
+}
+
+/** Runtime-owned, bounded client-to-device audio stream. */
+export class AudioOutput extends EventEmitter {
+  private static readonly MAX_PACKET_MILLISECONDS = 200;
+  private socket: Socket;
+  private sequence = 0n;
+  private nextTimestampNs = 0n;
+  private operationTail: Promise<void> = Promise.resolve();
+  private closePromise?: Promise<void>;
+  private closing = false;
+  private terminalError?: Error;
+  private rotatingSocket?: Socket;
+
+  private constructor(private readonly client: Sonexis, public info: OutputInfo, socket: Socket) {
+    super();
+    this.socket = socket;
+    this.observeSocket(socket);
+  }
+
+  static async open(client: Sonexis, info: OutputInfo): Promise<AudioOutput> {
+    uuidToBytes(info.stream_id);
+    return new AudioOutput(client, info, await openSocket(info.data_socket_path));
+  }
+
+  get closed(): boolean { return this.closing; }
+  get metrics(): OutputMetrics { return this.info.metrics; }
+
+  /**
+   * Write whole interleaved PCM frames. Large writes are split into packets no
+   * longer than 200 ms, and each socket `drain` is awaited before proceeding.
+   */
+  async write(data: Buffer | Uint8Array, options: OutputWriteOptions = {}): Promise<void> {
+    if (this.closing) throw new SonexisError("output_closed", "Audio output is already closed");
+    if (options.signal?.aborted) throw abortError();
+    const bytes = Buffer.isBuffer(data)
+      ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    if (!bytes.length) return;
+    const frameSize = bytesPerFrame(this.info.format);
+    if (bytes.length % frameSize !== 0) {
+      throw new RangeError("Audio payload must contain whole interleaved sample frames");
+    }
+    const explicitTimestamp = options.timestampNs === undefined
+      ? undefined : timestampToBigInt(options.timestampNs);
+
+    try {
+      await this.runExclusive(async () => {
+        if (this.closing) {
+          throw new SonexisError("output_closed", "Audio output is already closed");
+        }
+        const format = this.info.format;
+        const maximumFrames = Math.max(1,
+          Math.floor(format.sample_rate * AudioOutput.MAX_PACKET_MILLISECONDS / 1000));
+        const maximumBytes = maximumFrames * frameSize;
+        let offset = 0;
+        let framesWritten = 0n;
+        const firstTimestamp = explicitTimestamp ?? this.nextTimestampNs;
+        while (offset < bytes.length) {
+          if (options.signal?.aborted) throw abortError();
+          const byteCount = Math.min(maximumBytes, bytes.length - offset);
+          const frameCount = byteCount / frameSize;
+          const timestampNs = firstTimestamp
+            + framesWritten * 1_000_000_000n / BigInt(format.sample_rate);
+          const packet = encodeOutputFrame({
+            streamId: this.info.stream_id,
+            sequence: this.sequence,
+            timestampNs,
+            format,
+            frameCount,
+            data: bytes.subarray(offset, offset + byteCount),
+            discontinuity: !!options.discontinuity && offset === 0,
+          });
+          await writeWithBackpressure(this.socket, packet, options.signal);
+          this.sequence += 1n;
+          framesWritten += BigInt(frameCount);
+          this.nextTimestampNs = timestampNs
+            + BigInt(frameCount) * 1_000_000_000n / BigInt(format.sample_rate);
+          offset += byteCount;
+        }
+      }, options.signal);
+    } catch (error) {
+      if (error instanceof RangeError || (error instanceof SonexisError
+          && (error.code === "output_closed" || error.code === "cancelled"))) {
+        if (error instanceof SonexisError && error.code === "cancelled") await this.cancel();
+        throw error;
+      }
+      const failure = error instanceof SonexisError ? error
+        : new SonexisError("output_stream_closed",
+          error instanceof Error ? error.message : String(error), true);
+      this.emit("outputError", failure);
+      await this.cancel();
+      throw failure;
+    }
+  }
+
+  /** Refresh this output session's Runtime state and metrics. */
+  async refresh(): Promise<OutputInfo> {
+    this.info = await this.client.outputStatus(this.info.id);
+    if (this.info.state === "failed") throw outputFailure(this.info);
+    return this.info;
+  }
+
+  /** Discard queued audio and reconnect to the fresh stream epoch. */
+  async flush(): Promise<OutputInfo> {
+    if (this.closing) throw new SonexisError("output_closed", "Audio output is already closed");
+    return this.runExclusive(async () => {
+      if (this.closing) throw new SonexisError("output_closed", "Audio output is already closed");
+      const oldSocket = this.socket;
+      this.rotatingSocket = oldSocket;
+      let info: OutputInfo;
+      try {
+        info = await this.client.flushOutput(this.info.id);
+      } catch (error) {
+        this.rotatingSocket = undefined;
+        throw error;
+      }
+      try {
+        const socket = await openSocket(info.data_socket_path);
+        this.info = info;
+        this.socket = socket;
+        this.sequence = 0n;
+        this.nextTimestampNs = 0n;
+        this.observeSocket(socket);
+        oldSocket.destroy();
+        this.rotatingSocket = undefined;
+        this.emit("flushed", info);
+        return info;
+      } catch (error) {
+        this.rotatingSocket = undefined;
+        oldSocket.destroy();
+        this.closing = true;
+        await this.client.cleanupOutput(info.id);
+        this.client.untrackOutput(this);
+        throw error;
+      }
+    });
+  }
+
+  /** Barge-in primitive: discard Runtime-buffered audio and stop immediately. */
+  cancel(): Promise<void> {
+    return this.close({ drain: false });
+  }
+
+  /** Send EOS and drain by default, or stop immediately with `drain: false`. */
+  close(options: { drain?: boolean } = {}): Promise<void> {
+    if (!this.closePromise) {
+      const drain = options.drain ?? true;
+      this.closing = true;
+      if (!drain) this.socket.destroy();
+      this.closePromise = this.finishClose(drain);
+    }
+    return this.closePromise;
+  }
+
+  runtimeDisconnected(error: Error): void {
+    if (this.closing) return;
+    this.closing = true;
+    this.terminalError = error;
+    this.socket.destroy();
+    this.client.untrackOutput(this);
+    this.emit("outputError", error);
+    this.closePromise = Promise.resolve();
+  }
+
+  private async finishClose(drain: boolean): Promise<void> {
+    try {
+      if (drain) {
+        await this.runExclusive(async () => {
+          const packet = encodeOutputFrame({
+            streamId: this.info.stream_id,
+            sequence: this.sequence,
+            timestampNs: this.nextTimestampNs,
+            format: this.info.format,
+            frameCount: 0,
+            data: Buffer.alloc(0),
+            endOfStream: true,
+          });
+          await writeWithBackpressure(this.socket, packet);
+          this.socket.end();
+        });
+        await this.waitForRuntimeDrain();
+      } else {
+        await this.runExclusive(async () => undefined);
+        await this.client.cleanupOutput(this.info.id);
+      }
+    } catch (error) {
+      if (drain) await this.client.cleanupOutput(this.info.id);
+      if (!this.terminalError) {
+        this.terminalError = error instanceof Error ? error : new Error(String(error));
+      }
+      throw this.terminalError;
+    } finally {
+      this.socket.destroy();
+      this.client.untrackOutput(this);
+      this.emit("closed", this.info);
+    }
+  }
+
+  private async waitForRuntimeDrain(): Promise<void> {
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      let info: OutputInfo;
+      try { info = await this.client.outputStatus(this.info.id); }
+      catch (error) {
+        if (error instanceof SonexisError
+            && ["session_not_found", "output_not_found"].includes(error.code)) return;
+        throw error;
+      }
+      this.info = info;
+      if (info.state === "failed") throw outputFailure(info);
+      if (info.state === "stopped" || info.state === "cancelled") return;
+      await delay(20);
+    }
+    await this.client.cleanupOutput(this.info.id);
+  }
+
+  private observeSocket(socket: Socket): void {
+    socket.on("error", (error) => {
+      if (this.socket !== socket || this.rotatingSocket === socket || this.closing) return;
+      this.terminalError = error;
+    });
+    socket.on("close", () => {
+      if (this.socket !== socket || this.rotatingSocket === socket || this.closing) return;
+      const error = this.terminalError ?? new SonexisError(
+        "output_stream_closed", "Runtime closed the output stream unexpectedly", true);
+      this.runtimeDisconnected(error);
+      void this.client.cleanupOutput(this.info.id);
+    });
+  }
+
+  private async runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const previous = this.operationTail;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    this.operationTail = previous.catch(() => undefined).then(() => gate);
+    try {
+      await waitForPromise(previous, signal);
+      if (signal?.aborted) throw abortError();
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+}
+
+interface OutputFrameInput {
+  streamId: string;
+  sequence: bigint;
+  timestampNs: bigint;
+  format: AudioFormat;
+  frameCount: number;
+  data: Buffer | Uint8Array;
+  discontinuity?: boolean;
+  endOfStream?: boolean;
+}
+
+/** Encode one client-to-Runtime protocol-v2 SXPC packet. */
+export function encodeOutputFrame(input: OutputFrameInput): Buffer {
+  if (input.sequence < 0n || input.sequence > 0xffff_ffff_ffff_ffffn
+      || input.timestampNs < 0n || input.timestampNs > 0xffff_ffff_ffff_ffffn) {
+    throw new RangeError("Output sequence and timestamp must fit unsigned 64-bit fields");
+  }
+  if (!Number.isSafeInteger(input.frameCount) || input.frameCount < 0
+      || input.frameCount > 0xffff_ffff) {
+    throw new RangeError("Output frameCount must fit an unsigned 32-bit field");
+  }
+  const data = Buffer.isBuffer(input.data) ? input.data
+    : Buffer.from(input.data.buffer, input.data.byteOffset, input.data.byteLength);
+  if (data.length > 512 * 1024) {
+    throw new RangeError("Output PCM payload exceeds 512 KiB");
+  }
+  const endOfStream = !!input.endOfStream;
+  if (endOfStream) {
+    if (data.length || input.frameCount) {
+      throw new RangeError("An output EOS packet cannot contain PCM frames");
+    }
+  } else if (!input.frameCount || data.length !== input.frameCount * bytesPerFrame(input.format)) {
+    throw new RangeError("Output PCM payload and frame count are inconsistent");
+  }
+  const header = Buffer.alloc(64);
+  header.writeUInt32BE(0x53585043, 0);
+  header.writeUInt16BE(2, 4);
+  header.writeUInt16BE((input.discontinuity ? 1 : 0) | (endOfStream ? 2 : 0), 6);
+  header.writeUInt32BE(64, 8);
+  header.writeUInt32BE(data.length, 12);
+  uuidToBytes(input.streamId).copy(header, 16);
+  header.writeBigUInt64BE(input.sequence, 32);
+  header.writeBigUInt64BE(input.timestampNs, 40);
+  if (!endOfStream) {
+    header.writeUInt32BE(input.format.sample_rate, 48);
+    header.writeUInt32BE(input.frameCount, 52);
+    header.writeUInt16BE(input.format.channel_count, 56);
+    header.writeUInt16BE(input.format.sample_format === "pcm_s16le" ? 1 : 2, 58);
+  }
+  return data.length ? Buffer.concat([header, data]) : header;
+}
+
+function parseOutputDestination(value: unknown): AudioOutputDestination {
+  const record = asRecord(value, "output destination");
+  const kind = stringField(record, "kind");
+  if (kind !== "playback" && kind !== "virtual_input") {
+    throw new TypeError(`Unknown output destination kind ${JSON.stringify(kind)}`);
+  }
+  const formats = record.supported_formats;
+  if (!Array.isArray(formats)) throw new TypeError("supported_formats must be an array");
+  return {
+    id: stringField(record, "id"),
+    kind,
+    name: stringField(record, "name"),
+    is_available: booleanField(record, "is_available"),
+    is_default: booleanField(record, "is_default"),
+    follows_system_default: booleanField(record, "follows_system_default"),
+    active_device_name: optionalStringField(record, "active_device_name"),
+    native_format: record.native_format === undefined || record.native_format === null
+      ? undefined : parseAudioFormat(record.native_format),
+    supported_formats: formats.map(parseAudioFormat),
+  };
+}
+
+function parseOutputInfo(value: unknown): OutputInfo {
+  const record = asRecord(value, "output session");
+  const state = stringField(record, "state");
+  if (!["starting", "ready", "draining", "stopped", "cancelled", "failed"].includes(state)) {
+    throw new TypeError(`Unknown output session state ${JSON.stringify(state)}`);
+  }
+  const streamId = stringField(record, "stream_id");
+  uuidToBytes(streamId);
+  return {
+    id: stringField(record, "id"),
+    stream_id: streamId,
+    destination_id: stringField(record, "destination_id"),
+    state: state as OutputSessionState,
+    format: parseAudioFormat(record.format),
+    data_socket_path: stringField(record, "data_socket_path"),
+    started_at_nanoseconds: numericField(record, "started_at_nanoseconds"),
+    target_buffer_milliseconds: numericField(record, "target_buffer_milliseconds"),
+    metrics: parseOutputMetrics(record.metrics),
+    error: record.error === undefined || record.error === null
+      ? undefined : parseRuntimeError(record.error),
+  };
+}
+
+function parseOutputMetrics(value: unknown): OutputMetrics {
+  const record = value === undefined || value === null ? {} : asRecord(value, "output metrics");
+  const integerFields = [
+    "packets_received", "input_frames_received", "input_bytes_received",
+    "device_frames_enqueued", "device_frames_rendered", "dropped_frames", "flushed_frames",
+    "late_frames", "underrun_frames", "underrun_events", "overrun_events",
+    "queue_depth_frames", "queue_high_water_frames", "target_buffer_milliseconds",
+    "conversion_batches", "conversion_nanoseconds", "route_changes",
+  ] as const;
+  const result: Record<string, number | boolean> = {};
+  for (const field of integerFields) result[field] = optionalNumericField(record, field, 0);
+  result.buffered_milliseconds = optionalNumericField(record, "buffered_milliseconds", 0);
+  result.producer_connected = optionalBooleanField(record, "producer_connected", false);
+  return result as unknown as OutputMetrics;
+}
+
+function parseAudioFormat(value: unknown): AudioFormat {
+  const record = asRecord(value, "audio format");
+  const sampleFormat = stringField(record, "sample_format");
+  if (sampleFormat !== "pcm_s16le" && sampleFormat !== "float32_le") {
+    throw new TypeError(`Unknown sample format ${JSON.stringify(sampleFormat)}`);
+  }
+  const sampleRate = numericField(record, "sample_rate");
+  const channelCount = numericField(record, "channel_count");
+  if (!Number.isInteger(sampleRate) || sampleRate <= 0
+      || !Number.isInteger(channelCount) || channelCount <= 0) {
+    throw new TypeError("Audio format sample rate and channel count must be positive integers");
+  }
+  return { sample_rate: sampleRate, channel_count: channelCount,
+    sample_format: sampleFormat, interleaved: booleanField(record, "interleaved") };
+}
+
+function parseRuntimeError(value: unknown): RuntimeErrorInfo {
+  const record = asRecord(value, "Runtime error");
+  const details = record.details;
+  if (details !== undefined && (details === null || typeof details !== "object"
+      || Array.isArray(details))) throw new TypeError("Runtime error details must be an object");
+  return { code: stringField(record, "code"), message: stringField(record, "message"),
+    retryable: booleanField(record, "retryable"),
+    details: details as Record<string, string> | undefined };
+}
+
+function asRecord(value: unknown, name: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${name} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function stringField(record: Record<string, unknown>, name: string): string {
+  const value = record[name];
+  if (typeof value !== "string") throw new TypeError(`${name} must be a string`);
+  return value;
+}
+
+function optionalStringField(record: Record<string, unknown>, name: string): string | undefined {
+  const value = record[name];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new TypeError(`${name} must be a string`);
+  return value;
+}
+
+function booleanField(record: Record<string, unknown>, name: string): boolean {
+  const value = record[name];
+  if (typeof value !== "boolean") throw new TypeError(`${name} must be a boolean`);
+  return value;
+}
+
+function optionalBooleanField(record: Record<string, unknown>, name: string,
+                              fallback: boolean): boolean {
+  const value = record[name];
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") throw new TypeError(`${name} must be a boolean`);
+  return value;
+}
+
+function numericField(record: Record<string, unknown>, name: string): number {
+  const value = record[name];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative finite number`);
+  }
+  return value;
+}
+
+function optionalNumericField(record: Record<string, unknown>, name: string,
+                              fallback: number): number {
+  return record[name] === undefined ? fallback : numericField(record, name);
+}
+
+function bytesPerFrame(format: AudioFormat): number {
+  if (!Number.isInteger(format.sample_rate) || format.sample_rate <= 0
+      || !Number.isInteger(format.channel_count) || format.channel_count <= 0
+      || format.interleaved !== true) {
+    throw new RangeError("Output format must be positive-rate interleaved PCM");
+  }
+  return format.channel_count * (format.sample_format === "pcm_s16le" ? 2
+    : format.sample_format === "float32_le" ? 4
+      : (() => { throw new RangeError("Unsupported output sample format"); })());
+}
+
+function timestampToBigInt(value: bigint | number): bigint {
+  if (typeof value === "bigint") {
+    if (value < 0n) throw new RangeError("timestampNs must not be negative");
+    return value;
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("Numeric timestampNs must be a non-negative safe integer; use bigint otherwise");
+  }
+  return BigInt(value);
+}
+
+function uuidToBytes(value: string): Buffer {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+    throw new TypeError("Stream ID must be a UUID");
+  }
+  return Buffer.from(value.replaceAll("-", ""), "hex");
+}
+
+async function writeWithBackpressure(socket: Socket, packet: Buffer,
+                                     signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw abortError();
+  if (socket.destroyed || !socket.writable) {
+    throw new SonexisError("output_stream_closed", "Output data socket is closed", true);
+  }
+  if (socket.write(packet)) return;
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      socket.removeListener("drain", onDrain);
+      socket.removeListener("error", onError);
+      socket.removeListener("close", onClose);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (action: () => void): void => { cleanup(); action(); };
+    const onDrain = (): void => finish(resolve);
+    const onError = (error: Error): void => finish(() => reject(error));
+    const onClose = (): void => finish(() => reject(new SonexisError(
+      "output_stream_closed", "Output data socket closed during backpressure", true)));
+    const onAbort = (): void => finish(() => reject(abortError()));
+    socket.once("drain", onDrain);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+async function waitForPromise(promise: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return promise;
+  if (signal.aborted) throw abortError();
+  let onAbort!: () => void;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(abortError());
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+function outputFailure(info: OutputInfo): OutputFailedError {
+  return new OutputFailedError(info.error?.message ?? "Audio output failed",
+    info.error?.code ?? "output_failed", info.error?.retryable ?? false,
+    info.error?.details ?? {});
 }
 
 export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFrame> {
@@ -1012,7 +1690,11 @@ export function decodeEvent(line: Buffer): RuntimeEvent {
       || !Number.isFinite(event.event_sequence) || event.event_sequence < 0)) {
     throw new SonexisError("invalid_event", "Runtime sent an invalid event sequence");
   }
-  return event as unknown as RuntimeEvent;
+  const decoded = event as unknown as RuntimeEvent;
+  if (event.output_session !== undefined && event.output_session !== null) {
+    decoded.output_session = parseOutputInfo(event.output_session);
+  }
+  return decoded;
 }
 
 function uuidFromBytes(bytes: Buffer): string {

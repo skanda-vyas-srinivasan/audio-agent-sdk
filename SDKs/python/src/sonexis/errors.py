@@ -34,6 +34,13 @@ class SonexisError(Exception):
             "permission_denied": PermissionDeniedError,
             "slow_consumer": SlowConsumerError,
             "capture_failed": CaptureFailedError,
+            "output_unavailable": OutputUnavailableError,
+            "output_session_limit_exceeded": SessionLimitError,
+            "unsupported_output_format": UnsupportedFormatError,
+            "output_initialization_failed": OutputFailedError,
+            "output_flush_failed": OutputFailedError,
+            "output_stream_failed": OutputFailedError,
+            "output_stream_truncated": OutputFailedError,
         }.get(code, cls)
         return error_type(
             code,
@@ -86,3 +93,11 @@ class PermissionDeniedError(SonexisError):
 
 class SlowConsumerError(SonexisError):
     """A consumer fell behind a bounded realtime stream."""
+
+
+class OutputUnavailableError(SonexisError):
+    """The requested Runtime-owned audio output destination is unavailable."""
+
+
+class OutputFailedError(SonexisError):
+    """An output session failed during setup, streaming, flush, or render."""

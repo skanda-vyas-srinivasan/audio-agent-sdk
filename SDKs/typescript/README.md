@@ -1,8 +1,8 @@
 # Sonexis TypeScript SDK
 
 The dependency-free `@sonexis/runtime` client targets Node.js 18+ and Sonexis Runtime protocol
-v2. Version 0.3 adds ergonomic source resolution, source-aware audio frames, AI format presets,
-and bounded labeled multi-source capture without changing the wire protocol.
+v2. Version 0.4 adds typed, bounded client-to-Runtime audio output while preserving the source-aware
+capture, AI format presets, and labeled multi-source APIs from v0.3.
 
 ```sh
 npm install
@@ -86,6 +86,56 @@ try {
 
 Timestamps remain independent Runtime stream clocks. The helper provides arrival-order
 multiplexing, not sample-accurate synchronization across applications.
+
+## Realtime playback
+
+The Runtime owns the selected macOS device. Node sends ordered PCM over the dedicated binary data
+plane; audio never travels in control-plane JSON.
+
+```ts
+const destinations = await sx.outputDestinations();
+console.log(destinations.map((destination) => destination.name));
+
+const output = await sx.playback({
+  destination: "default", // or a typed AudioOutputDestination
+  format: AudioFormats.openAIRealtime(),
+  targetBufferMilliseconds: 80,
+});
+
+try {
+  for await (const pcm of modelAudio) {
+    await output.write(pcm); // Buffer or Uint8Array
+  }
+  await output.close();      // sends EOS and waits briefly for Runtime drain
+} catch (error) {
+  await output.cancel();     // barge-in: discard buffered playback, no EOS
+  throw error;
+}
+```
+
+`write()` validates complete interleaved sample frames, serializes concurrent callers, splits large
+chunks into packets no longer than 200 ms, and awaits Node's Unix-socket `drain` signal. The SDK
+does not add an unbounded queue. Optional `timestampNs`, `discontinuity`, and `signal` values can be
+passed with each write:
+
+```ts
+await output.write(pcm, {
+  timestampNs: 2_000_000_000n,
+  discontinuity: true,
+  signal: abortController.signal,
+});
+```
+
+`await output.refresh()` returns current `OutputInfo` and `OutputMetrics`, including rendered,
+dropped, late, underrun, overrun, queue-depth, buffered-duration, conversion, route-change, and
+producer-connection state. `await output.flush()` discards Runtime-buffered audio, reconnects to a
+fresh stream epoch, and resets sequence/timestamp numbering. `cancel()` is the immediate barge-in
+primitive. Closing the owning `Sonexis` client cancels every output it created before closing the
+control connection.
+
+`default` follows the current system default output device. Other destinations, including a future
+virtual input, are discoverable through `outputDestinations()` when advertised by the Runtime.
+Output APIs fail with `unsupported_capability` against a pre-v0.4 Runtime.
 
 ## Lifecycle
 

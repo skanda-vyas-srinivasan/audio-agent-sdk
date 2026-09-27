@@ -41,6 +41,11 @@ final class RealtimeRingBuffer {
         return SonexisAudioRingBufferReadInterleaved(pointer, samples, frames)
     }
 
+    func flush() -> UInt32 {
+        guard let pointer else { return 0 }
+        return SonexisAudioRingBufferFlush(pointer)
+    }
+
     func setGainImmediate(_ gain: Float) {
         guard let pointer else { return }
         SonexisAudioRingBufferSetGainImmediate(pointer, gain)
@@ -64,6 +69,11 @@ final class RealtimeRingBuffer {
     var fillFrames: UInt32 {
         guard let pointer else { return 0 }
         return SonexisAudioRingBufferGetFillFrames(pointer)
+    }
+
+    var writableFrames: UInt32 {
+        guard let pointer else { return 0 }
+        return SonexisAudioRingBufferGetWritableFrames(pointer)
     }
 
     var droppedFrames: UInt64 {

@@ -123,7 +123,8 @@ private func socketDirectory(arguments: [String]) throws -> URL {
 
 do {
     let directory = try socketDirectory(arguments: CommandLine.arguments)
-    let server = SonexisRuntimeServer(socketDirectory: directory, backend: SonexisCaptureBackend())
+    let server = SonexisRuntimeServer(socketDirectory: directory,
+        backend: SonexisCaptureBackend(), outputBackend: RuntimeHALPlaybackBackend())
     try server.start()
     print("Sonexis Runtime listening at \(server.paths.controlSocketPath)")
 

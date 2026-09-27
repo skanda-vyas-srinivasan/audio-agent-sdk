@@ -13,6 +13,7 @@ class ProviderEvent:
     type: str
     text: Optional[str] = None
     audio: Optional[bytes] = None
+    audio_format: Optional[AudioFormat] = None
     raw: Any = None
 
 

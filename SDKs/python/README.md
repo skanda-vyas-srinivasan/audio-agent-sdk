@@ -1,8 +1,9 @@
 # Sonexis Python SDK
 
-The source-aware async SDK for Sonexis Runtime v0.3. It connects only to the
-local Unix-domain Runtime and keeps Core Audio details out of application code.
-The core package has no runtime dependencies and supports Python 3.9+.
+The source-aware, bidirectional async SDK for Sonexis Runtime v0.4. It connects
+only to the local Unix-domain Runtime and keeps Core Audio details out of
+application code. The core package has no runtime dependencies and supports
+Python 3.9+.
 
 ## Install for repository development
 
@@ -45,6 +46,54 @@ Every delivered `AudioFrame` includes its immutable source snapshot, session and
 stream IDs, sequence, format, session-relative timestamp, discontinuity/drop
 state, and SDK receipt time. `estimated_capture_at_ns` is an approximate Runtime
 presentation coordinate—not a preserved Core Audio host timestamp.
+
+## Play realtime audio
+
+The Runtime, rather than the Python process, owns the selected output device:
+
+```python
+import asyncio
+from sonexis import AudioFormat, Sonexis
+
+async def main(model_audio):
+    async with Sonexis() as sx:
+        async with await sx.playback(
+            destination="default",
+            format=AudioFormat.openai_realtime(),
+            target_buffer_milliseconds=80,
+        ) as output:
+            async for pcm_chunk in model_audio:
+                await output.write(pcm_chunk)
+
+asyncio.run(main(...))
+```
+
+`write()` accepts `bytes`, `bytearray`, or `memoryview` containing whole,
+interleaved PCM sample frames. It serializes concurrent callers and splits
+large chunks into protocol packets no longer than 200 ms. Awaiting `write()`
+applies Unix-socket backpressure; the SDK does not add an unbounded queue.
+Supply `timestamp_ns=` when a producer has a stream-relative presentation
+timestamp. Otherwise the SDK derives continuous timestamps from frames sent.
+
+Normal context-manager exit sends EOS and waits briefly for the Runtime to
+drain. `await output.cancel()` is the barge-in primitive: it closes the stream
+without EOS and asks the Runtime to discard buffered playback. `flush()`
+discards queued audio while keeping the logical session, attaches the new
+stream epoch returned by the Runtime, and resets sequence/timestamp state.
+
+Use `await sx.output_destinations()` to enumerate typed
+`AudioOutputDestination` values. `await output.refresh()` or
+`await sx.output_status(output.info.id)` returns `OutputInfo` and
+`OutputMetrics`, including input/rendered/dropped frames, underruns, overruns,
+queue depth, buffered duration, conversion work, route changes, and whether a
+producer is attached. The `default` destination follows the current macOS
+default output device. A Runtime without the v0.4 `output_sessions` capability
+fails these calls with `unsupported_capability` instead of sending unsupported
+commands.
+
+The output data plane uses the same 64-byte SXPC v2 PCM envelope as capture,
+but in the client-to-Runtime direction. Continuous audio never travels in JSON
+control requests.
 
 ## Multiple labeled sources
 

@@ -2,10 +2,12 @@ import Foundation
 
 public enum RuntimeProtocolInfo {
     public static let protocolVersion = 2
-    public static let runtimeVersion = "0.3.0"
+    public static let runtimeVersion = "0.4.0"
     public static let capabilities = [
         "application_sources", "capture_sessions", "event_stream", "format_negotiation",
-        "multiple_sessions", "pcm_v2", "runtime_diagnostics",
+        "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions",
+        "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush",
+        "default_device_playback",
     ]
 }
 
@@ -253,12 +255,19 @@ public struct RuntimeResourceLimitsDTO: Codable, Equatable, Sendable {
     public let maximumControlMessageBytes: Int
     public let maximumEventSubscriptions: Int
     public let maximumEventSubscriptionsPerClient: Int
+    /// Optional for protocol-v2 compatibility with v0.3 Runtime handshakes.
+    public let maximumOutputSessions: Int?
+    public let maximumOutputSessionsPerClient: Int?
+    public let maximumOutputPacketMilliseconds: Int?
 
     public init(maximumControlClients: Int = 32, maximumSessions: Int = 16,
                 maximumSessionsPerClient: Int = 8, maximumSubscribersPerStream: Int = 4,
                 maximumControlMessageBytes: Int = 64 * 1024,
                 maximumEventSubscriptions: Int = 32,
-                maximumEventSubscriptionsPerClient: Int = 4) {
+                maximumEventSubscriptionsPerClient: Int = 4,
+                maximumOutputSessions: Int? = 8,
+                maximumOutputSessionsPerClient: Int? = 4,
+                maximumOutputPacketMilliseconds: Int? = 200) {
         self.maximumControlClients = maximumControlClients
         self.maximumSessions = maximumSessions
         self.maximumSessionsPerClient = maximumSessionsPerClient
@@ -266,6 +275,9 @@ public struct RuntimeResourceLimitsDTO: Codable, Equatable, Sendable {
         self.maximumControlMessageBytes = maximumControlMessageBytes
         self.maximumEventSubscriptions = maximumEventSubscriptions
         self.maximumEventSubscriptionsPerClient = maximumEventSubscriptionsPerClient
+        self.maximumOutputSessions = maximumOutputSessions
+        self.maximumOutputSessionsPerClient = maximumOutputSessionsPerClient
+        self.maximumOutputPacketMilliseconds = maximumOutputPacketMilliseconds
     }
 }
 
@@ -275,7 +287,22 @@ public struct RuntimeHandshakeDTO: Codable, Equatable, Sendable {
     public let runtimeInstanceID: String
     public let capabilities: [String]
     public let supportedFormats: [RuntimePCMFormatDTO]
+    /// Additive protocol-v2 field. Nil when decoding a v0.3 handshake.
+    public let supportedOutputFormats: [RuntimePCMFormatDTO]?
     public let limits: RuntimeResourceLimitsDTO
+
+    public init(protocolVersion: Int, runtimeVersion: String, runtimeInstanceID: String,
+                capabilities: [String], supportedFormats: [RuntimePCMFormatDTO],
+                supportedOutputFormats: [RuntimePCMFormatDTO]? = RuntimePCMFormatDTO.supported,
+                limits: RuntimeResourceLimitsDTO) {
+        self.protocolVersion = protocolVersion
+        self.runtimeVersion = runtimeVersion
+        self.runtimeInstanceID = runtimeInstanceID
+        self.capabilities = capabilities
+        self.supportedFormats = supportedFormats
+        self.supportedOutputFormats = supportedOutputFormats
+        self.limits = limits
+    }
 }
 
 public struct RuntimeStatusDTO: Codable, Equatable, Sendable {
@@ -290,6 +317,167 @@ public struct RuntimeStatusDTO: Codable, Equatable, Sendable {
     public let totalDroppedFrames: UInt64
     public let totalBytesTransmitted: UInt64
     public let totalEventsDropped: UInt64
+    /// Additive output diagnostics; nil when decoding a v0.3 status response.
+    public let activeOutputSessions: Int?
+    public let totalOutputSessionsStarted: UInt64?
+    public let totalOutputFramesReceived: UInt64?
+    public let totalOutputFramesRendered: UInt64?
+    public let totalOutputFramesDropped: UInt64?
+    public let totalOutputBytesReceived: UInt64?
+
+    public init(runtimeVersion: String, runtimeInstanceID: String, uptimeNanoseconds: UInt64,
+                activeClients: Int, activeSessions: Int, eventSubscribers: Int,
+                totalSessionsStarted: UInt64, totalFramesForwarded: UInt64,
+                totalDroppedFrames: UInt64, totalBytesTransmitted: UInt64,
+                totalEventsDropped: UInt64, activeOutputSessions: Int? = nil,
+                totalOutputSessionsStarted: UInt64? = nil,
+                totalOutputFramesReceived: UInt64? = nil,
+                totalOutputFramesRendered: UInt64? = nil,
+                totalOutputFramesDropped: UInt64? = nil,
+                totalOutputBytesReceived: UInt64? = nil) {
+        self.runtimeVersion = runtimeVersion
+        self.runtimeInstanceID = runtimeInstanceID
+        self.uptimeNanoseconds = uptimeNanoseconds
+        self.activeClients = activeClients
+        self.activeSessions = activeSessions
+        self.eventSubscribers = eventSubscribers
+        self.totalSessionsStarted = totalSessionsStarted
+        self.totalFramesForwarded = totalFramesForwarded
+        self.totalDroppedFrames = totalDroppedFrames
+        self.totalBytesTransmitted = totalBytesTransmitted
+        self.totalEventsDropped = totalEventsDropped
+        self.activeOutputSessions = activeOutputSessions
+        self.totalOutputSessionsStarted = totalOutputSessionsStarted
+        self.totalOutputFramesReceived = totalOutputFramesReceived
+        self.totalOutputFramesRendered = totalOutputFramesRendered
+        self.totalOutputFramesDropped = totalOutputFramesDropped
+        self.totalOutputBytesReceived = totalOutputBytesReceived
+    }
+}
+
+public enum RuntimeOutputDestinationKindDTO: String, Codable, Sendable {
+    case playback
+    case virtualInput = "virtual_input"
+}
+
+public struct RuntimeOutputDestinationDTO: Codable, Equatable, Sendable {
+    public let id: String
+    public let kind: RuntimeOutputDestinationKindDTO
+    public let name: String
+    public let isAvailable: Bool
+    public let isDefault: Bool
+    public let followsSystemDefault: Bool
+    public let activeDeviceName: String?
+    public let nativeFormat: RuntimePCMFormatDTO?
+    public let supportedFormats: [RuntimePCMFormatDTO]
+
+    public init(id: String, kind: RuntimeOutputDestinationKindDTO, name: String,
+                isAvailable: Bool, isDefault: Bool = false,
+                followsSystemDefault: Bool = false, activeDeviceName: String? = nil,
+                nativeFormat: RuntimePCMFormatDTO? = nil,
+                supportedFormats: [RuntimePCMFormatDTO] = RuntimePCMFormatDTO.supported) {
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.isAvailable = isAvailable
+        self.isDefault = isDefault
+        self.followsSystemDefault = followsSystemDefault
+        self.activeDeviceName = activeDeviceName
+        self.nativeFormat = nativeFormat
+        self.supportedFormats = supportedFormats
+    }
+}
+
+public enum RuntimeOutputSessionStateDTO: String, Codable, Sendable {
+    case starting
+    case ready
+    case draining
+    case stopped
+    case cancelled
+    case failed
+}
+
+public struct RuntimeOutputMetricsDTO: Codable, Equatable, Sendable {
+    public let packetsReceived: UInt64
+    public let inputFramesReceived: UInt64
+    public let inputBytesReceived: UInt64
+    public let deviceFramesEnqueued: UInt64
+    public let deviceFramesRendered: UInt64
+    public let droppedFrames: UInt64
+    public let flushedFrames: UInt64
+    public let lateFrames: UInt64
+    public let underrunFrames: UInt64
+    public let underrunEvents: UInt64
+    public let overrunEvents: UInt64
+    public let queueDepthFrames: UInt32
+    public let queueHighWaterFrames: UInt32
+    public let bufferedMilliseconds: Double
+    public let targetBufferMilliseconds: UInt32
+    public let conversionBatches: UInt64
+    public let conversionNanoseconds: UInt64
+    public let routeChanges: UInt64
+    public let producerConnected: Bool
+
+    public init(packetsReceived: UInt64 = 0, inputFramesReceived: UInt64 = 0,
+                inputBytesReceived: UInt64 = 0, deviceFramesEnqueued: UInt64 = 0,
+                deviceFramesRendered: UInt64 = 0, droppedFrames: UInt64 = 0,
+                flushedFrames: UInt64 = 0, lateFrames: UInt64 = 0,
+                underrunFrames: UInt64 = 0, underrunEvents: UInt64 = 0,
+                overrunEvents: UInt64 = 0, queueDepthFrames: UInt32 = 0,
+                queueHighWaterFrames: UInt32 = 0, bufferedMilliseconds: Double = 0,
+                targetBufferMilliseconds: UInt32 = 60, conversionBatches: UInt64 = 0,
+                conversionNanoseconds: UInt64 = 0, routeChanges: UInt64 = 0,
+                producerConnected: Bool = false) {
+        self.packetsReceived = packetsReceived
+        self.inputFramesReceived = inputFramesReceived
+        self.inputBytesReceived = inputBytesReceived
+        self.deviceFramesEnqueued = deviceFramesEnqueued
+        self.deviceFramesRendered = deviceFramesRendered
+        self.droppedFrames = droppedFrames
+        self.flushedFrames = flushedFrames
+        self.lateFrames = lateFrames
+        self.underrunFrames = underrunFrames
+        self.underrunEvents = underrunEvents
+        self.overrunEvents = overrunEvents
+        self.queueDepthFrames = queueDepthFrames
+        self.queueHighWaterFrames = queueHighWaterFrames
+        self.bufferedMilliseconds = bufferedMilliseconds
+        self.targetBufferMilliseconds = targetBufferMilliseconds
+        self.conversionBatches = conversionBatches
+        self.conversionNanoseconds = conversionNanoseconds
+        self.routeChanges = routeChanges
+        self.producerConnected = producerConnected
+    }
+}
+
+public struct RuntimeOutputSessionDTO: Codable, Equatable, Sendable {
+    public let id: String
+    public let streamID: String
+    public let destinationID: String
+    public let state: RuntimeOutputSessionStateDTO
+    public let format: RuntimePCMFormatDTO
+    public let dataSocketPath: String
+    public let startedAtNanoseconds: UInt64
+    public let targetBufferMilliseconds: UInt32
+    public let metrics: RuntimeOutputMetricsDTO
+    public let error: RuntimeErrorDTO?
+
+    public init(id: String, streamID: String, destinationID: String,
+                state: RuntimeOutputSessionStateDTO, format: RuntimePCMFormatDTO,
+                dataSocketPath: String, startedAtNanoseconds: UInt64,
+                targetBufferMilliseconds: UInt32,
+                metrics: RuntimeOutputMetricsDTO = .init(), error: RuntimeErrorDTO? = nil) {
+        self.id = id
+        self.streamID = streamID
+        self.destinationID = destinationID
+        self.state = state
+        self.format = format
+        self.dataSocketPath = dataSocketPath
+        self.startedAtNanoseconds = startedAtNanoseconds
+        self.targetBufferMilliseconds = targetBufferMilliseconds
+        self.metrics = metrics
+        self.error = error
+    }
 }
 
 public enum RuntimeEventTypeDTO: String, Codable, CaseIterable, Sendable {
@@ -303,6 +491,16 @@ public enum RuntimeEventTypeDTO: String, Codable, CaseIterable, Sendable {
     case deviceChanged = "device_changed"
     case runtimeWarning = "runtime_warning"
     case runtimeShuttingDown = "runtime_shutting_down"
+    case outputStarted = "output_started"
+    case outputStopped = "output_stopped"
+    case outputCancelled = "output_cancelled"
+    case outputFailed = "output_failed"
+    case outputUnderrun = "output_underrun"
+    case outputOverrun = "output_overrun"
+    case outputDropped = "output_dropped"
+    case outputDestinationChanged = "output_destination_changed"
+    case virtualInputConnected = "virtual_input_connected"
+    case virtualInputDisconnected = "virtual_input_disconnected"
 }
 
 public struct RuntimeEventDTO: Codable, Equatable, Sendable {
@@ -322,6 +520,7 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
     public let message: String?
     public let error: RuntimeErrorDTO?
     public let droppedFrames: UInt64?
+    public let outputSession: RuntimeOutputSessionDTO?
 
     public init(type: RuntimeEventTypeDTO,
                 eventID: String = UUID().uuidString.lowercased(),
@@ -330,7 +529,8 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
                 sourceID: String? = nil, sessionID: String? = nil, streamID: String? = nil,
                 source: RuntimeSourceDTO? = nil, session: RuntimeSessionDTO? = nil,
                 message: String? = nil, error: RuntimeErrorDTO? = nil,
-                droppedFrames: UInt64? = nil) {
+                droppedFrames: UInt64? = nil,
+                outputSession: RuntimeOutputSessionDTO? = nil) {
         protocolVersion = RuntimeProtocolInfo.protocolVersion
         self.eventID = eventID
         self.eventSequence = eventSequence
@@ -345,6 +545,7 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
         self.message = message
         self.error = error
         self.droppedFrames = droppedFrames
+        self.outputSession = outputSession
     }
 
     public func delivered(sequence: UInt64, droppedEventsBefore: UInt64) -> Self {
@@ -352,7 +553,8 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
             droppedEventsBefore: droppedEventsBefore == 0 ? nil : droppedEventsBefore,
             timestampNanoseconds: timestampNanoseconds, sourceID: sourceID,
             sessionID: sessionID, streamID: streamID, source: source, session: session,
-            message: message, error: error, droppedFrames: droppedFrames)
+            message: message, error: error, droppedFrames: droppedFrames,
+            outputSession: outputSession)
     }
 }
 
@@ -371,6 +573,11 @@ public enum RuntimeCommandName: String, Codable, Sendable {
     case runtimeStatus = "runtime_status"
     case subscribeEvents = "subscribe_events"
     case unsubscribeEvents = "unsubscribe_events"
+    case listOutputDestinations = "list_output_destinations"
+    case startOutput = "start_output"
+    case outputStatus = "output_status"
+    case flushOutput = "flush_output"
+    case stopOutput = "stop_output"
     case ping
     case unknown
 
@@ -400,13 +607,18 @@ public struct RuntimeCommand: Codable, Equatable, Sendable {
     public let clientName: String?
     public let clientVersion: String?
     public let eventTypes: [RuntimeEventTypeDTO]?
+    public let destinationID: String?
+    public let outputSessionID: String?
+    public let targetBufferMilliseconds: UInt32?
 
     public init(protocolVersion: Int = currentVersion,
                 requestID: String = UUID().uuidString.lowercased(),
                 command: RuntimeCommandName, sourceID: String? = nil, sessionID: String? = nil,
                 subscriptionID: String? = nil, format: RuntimePCMFormatDTO? = nil,
                 supportedProtocolVersions: [Int]? = nil, clientName: String? = nil,
-                clientVersion: String? = nil, eventTypes: [RuntimeEventTypeDTO]? = nil) {
+                clientVersion: String? = nil, eventTypes: [RuntimeEventTypeDTO]? = nil,
+                destinationID: String? = nil, outputSessionID: String? = nil,
+                targetBufferMilliseconds: UInt32? = nil) {
         messageType = "request"
         self.protocolVersion = protocolVersion
         self.requestID = requestID
@@ -419,6 +631,9 @@ public struct RuntimeCommand: Codable, Equatable, Sendable {
         self.clientName = clientName
         self.clientVersion = clientVersion
         self.eventTypes = eventTypes
+        self.destinationID = destinationID
+        self.outputSessionID = outputSessionID
+        self.targetBufferMilliseconds = targetBufferMilliseconds
     }
 }
 
@@ -450,12 +665,16 @@ public struct RuntimeResponse: Codable, Equatable, Sendable {
     public let session: RuntimeSessionDTO?
     public let status: RuntimeStatusDTO?
     public let subscription: RuntimeEventSubscriptionDTO?
+    public let outputDestinations: [RuntimeOutputDestinationDTO]?
+    public let outputSession: RuntimeOutputSessionDTO?
     public let message: String?
     public let error: RuntimeErrorDTO?
 
     private init(requestID: String, ok: Bool, handshake: RuntimeHandshakeDTO? = nil,
                  sources: [RuntimeSourceDTO]? = nil, session: RuntimeSessionDTO? = nil,
                  status: RuntimeStatusDTO? = nil, subscription: RuntimeEventSubscriptionDTO? = nil,
+                 outputDestinations: [RuntimeOutputDestinationDTO]? = nil,
+                 outputSession: RuntimeOutputSessionDTO? = nil,
                  message: String? = nil, error: RuntimeErrorDTO? = nil) {
         messageType = "response"
         protocolVersion = RuntimeProtocolInfo.protocolVersion
@@ -467,6 +686,8 @@ public struct RuntimeResponse: Codable, Equatable, Sendable {
         self.session = session
         self.status = status
         self.subscription = subscription
+        self.outputDestinations = outputDestinations
+        self.outputSession = outputSession
         self.message = message
         self.error = error
     }
@@ -485,6 +706,12 @@ public struct RuntimeResponse: Codable, Equatable, Sendable {
     }
     public init(requestID: String, subscription: RuntimeEventSubscriptionDTO) {
         self.init(requestID: requestID, ok: true, subscription: subscription)
+    }
+    public init(requestID: String, outputDestinations: [RuntimeOutputDestinationDTO]) {
+        self.init(requestID: requestID, ok: true, outputDestinations: outputDestinations)
+    }
+    public init(requestID: String, outputSession: RuntimeOutputSessionDTO) {
+        self.init(requestID: requestID, ok: true, outputSession: outputSession)
     }
     public init(requestID: String, message: String) {
         self.init(requestID: requestID, ok: true, message: message)

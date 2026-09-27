@@ -1,4 +1,4 @@
-"""Async public client for Sonexis Runtime v0.3."""
+"""Async public client for Sonexis Runtime."""
 
 import asyncio
 from dataclasses import replace
@@ -6,22 +6,25 @@ import json
 import os
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, Union
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, TYPE_CHECKING, Union
 
 from .errors import (AmbiguousSourceError, CaptureFailedError, SonexisConnectionError,
                      SonexisError, SonexisProtocolError, SourceNotFoundError)
-from .models import (AudioFormat, AudioFrame, AudioSource, CaptureInfo, Handshake,
-                     RuntimeEvent, RuntimeStatus)
+from .models import (AudioFormat, AudioFrame, AudioOutputDestination, AudioSource,
+                     CaptureInfo, Handshake, OutputInfo, RuntimeEvent, RuntimeStatus)
 from .protocol import FLAG_EOS, MAX_CONTROL_BYTES, PROTOCOL_VERSION, read_frame
 
 SourceSelector = Union[str, int, AudioSource]
+
+if TYPE_CHECKING:
+    from .output import AudioOutput
 
 
 class Sonexis:
     """A reusable asynchronous connection to the local Sonexis Runtime."""
 
     def __init__(self, socket_path: Optional[str] = None, *, client_name: str = "sonexis-python",
-                 client_version: str = "0.3.0") -> None:
+                 client_version: str = "0.4.0") -> None:
         self.socket_path = socket_path or os.environ.get(
             "SONEXIS_RUNTIME_SOCKET", f"/tmp/sonexis-runtime-{os.getuid()}/control.sock")
         self.client_name = client_name
@@ -36,6 +39,7 @@ class Sonexis:
         self._discarded_request_ids: Set[str] = set()
         self._captures: Set["CaptureSession"] = set()
         self._events: Set["EventSubscription"] = set()
+        self._outputs: Set["AudioOutput"] = set()
         self._close_task: Optional[asyncio.Task] = None
 
     async def __aenter__(self) -> "Sonexis":
@@ -122,10 +126,13 @@ class Sonexis:
     async def _finish_close(self) -> None:
         captures = list(self._captures)
         events = list(self._events)
+        outputs = list(self._outputs)
         for capture in captures:
             await capture.aclose(stop_runtime=False)
         for subscription in events:
             await subscription.aclose(unsubscribe=False)
+        for output in outputs:
+            await output.aclose(drain=False, stop_runtime=False)
         writer, self._writer = self._writer, None
         self._reader = None
         if writer is not None:
@@ -310,6 +317,17 @@ class Sonexis:
         from .multi import MultiSourceSession
         return MultiSourceSession(self, max_queue_frames=max_queue_frames)
 
+    def duplex(self, input_source: SourceSelector, *, output_destination: str = "default",
+               input_format: AudioFormat = AudioFormat(),
+               output_format: AudioFormat = AudioFormat.openai_realtime_output(),
+               target_buffer_milliseconds: int = 60):
+        """Compose one independent capture and output session."""
+        from .duplex import DuplexSession
+        return DuplexSession(self, input_source,
+                             output_destination=output_destination,
+                             input_format=input_format, output_format=output_format,
+                             target_buffer_milliseconds=target_buffer_milliseconds)
+
     async def stop(self, session_id: str) -> CaptureInfo:
         response = await self._request("stop_capture", session_id=session_id)
         try:
@@ -335,6 +353,109 @@ class Sonexis:
             raise
         self._events.add(subscription)
         return subscription
+
+    def _require_output_capability(self) -> None:
+        handshake = self.handshake
+        if handshake is None:
+            raise SonexisConnectionError("not_connected", "Connect to Sonexis Runtime first")
+        if "output_sessions" not in handshake.capabilities:
+            raise SonexisError(
+                "unsupported_capability",
+                "This Runtime does not support client-to-Runtime audio output; Runtime v0.4 is required",
+            )
+
+    async def output_destinations(self) -> List[AudioOutputDestination]:
+        """Return destinations that can render client-provided realtime audio."""
+        self._require_output_capability()
+        response = await self._request("list_output_destinations")
+        try:
+            return [AudioOutputDestination.from_wire(value)
+                    for value in response["output_destinations"]]
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError(
+                "invalid_output_destinations",
+                "Runtime sent malformed output destinations",
+            ) from error
+
+    async def create_output(
+        self,
+        *,
+        destination: Union[str, AudioOutputDestination] = "default",
+        format: AudioFormat = AudioFormat.openai_realtime(),
+        target_buffer_milliseconds: int = 80,
+    ) -> "AudioOutput":
+        """Create and attach a bounded client-to-Runtime PCM output stream."""
+        from .output import AudioOutput
+
+        self._require_output_capability()
+        if not 20 <= target_buffer_milliseconds <= 250:
+            raise ValueError("target_buffer_milliseconds must be between 20 and 250")
+        destination_id = (
+            destination.id if isinstance(destination, AudioOutputDestination) else destination)
+        response = await self._request(
+            "start_output",
+            destination_id=destination_id,
+            format=format.to_wire(),
+            target_buffer_milliseconds=target_buffer_milliseconds,
+        )
+        try:
+            output = AudioOutput(self, OutputInfo.from_wire(response["output_session"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError(
+                "invalid_output_session", "Runtime sent a malformed output session") from error
+        try:
+            await output._open()
+        except BaseException:
+            await self._cleanup_request("stop_output", output_session_id=output.info.id)
+            raise
+        self._outputs.add(output)
+        return output
+
+    async def playback(
+        self,
+        *,
+        destination: Union[str, AudioOutputDestination] = "default",
+        format: AudioFormat = AudioFormat.openai_realtime(),
+        target_buffer_milliseconds: int = 80,
+    ) -> "AudioOutput":
+        """Convenience alias for :meth:`create_output`."""
+        return await self.create_output(
+            destination=destination,
+            format=format,
+            target_buffer_milliseconds=target_buffer_milliseconds,
+        )
+
+    async def output_status(self, output_session_id: str) -> OutputInfo:
+        """Return current state and metrics for one output session."""
+        self._require_output_capability()
+        response = await self._request(
+            "output_status", output_session_id=output_session_id)
+        try:
+            return OutputInfo.from_wire(response["output_session"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError(
+                "invalid_output_session", "Runtime sent a malformed output session") from error
+
+    async def stop_output(self, output_session_id: str) -> OutputInfo:
+        """Stop one output session by ID."""
+        self._require_output_capability()
+        response = await self._request(
+            "stop_output", output_session_id=output_session_id)
+        try:
+            return OutputInfo.from_wire(response["output_session"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError(
+                "invalid_output_session", "Runtime sent a malformed output session") from error
+
+    async def _flush_output(self, output_session_id: str) -> OutputInfo:
+        self._require_output_capability()
+        response = await self._request(
+            "flush_output", output_session_id=output_session_id)
+        try:
+            return OutputInfo.from_wire(response["output_session"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise SonexisProtocolError(
+                "invalid_output_session", "Runtime sent a malformed output session") from error
 
     async def _request(self, command: str, **parameters: Any) -> Dict[str, Any]:
         writer = self._writer

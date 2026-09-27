@@ -39,6 +39,32 @@ private final class SilentBackend: RuntimeCaptureBackend, @unchecked Sendable {
     }
 }
 
+private final class SilentOutputSession: RuntimeBackendOutputSession, @unchecked Sendable {
+    let inputFormat: RuntimePCMFormatDTO
+    let destination = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+        name: "Stress Output", isAvailable: true, isDefault: true)
+    init(format: RuntimePCMFormatDTO) { inputFormat = format }
+    func write(_ frame: RuntimePCMFrame) throws {}
+    func finish() {}
+    func flush() throws {}
+    func stop() {}
+    func metrics() -> RuntimeOutputMetricsDTO { .init() }
+}
+
+private final class SilentOutputBackend: RuntimeOutputBackend, @unchecked Sendable {
+    func availableOutputDestinations() throws -> [RuntimeOutputDestinationDTO] {
+        [RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+            name: "Stress Output", isAvailable: true, isDefault: true)]
+    }
+    func startOutput(destinationID: String, format: RuntimePCMFormatDTO,
+                     targetBufferMilliseconds: UInt32,
+                     onEvent: @escaping @Sendable (RuntimeOutputBackendEvent) -> Void,
+                     onEnded: @escaping @Sendable (RuntimeErrorDTO?) -> Void)
+        throws -> RuntimeBackendOutputSession {
+        SilentOutputSession(format: format)
+    }
+}
+
 private func descriptorCount() -> Int {
     (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? 0
 }
@@ -50,7 +76,8 @@ private func peakRSS() -> Int64 {
 }
 
 let directory = URL(fileURLWithPath: "/tmp/sx-stress-\(UUID().uuidString)", isDirectory: true)
-let server = SonexisRuntimeServer(socketDirectory: directory, backend: SilentBackend())
+let server = SonexisRuntimeServer(socketDirectory: directory, backend: SilentBackend(),
+    outputBackend: SilentOutputBackend())
 let startingFDs = descriptorCount()
 let startingRSS = peakRSS()
 let started = DispatchTime.now().uptimeNanoseconds
@@ -68,6 +95,12 @@ do {
         let session = try client.startCapture(sourceID: "app.stress")
         _ = try client.stopCapture(sessionID: session.id)
         _ = try client.stopCapture(sessionID: session.id)
+    }
+
+    for _ in 0..<1_000 {
+        let output = try client.startOutput()
+        _ = try client.stopOutput(outputSessionID: output.id)
+        _ = try client.stopOutput(outputSessionID: output.id)
     }
 
     for _ in 0..<200 {
@@ -103,13 +136,15 @@ do {
     let status = try client.runtimeStatus()
     expect(status.activeSessions == 0, "stress left active sessions")
     expect(status.totalSessionsStarted >= 1_016, "session counter lost updates")
+    expect((status.totalOutputSessionsStarted ?? 0) >= 1_000,
+           "output session counter lost updates")
     client.disconnect()
     usleep(100_000)
 
     let fdGrowth = descriptorCount() - startingFDs
     expect(fdGrowth <= 8, "file descriptors grew by \(fdGrowth)")
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
-    print("Runtime stress passed: cycles=1000 connections=200 parallel_sessions=16 elapsed_seconds=\(String(format: "%.3f", elapsed)) fd_growth=\(fdGrowth) peak_rss_bytes=\(peakRSS()) baseline_peak_rss_bytes=\(startingRSS)")
+    print("Runtime stress passed: capture_cycles=1000 output_cycles=1000 connections=200 parallel_sessions=16 elapsed_seconds=\(String(format: "%.3f", elapsed)) fd_growth=\(fdGrowth) peak_rss_bytes=\(peakRSS()) baseline_peak_rss_bytes=\(startingRSS)")
 } catch {
     server.stop()
     try? FileManager.default.removeItem(at: directory)
