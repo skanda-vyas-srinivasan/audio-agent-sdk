@@ -249,9 +249,11 @@ Exact commands and expected events are in
 - `43ec14a` - implement destination lifecycle and public endpoint APIs
 - `519dffb` - harden routing and format safety
 - `ef78474` - close independent review gaps
+- `df1a8c5` - finalize v0.6 endpoint maturity
 
-The documentation/final checkpoint commit follows this report. Its immutable
-hash is recorded by a final documentation-only checkpoint before v0.7 begins.
+The clean v0.6 release checkpoint is
+`df1a8c5d115390f8eb60a126a6cda07ed31429ad`. The following documentation-only
+commit records that immutable checkpoint ID before v0.7 begins.
 
 ## Next milestone
 
