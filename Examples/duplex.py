@@ -4,7 +4,7 @@
 import argparse
 import asyncio
 
-from sonexis import AudioFormat, Sonexis
+from sonexis import AudioFormat, Sonexis, SonexisError
 
 
 async def run(source: str, destination: str, maximum_packets: int) -> None:
@@ -32,7 +32,12 @@ def main() -> None:
     parser.add_argument("--packets", type=int, default=100)
     arguments = parser.parse_args()
     print("Use headphones: this example does not provide acoustic echo cancellation.")
-    asyncio.run(run(arguments.source, arguments.destination, arguments.packets))
+    try:
+        asyncio.run(run(arguments.source, arguments.destination, arguments.packets))
+    except KeyboardInterrupt:
+        return
+    except (OSError, SonexisError, ValueError) as error:
+        parser.exit(1, f"duplex failed: {error}\n")
 
 
 if __name__ == "__main__":

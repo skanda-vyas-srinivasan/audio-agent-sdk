@@ -173,7 +173,7 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SonexisConnectionError) as caught:
             await Sonexis(path).connect()
         self.assertEqual(caught.exception.code, "runtime_unavailable")
-        self.assertIn("Scripts/runtime-dev.sh start", caught.exception.message)
+        self.assertIn("Start the local sonexis-runtime process", caught.exception.message)
         self.assertEqual(caught.exception.details["socket_path"], path)
 
     async def test_capture_iteration_and_eos(self):

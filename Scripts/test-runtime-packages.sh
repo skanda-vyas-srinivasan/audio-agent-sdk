@@ -53,7 +53,7 @@ copy_tracked_tree SDKs/typescript "$TEST_DIR/typescript-src"
 (
     cd "$TEST_DIR/typescript-src"
     npm ci --ignore-scripts >/dev/null
-    npm test >/dev/null
+    npm test
     npm pack --pack-destination "$TEST_DIR" >/dev/null
 )
 TYPESCRIPT_PACKAGE=$(find "$TEST_DIR" -type f -name 'sonexis-runtime-*.tgz' -print -quit)

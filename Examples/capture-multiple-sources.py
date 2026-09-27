@@ -4,7 +4,7 @@
 import argparse
 import asyncio
 
-from sonexis import Sonexis
+from sonexis import Sonexis, SonexisError
 
 
 async def run(specifications, maximum_packets: int) -> None:
@@ -30,7 +30,12 @@ def main() -> None:
     parser.add_argument("--packets", type=int, default=0,
                         help="stop after this many packets (zero runs until interrupted)")
     arguments = parser.parse_args()
-    asyncio.run(run(arguments.sources, arguments.packets))
+    try:
+        asyncio.run(run(arguments.sources, arguments.packets))
+    except KeyboardInterrupt:
+        return
+    except (OSError, SonexisError, ValueError) as error:
+        parser.exit(1, f"capture failed: {error}\n")
 
 
 if __name__ == "__main__":

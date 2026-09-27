@@ -81,6 +81,11 @@ SONEXIS_DEV_PREFIX="$PREFIX" "$ROOT_DIR/Scripts/runtime-dev.sh" stop || {
     echo "uninstall-runtime-dev: stop the managed Runtime before uninstalling" >&2
     exit 1
 }
+if /usr/sbin/lsof -t -- "$PREFIX/bin/sonexis-runtime" 2>/dev/null | grep -q .; then
+    echo "uninstall-runtime-dev: Runtime still uses this executable; preserving install" >&2
+    echo "Stop the custom Runtime instance, then retry." >&2
+    exit 1
+fi
 
 rm -f "$PREFIX/bin/sonexis-runtime" "$PREFIX/bin/sonexisctl" "$MANIFEST"
 rmdir "$PREFIX/bin"

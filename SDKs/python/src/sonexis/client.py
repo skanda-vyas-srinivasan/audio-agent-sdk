@@ -104,7 +104,7 @@ class Sonexis:
                     last_error = SonexisConnectionError(
                         "runtime_unavailable",
                         "Cannot connect to Sonexis Runtime at "
-                        f"{self.socket_path}. Start it with Scripts/runtime-dev.sh start "
+                        f"{self.socket_path}. Start the local sonexis-runtime process "
                         f"or verify SONEXIS_RUNTIME_SOCKET. ({reason})",
                         retryable=True,
                         details={"socket_path": self.socket_path},

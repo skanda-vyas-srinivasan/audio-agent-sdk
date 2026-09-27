@@ -109,7 +109,7 @@ test("missing Runtime reports an actionable structured connection error", async 
   await assert.rejects(client.connect(), (error: unknown) => {
     assert.ok(error instanceof SonexisError);
     assert.equal(error.code, "runtime_unavailable");
-    assert.match(error.message, /Scripts\/runtime-dev\.sh start/);
+    assert.match(error.message, /Start the local sonexis-runtime process/);
     assert.equal(error.details.socket_path, path);
     return true;
   });

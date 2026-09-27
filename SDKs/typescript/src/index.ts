@@ -335,7 +335,7 @@ function openSocket(path: string): Promise<Socket> {
     socket.once("connect", () => resolve(socket));
     socket.once("error", (error: NodeJS.ErrnoException) => reject(new SonexisError(
       "runtime_unavailable",
-      `Cannot connect to Sonexis Runtime at ${path}. Start it with Scripts/runtime-dev.sh start `
+      `Cannot connect to Sonexis Runtime at ${path}. Start the local sonexis-runtime process `
         + `or verify SONEXIS_RUNTIME_SOCKET. (${error.code ?? error.message})`,
       true,
       { socket_path: path, cause_code: error.code ?? "socket_error" },

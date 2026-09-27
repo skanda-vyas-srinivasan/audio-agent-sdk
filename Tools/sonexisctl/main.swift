@@ -14,8 +14,16 @@ private struct Arguments {
 
     init(_ values: [String]) throws {
         guard let command = values.first else { throw RuntimeErrorDTO(code: "usage", message: Self.usage) }
+        let commands: Set<String> = ["sources", "status", "capture", "stop", "watch",
+            "outputs", "play", "output-status", "output-stop", "help", "--help", "-h",
+            "version", "--version"]
+        guard commands.contains(command) else {
+            throw RuntimeErrorDTO(code: "usage",
+                message: "Unknown command: \(command)\n\(Self.usage)")
+        }
         self.command = command
         var positional: [String] = []
+        var explicitOptions: Set<String> = []
         var output: String?
         var socketPath = ProcessInfo.processInfo.environment["SONEXIS_RUNTIME_SOCKET"]
             ?? RuntimeSocketPaths.userDefault.controlSocketPath
@@ -28,6 +36,12 @@ private struct Arguments {
         var targetBufferMilliseconds: UInt32 = 60
         var index = 1
         while index < values.count {
+            let token = values[index]
+            if token.hasPrefix("--") {
+                guard explicitOptions.insert(token).inserted else {
+                    throw RuntimeErrorDTO(code: "usage", message: "Duplicate option: \(token)")
+                }
+            }
             switch values[index] {
             case "--output":
                 index += 1
@@ -78,6 +92,40 @@ private struct Arguments {
             index += 1
         }
         guard positional.count <= 1 else { throw RuntimeErrorDTO(code: "usage", message: Self.usage) }
+        let common: Set<String> = ["--socket"]
+        let allowedOptions: Set<String>
+        let minimumPositionals: Int
+        let maximumPositionals: Int
+        switch command {
+        case "sources", "outputs", "watch":
+            allowedOptions = common.union(["--json"])
+            minimumPositionals = 0; maximumPositionals = 0
+        case "status":
+            allowedOptions = common.union(["--json"])
+            minimumPositionals = 0; maximumPositionals = 1
+        case "capture":
+            allowedOptions = common.union(["--sample-rate", "--channels", "--sample-format",
+                "--output", "--debug", "--json"])
+            minimumPositionals = 1; maximumPositionals = 1
+        case "stop", "output-status", "output-stop":
+            allowedOptions = common.union(["--json"])
+            minimumPositionals = 1; maximumPositionals = 1
+        case "play":
+            allowedOptions = common.union(["--destination", "--target-buffer-ms",
+                "--sample-rate", "--channels", "--sample-format", "--debug", "--json"])
+            minimumPositionals = 1; maximumPositionals = 1
+        default:
+            allowedOptions = []
+            minimumPositionals = 0; maximumPositionals = 0
+        }
+        if let invalid = explicitOptions.subtracting(allowedOptions).sorted().first {
+            throw RuntimeErrorDTO(code: "usage",
+                message: "Option \(invalid) is not valid for \(command)\n\(Self.usage)")
+        }
+        guard positional.count >= minimumPositionals,
+              positional.count <= maximumPositionals else {
+            throw RuntimeErrorDTO(code: "usage", message: Self.usage)
+        }
         value = positional.first
         self.output = output
         self.debug = debug
@@ -260,7 +308,7 @@ do {
     } catch {
         throw RuntimeErrorDTO(code: "runtime_unavailable",
             message: "Cannot connect to Sonexis Runtime at \(arguments.socketPath). "
-                + "Start it with Scripts/runtime-dev.sh start or pass --socket. "
+                + "Start the local sonexis-runtime process or pass --socket. "
                 + "(\(error.localizedDescription))", retryable: true)
     }
 

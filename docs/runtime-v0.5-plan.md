@@ -63,7 +63,8 @@ persistence. The scripts will:
 - reject or report a healthy existing instance instead of replacing it;
 - validate PID identity before signalling;
 - distinguish a stale PID/socket from a live Runtime;
-- capture bounded metadata logs without audio content;
+- rotate metadata logs at startup without capturing audio content; one running
+  process can exceed the rotation threshold and this is documented;
 - perform bounded graceful shutdown and report failure clearly.
 
 A launchd agent is intentionally deferred until its install/update ownership

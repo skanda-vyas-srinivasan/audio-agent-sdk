@@ -65,7 +65,12 @@ for product in "$RUNTIME_SOURCE" "$CTL_SOURCE"; do
         echo "install-runtime-dev: missing regular executable: $product" >&2
         exit 1
     }
-    codesign --verify --strict "$product"
+    if ! VERIFY_OUTPUT=$(codesign --verify --strict "$product" 2>&1); then
+        echo "install-runtime-dev: signature verification failed: $product" >&2
+        printf '%s\n' "$VERIFY_OUTPUT" | sed -n '1,3p' >&2
+        echo "Configure a trusted Apple Development identity or set SONEXIS_DEVELOPMENT_TEAM, then rebuild." >&2
+        exit 1
+    fi
     codesign -dvv "$product" 2>&1 | grep -F 'Authority=Apple Development:' >/dev/null || {
         echo "install-runtime-dev: product is not Apple Development signed: $product" >&2
         echo "Configure Xcode signing or set SONEXIS_DEVELOPMENT_TEAM, then rebuild." >&2

@@ -17,6 +17,27 @@ usage() {
     echo "Usage: $0 {start|status|stop|foreground|logs}" >&2
 }
 
+validate_state_directory() {
+    if [ -e "$STATE_DIR" ]; then
+        [ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || {
+            echo "Runtime state path is not a real directory: $STATE_DIR" >&2
+            exit 1
+        }
+        [ "$(stat -f %u "$STATE_DIR")" = "$(id -u)" ] || {
+            echo "Runtime state directory belongs to another user: $STATE_DIR" >&2
+            exit 1
+        }
+    fi
+    [ ! -L "$PID_FILE" ] || {
+        echo "Refusing symbolic-link PID file: $PID_FILE" >&2
+        exit 1
+    }
+    [ ! -L "$LOG_FILE" ] || {
+        echo "Refusing symbolic-link log file: $LOG_FILE" >&2
+        exit 1
+    }
+}
+
 require_install() {
     [ -x "$RUNTIME_BIN" ] && [ ! -L "$RUNTIME_BIN" ] || {
         echo "Sonexis Runtime is not installed at $PREFIX" >&2
@@ -59,8 +80,15 @@ COMMAND=${1:-}
 case "$COMMAND" in
     start)
         require_install
+        validate_state_directory
         if STATUS=$(runtime_status); then
-            echo "Sonexis Runtime is already running at $CONTROL_SOCKET"
+            if read_pid && pid_is_managed_runtime && \
+                [ "$(status_instance "$STATUS")" = "$MANAGED_INSTANCE" ]; then
+                echo "Sonexis Runtime is already running at $CONTROL_SOCKET"
+            else
+                echo "A compatible Runtime is active at $CONTROL_SOCKET, but it is not " \
+                    "the confirmed managed process for this lifecycle script."
+            fi
             echo "$STATUS"
             exit 0
         fi
@@ -105,6 +133,7 @@ case "$COMMAND" in
         ;;
     status)
         require_install
+        validate_state_directory
         if STATUS=$(runtime_status); then
             if read_pid && pid_is_managed_runtime; then
                 echo "Sonexis Runtime is running (managed pid $MANAGED_PID)"
@@ -119,6 +148,7 @@ case "$COMMAND" in
         ;;
     stop)
         require_install
+        validate_state_directory
         if ! read_pid; then
             if runtime_status >/dev/null; then
                 echo "A Runtime is active but has no trusted managed PID; stop its foreground process directly." >&2
@@ -160,6 +190,7 @@ case "$COMMAND" in
         exec env SONEXIS_RUNTIME_DIR="$RUNTIME_DIR" "$RUNTIME_BIN"
         ;;
     logs)
+        validate_state_directory
         [ -f "$LOG_FILE" ] || { echo "No Runtime log at $LOG_FILE"; exit 0; }
         tail -n 100 "$LOG_FILE"
         ;;

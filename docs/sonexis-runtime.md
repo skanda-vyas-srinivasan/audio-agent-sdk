@@ -43,6 +43,30 @@ versions, and hashes before replacing its exact managed prefix. It never uses
 install location with `SONEXIS_DEV_PREFIX`, and another developer team with
 `SONEXIS_DEVELOPMENT_TEAM`.
 
+To confirm Xcode can sign locally and use a different team:
+
+```sh
+security find-identity -v -p codesigning
+SONEXIS_DEVELOPMENT_TEAM=YOUR10CHARTEAM ./Scripts/setup-runtime-dev.sh
+```
+
+The value is the Apple Developer team configured under Xcode Settings >
+Accounts. Setup fails without a trusted Apple Development identity instead of
+falling back to an ad-hoc signature.
+
+Stop and uninstall the managed development copy with:
+
+```sh
+./Scripts/runtime-dev.sh stop
+./Scripts/uninstall-runtime-dev.sh
+```
+
+Uninstall removes only manifest-verified binaries. It intentionally retains
+`~/Library/Application Support/SonexisRuntime/state`, including lifecycle logs,
+so diagnostics survive an uninstall. No PCM is written there. Startup rotates
+a log once it exceeds 1 MiB; a single unusually noisy Runtime process may grow
+beyond that threshold until restarted.
+
 To build and run directly from the repository instead:
 
 ```sh

@@ -21,6 +21,8 @@ xcodebuild -project Sonexis.xcodeproj -scheme sonexis-runtime -configuration Rel
     -destination 'platform=macOS' -derivedDataPath .build/RuntimeRelease build
 xcodebuild -project Sonexis.xcodeproj -scheme sonexisctl -configuration Release \
     -destination 'platform=macOS' -derivedDataPath .build/RuntimeRelease build
+Scripts/verify-runtime-release-products.sh \
+    "$ROOT_DIR/.build/RuntimeRelease/Build/Products/Release"
 Scripts/test-runtime-distribution.sh \
     "$ROOT_DIR/.build/RuntimeRelease/Build/Products/Release"
 

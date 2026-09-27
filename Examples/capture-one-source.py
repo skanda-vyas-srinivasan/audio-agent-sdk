@@ -4,13 +4,14 @@
 import argparse
 import asyncio
 
-from sonexis import Sonexis
+from sonexis import Sonexis, SonexisError
 
 
 async def run(source: str, maximum_frames: int) -> None:
     received = 0
+    selector = int(source) if source.isdecimal() else source
     async with Sonexis() as client:
-        async with await client.capture(source) as stream:
+        async with await client.capture(selector) as stream:
             print(f"capturing {stream.source.name} ({stream.source.id})")
             async for frame in stream:
                 received += frame.frame_count
@@ -25,7 +26,12 @@ def main() -> None:
     parser.add_argument("--frames", type=int, default=0,
                         help="stop after this many PCM frames (zero runs until interrupted)")
     arguments = parser.parse_args()
-    asyncio.run(run(arguments.source, arguments.frames))
+    try:
+        asyncio.run(run(arguments.source, arguments.frames))
+    except KeyboardInterrupt:
+        return
+    except (OSError, SonexisError, ValueError) as error:
+        parser.exit(1, f"capture failed: {error}\n")
 
 
 if __name__ == "__main__":

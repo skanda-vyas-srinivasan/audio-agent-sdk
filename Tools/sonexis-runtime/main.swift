@@ -147,6 +147,10 @@ private struct RuntimeArguments {
         }
         let configured = ProcessInfo.processInfo.environment["SONEXIS_RUNTIME_DIR"]
         let path = socketPath ?? configured.flatMap { $0.isEmpty ? nil : $0 }
+        if let path, !path.hasPrefix("/") {
+            throw RuntimeErrorDTO(code: "invalid_argument",
+                message: "Runtime socket directory must be an absolute path")
+        }
         socketDirectory = path.map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? RuntimeSocketPaths.userDefault.directory
         showHelp = help

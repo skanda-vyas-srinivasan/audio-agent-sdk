@@ -34,16 +34,30 @@ SONEXIS_DEV_PREFIX="$PREFIX" "$ROOT_DIR/Scripts/install-runtime-dev.sh" \
 "$PREFIX/bin/sonexis-runtime" --help >/dev/null
 "$PREFIX/bin/sonexis-runtime" --version | grep -F "$(sed -n '1p' "$ROOT_DIR/RUNTIME_VERSION")" >/dev/null
 "$PREFIX/bin/sonexisctl" version | grep -F "$(sed -n '1p' "$ROOT_DIR/RUNTIME_VERSION")" >/dev/null
+expect_failure "$PREFIX/bin/sonexis-runtime" --socket-dir relative
+expect_failure "$PREFIX/bin/sonexisctl" frobnicate
+grep -F 'Unknown command: frobnicate' "$TEST_DIR/expected-failure.log" >/dev/null
+expect_failure "$PREFIX/bin/sonexisctl" sources unexpected
+grep -F 'Usage:' "$TEST_DIR/expected-failure.log" >/dev/null
 
 export SONEXIS_DEV_PREFIX="$PREFIX"
 export SONEXIS_RUNTIME_STATE_DIR="$STATE_DIR"
 export SONEXIS_RUNTIME_DIR="$RUNTIME_DIR"
+mkdir "$STATE_DIR"
+touch "$TEST_DIR/log-target"
+ln -s "$TEST_DIR/log-target" "$STATE_DIR/runtime.log"
+expect_failure "$ROOT_DIR/Scripts/runtime-dev.sh" start
+[ ! -s "$TEST_DIR/log-target" ]
+rm "$STATE_DIR/runtime.log"
 "$ROOT_DIR/Scripts/runtime-dev.sh" start >/dev/null
 "$ROOT_DIR/Scripts/runtime-dev.sh" start | grep -F 'already running' >/dev/null
 expect_failure "$ROOT_DIR/Scripts/install-runtime-dev.sh" \
     --prefix "$PREFIX" --products-dir "$PRODUCTS_DIR"
 "$ROOT_DIR/Scripts/runtime-dev.sh" status | grep -F 'managed pid' >/dev/null
 "$PREFIX/bin/sonexisctl" status --socket "$RUNTIME_DIR/control.sock" >/dev/null
+expect_failure env -u SONEXIS_RUNTIME_STATE_DIR -u SONEXIS_RUNTIME_DIR \
+    "$ROOT_DIR/Scripts/uninstall-runtime-dev.sh" --prefix "$PREFIX"
+[ -x "$PREFIX/bin/sonexis-runtime" ]
 MANAGED_PID=$(sed -n '1p' "$STATE_DIR/runtime.pid")
 kill -KILL "$MANAGED_PID"
 ATTEMPTS=0
