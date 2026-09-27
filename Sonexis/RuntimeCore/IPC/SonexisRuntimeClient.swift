@@ -9,7 +9,7 @@ public final class SonexisRuntimeClient: @unchecked Sendable {
     private var responseParser = RuntimeNDJSONParser()
     private var pendingResponses: [Data] = []
 
-    public init(controlSocketPath: String = RuntimeSocketPaths.userDefault.controlSocketPath) {
+    public init(controlSocketPath: String = RuntimeSocketPaths.compatibleControlSocketPath) {
         self.controlSocketPath = controlSocketPath
     }
 

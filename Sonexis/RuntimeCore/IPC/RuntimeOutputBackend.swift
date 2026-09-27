@@ -224,19 +224,24 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
                 }, onEnded: { [weak self] error in
                     self?.outputEnded(sessionID: sessionID, error: error)
                 })
-            return try queue.sync {
-                guard record.state == .starting else {
-                    session.stop()
-                    throw record.terminalError ?? RuntimeErrorDTO(code: "output_ended_during_start",
-                        message: "Output ended before startup completed", retryable: true)
+            do {
+                return try queue.sync {
+                    guard record.state == .starting else {
+                        throw record.terminalError ?? RuntimeErrorDTO(code: "output_ended_during_start",
+                            message: "Output ended before startup completed", retryable: true)
+                    }
+                    record.backendSession = session
+                    record.state = .ready
+                    let value = snapshot(record)
+                    eventHandler(RuntimeEventDTO(type: .outputStarted,
+                        sessionID: record.id, streamID: record.streamID.uuidString.lowercased(),
+                        outputSession: value))
+                    return value
                 }
-                record.backendSession = session
-                record.state = .ready
-                let value = snapshot(record)
-                eventHandler(RuntimeEventDTO(type: .outputStarted,
-                    sessionID: record.id, streamID: record.streamID.uuidString.lowercased(),
-                    outputSession: value))
-                return value
+            } catch {
+                // Device teardown is not coordinator-state work and can block.
+                session.stop()
+                throw error
             }
         } catch {
             let failure = error as? RuntimeErrorDTO ?? RuntimeErrorDTO(
@@ -362,11 +367,21 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
                 return wasActive ? (record, record.dataPlane, record.backendSession) : nil
             }
         }
-        active.forEach { _, plane, session in
-            plane.stop()
-            if let session { cleanupQueue.async { session.stop() } }
+        let activeIDs = Set(active.map { $0.0.id })
+        queue.sync {
+            records.values.filter { !activeIDs.contains($0.id) }.forEach(archiveAndRemove)
         }
-        queue.sync { Array(records.values).forEach(archiveAndRemove) }
+        active.forEach { record, plane, session in
+            plane.stop()
+            cleanupQueue.async { [weak self] in
+                session?.stop()
+                let finalMetrics = session?.metrics()
+                self?.queue.sync {
+                    if let finalMetrics { record.finalBackendMetrics = finalMetrics }
+                    self?.archiveAndRemove(record)
+                }
+            }
+        }
     }
 
     public func prepareForShutdown() {
@@ -506,11 +521,20 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
             record.state = .failed
             record.terminalError = error
             let plane = record.dataPlane
-            let value = self.snapshot(record)
-            self.pruneTerminalRecords()
-            self.cleanupQueue.async { plane.stop(); session?.stop() }
-            self.eventHandler(RuntimeEventDTO(type: .outputFailed, sessionID: value.id,
-                streamID: value.streamID, error: error, outputSession: value))
+            self.cleanupQueue.async { [weak self] in
+                plane.stop()
+                session?.stop()
+                let finalMetrics = session?.metrics()
+                guard let self else { return }
+                let value = self.queue.sync {
+                    if let finalMetrics { record.finalBackendMetrics = finalMetrics }
+                    let snapshot = self.snapshot(record)
+                    self.pruneTerminalRecords()
+                    return snapshot
+                }
+                self.eventHandler(RuntimeEventDTO(type: .outputFailed, sessionID: value.id,
+                    streamID: value.streamID, error: error, outputSession: value))
+            }
         }
     }
 

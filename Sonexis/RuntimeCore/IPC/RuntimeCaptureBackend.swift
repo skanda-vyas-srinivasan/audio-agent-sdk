@@ -198,24 +198,29 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
             }, onEnded: { [weak self] error in
                 self?.captureEnded(sessionID: sessionID, error: error)
             })
-            let snapshot = try queue.sync {
-                // Backend startup may synchronously report termination.
-                guard record.state == .starting else {
-                    backendSession.stop()
-                    throw record.terminalError ?? RuntimeErrorDTO(code: "capture_ended_during_start",
-                        message: "Capture ended before startup completed", retryable: true)
+            do {
+                return try queue.sync {
+                    // Backend startup may synchronously report termination.
+                    guard record.state == .starting else {
+                        throw record.terminalError ?? RuntimeErrorDTO(code: "capture_ended_during_start",
+                            message: "Capture ended before startup completed", retryable: true)
+                    }
+                    record.format = backendSession.outputFormat
+                    record.backendSession = backendSession
+                    record.state = .capturing
+                    let snapshot = self.snapshot(record)
+                    // Publish while serialized with termination so capture_started can
+                    // never follow capture_stopped/capture_failed for this session.
+                    self.eventHandler(RuntimeEventDTO(type: .captureStarted, sourceID: sourceID,
+                        sessionID: sessionID, streamID: streamID.uuidString.lowercased(), session: snapshot))
+                    return snapshot
                 }
-                record.format = backendSession.outputFormat
-                record.backendSession = backendSession
-                record.state = .capturing
-                let snapshot = self.snapshot(record)
-                // Publish while serialized with termination so capture_started can
-                // never follow capture_stopped/capture_failed for this session.
-                self.eventHandler(RuntimeEventDTO(type: .captureStarted, sourceID: sourceID,
-                    sessionID: sessionID, streamID: streamID.uuidString.lowercased(), session: snapshot))
-                return snapshot
+            } catch {
+                // Backend teardown may block. Never run it on the coordinator's
+                // serial state queue or one late startup can wedge all sessions.
+                backendSession.stop()
+                throw error
             }
-            return snapshot
         } catch {
             let failure = error as? RuntimeErrorDTO ?? RuntimeErrorDTO(code: "capture_start_failed",
                 message: String(describing: error), retryable: true)
@@ -312,21 +317,30 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
 
     public func stopAll() {
         prepareForShutdown()
-        let resources: [(RuntimeDataPlane, RuntimeBackendCaptureSession?)] = queue.sync {
+        let resources: [(Record, RuntimeDataPlane, RuntimeBackendCaptureSession?)] = queue.sync {
             let existing = Array(records.values)
             let active = existing.filter { $0.state == .starting || $0.state == .capturing }
-                .map { record -> (RuntimeDataPlane, RuntimeBackendCaptureSession?) in
+                .map { record -> (Record, RuntimeDataPlane, RuntimeBackendCaptureSession?) in
                     record.state = .stopped
                     let session = record.backendSession
                     record.backendSession = nil
-                    return (record.dataPlane, session)
+                    return (record, record.dataPlane, session)
                 }
-            existing.forEach(archiveAndRemove)
+            existing.filter { record in
+                !active.contains { $0.0 === record }
+            }.forEach(archiveAndRemove)
             return active
         }
-        resources.forEach { plane, session in
+        resources.forEach { record, plane, session in
             plane.stop()
-            if let session { cleanupQueue.async { session.stop() } }
+            cleanupQueue.async { [weak self] in
+                session?.stop()
+                let finalMetrics = session?.metrics()
+                self?.queue.sync {
+                    if let finalMetrics { record.captureMetrics = finalMetrics }
+                    self?.archiveAndRemove(record)
+                }
+            }
         }
     }
 

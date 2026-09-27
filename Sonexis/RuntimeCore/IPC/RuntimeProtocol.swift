@@ -376,6 +376,8 @@ public struct RuntimeStatusDTO: Codable, Equatable, Sendable {
     public let peakResidentMemoryBytes: UInt64?
     public let openFileDescriptors: Int?
     public let threadCount: Int?
+    /// Decimal mirrors for counters that can exceed JavaScript's safe integer range.
+    public let exactCounters: [String: String]?
 
     public init(runtimeVersion: String, runtimeInstanceID: String, uptimeNanoseconds: UInt64,
                 activeClients: Int, activeSessions: Int, eventSubscribers: Int,
@@ -424,7 +426,8 @@ public struct RuntimeStatusDTO: Codable, Equatable, Sendable {
                 residentMemoryBytes: UInt64? = nil,
                 peakResidentMemoryBytes: UInt64? = nil,
                 openFileDescriptors: Int? = nil,
-                threadCount: Int? = nil) {
+                threadCount: Int? = nil,
+                exactCounters: [String: String]? = nil) {
         self.runtimeVersion = runtimeVersion
         self.runtimeInstanceID = runtimeInstanceID
         self.uptimeNanoseconds = uptimeNanoseconds
@@ -480,6 +483,7 @@ public struct RuntimeStatusDTO: Codable, Equatable, Sendable {
         self.peakResidentMemoryBytes = peakResidentMemoryBytes
         self.openFileDescriptors = openFileDescriptors
         self.threadCount = threadCount
+        self.exactCounters = exactCounters
     }
 }
 

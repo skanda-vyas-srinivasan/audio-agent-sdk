@@ -47,6 +47,20 @@ do {
         from: RuntimeProtocolCodec.encodeLine(outputSession))
     expect(decodedOutput == outputSession, "output session did not round trip")
 
+    let largeCounter = UInt64(9_007_199_254_740_993)
+    let preciseStatus = RuntimeStatusDTO(runtimeVersion: "0.8.0",
+        runtimeInstanceID: "instance", uptimeNanoseconds: largeCounter,
+        activeClients: 1, activeSessions: 0, eventSubscribers: 0,
+        totalSessionsStarted: largeCounter, totalFramesForwarded: largeCounter,
+        totalDroppedFrames: 0, totalBytesTransmitted: largeCounter,
+        totalEventsDropped: 0,
+        exactCounters: ["total_sessions_started": String(largeCounter)])
+    let decodedPreciseStatus = try RuntimeProtocolCodec.decodeLine(RuntimeStatusDTO.self,
+        from: RuntimeProtocolCodec.encodeLine(preciseStatus))
+    expect(decodedPreciseStatus.exactCounters?["total_sessions_started"]
+            == "9007199254740993",
+           "exact diagnostic counter did not survive protocol round trip")
+
     let oldDefault = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
         name: "Default Output", isAvailable: true, isDefault: true,
         followsSystemDefault: true, activeDeviceID: "coreaudio:built-in",

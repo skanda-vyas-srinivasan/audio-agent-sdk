@@ -103,6 +103,18 @@ public final class UnixSocketConnection: @unchecked Sendable {
         }
     }
 
+    public func setSendTimeout(milliseconds: Int) throws {
+        let fd = try beginOperation()
+        defer { endOperation() }
+        var timeout = timeval(tv_sec: milliseconds > 0 ? milliseconds / 1_000 : 0,
+                              tv_usec: milliseconds > 0
+                                ? Int32((milliseconds % 1_000) * 1_000) : 0)
+        guard setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                         socklen_t(MemoryLayout.size(ofValue: timeout))) == 0 else {
+            throw UnixSocketError.systemCall("setsockopt", errno)
+        }
+    }
+
     private func beginOperation() throws -> Int32 {
         state.lock(); defer { state.unlock() }
         guard descriptor >= 0, !isClosing else { throw UnixSocketError.disconnected }

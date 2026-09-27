@@ -104,7 +104,12 @@ Append `--socket PATH` to a CLI command or set `SONEXIS_RUNTIME_SOCKET`. Set `SO
 `SONEXIS_RUNTIME_DIR` names the server directory; client SDKs and CLI use the
 full `SONEXIS_RUNTIME_SOCKET` control-socket path. With defaults, all use
 `$DARWIN_USER_TEMP_DIR/sx-$UID/control.sock` (resolved through
-the platform's per-user temporary directory API).
+the platform's per-user temporary directory API). During the v0.8 migration,
+the default Runtime also exposes a guarded compatibility listener at
+`/tmp/sonexis-runtime-$UID/control.sock` so protocol-v2 v0.7 clients continue
+to work. Both directories must be same-UID private directories; an already-live
+legacy Runtime prevents a second default Runtime from starting. Custom socket
+directories never create this alias.
 
 The Runtime executable embeds `NSAudioCaptureUsageDescription`, uses the stable identifier `com.sonexis.runtime`, and is development-signed by Xcode. Live capture uses that identity for macOS Screen & System Audio Recording permission.
 
@@ -116,7 +121,7 @@ NSWorkspace + Core Audio HAL
             ▼
  endpoint registries ── 1 s source/destination diff monitor ── event hub
             │                                        │
-            ▼                                        └─ events-UUID.sock (NDJSON)
+            ▼                                        └─ e-ID.sock (NDJSON)
  AudioCaptureManager / independent AudioCaptureSession
             │ native interleaved Float32
             ▼
@@ -128,8 +133,8 @@ NSWorkspace + Core Audio HAL
             ▼
    RuntimeSessionCoordinator
        ├── control.sock (bounded NDJSON)
-       ├── RuntimeDataPlane (64 packets) ── stream-UUID.sock (binary PCM out)
-       └── output-UUID.sock (binary PCM in)
+       ├── RuntimeDataPlane (64 packets) ── i-ID.sock (binary PCM out)
+       └── o-ID.sock (binary PCM in)
                     │ non-realtime conversion / bounded 500 ms ring
                     ▼
              HAL playback callback ── speakers or loopback input
@@ -168,7 +173,7 @@ A successful response includes a distinct response ID and the negotiated platfor
     "protocol_version": 2,
     "runtime_version": "0.8.0",
     "runtime_instance_id": "UUID",
-    "capabilities": ["application_sources", "capture_sessions", "event_stream", "format_negotiation", "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions", "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush", "default_device_playback", "output_destination_events"],
+    "capabilities": ["application_sources", "capture_sessions", "event_stream", "format_negotiation", "multiple_sessions", "pcm_v2", "runtime_diagnostics", "runtime_diagnostics_v2", "output_sessions", "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush", "default_device_playback", "output_destination_events"],
     "supported_formats": [
       {"sample_rate": 16000, "channel_count": 1, "sample_format": "pcm_s16le", "interleaved": true}
     ],
@@ -374,7 +379,14 @@ deterministic development and diagnostics. Optional OpenAI/Gemini adapters and
 the reference audio agent remain outside Runtime core; see
 [AI integration](ai-integration.md).
 
-Control requests are correlated by ID through one reader task, so concurrent requests are safe. Capture and event streams are async iterators/context managers. Cancellation discards late responses without corrupting the connection. Failed data-socket attachment rolls the Runtime resource back. `reconnect()` creates a fresh control connection; it never pretends that terminated captures resumed.
+Control requests are correlated by ID through one reader task, so concurrent
+requests are safe. Capture and event streams are async iterators/context
+managers. Cancelling an ambiguous mutating request closes the owner connection,
+which makes Runtime clean up any resource that may have been created after the
+caller stopped waiting. Read-only cancellation keeps the connection usable.
+Failed data-socket attachment rolls the Runtime resource back. `reconnect()`
+creates a fresh control connection; it never pretends that terminated captures
+resumed.
 
 Run SDK tests with `Scripts/test-python-sdk.sh`. `Examples/python-runtime-monitor.py` is the SDK-only reference application; it selects a source, watches lifecycle events, displays statistics, and optionally writes PCM or PCM16 WAV. `Examples/python-runtime-client.py` is a smaller compatibility example that also uses only public SDK APIs.
 
@@ -410,6 +422,7 @@ Python 3.10+.
 ```sh
 sonexisctl sources [--json]
 sonexisctl status [session-id] [--json]
+sonexisctl diagnostics [--json] [--output private-file.json]
 sonexisctl watch [--json]
 sonexisctl capture SOURCE [--sample-rate Hz] [--channels 1|2] \
   [--sample-format pcm_s16le|float32_le] [--output FILE] [--debug]
@@ -420,8 +433,32 @@ sonexisctl output-status SESSION [--json]
 sonexisctl output-stop SESSION [--json]
 ```
 
-Runtime status additionally reports active/lifetime output sessions, output
-frames received/rendered/dropped, and bytes received. Output status reports
+Runtime status additionally reports current/peak RSS, open descriptors,
+threads, control-client/request/error totals, endpoint-monitor health,
+retained/reserved resources, data-plane attachments, capture drop categories,
+and output loss/flush/late/underrun/overrun/route/conversion categories. The
+legacy `total_output_frames_dropped` means all discarded frames; use
+`total_output_frames_lost` for reliability loss and
+`total_output_frames_flushed` for intentional barge-in discard.
+When `runtime_diagnostics_v2` is advertised, `exact_counters` contains decimal
+string mirrors for every `UInt64` status field so JavaScript consumers can use
+`BigInt` without losing precision. SDK consumers talking to an older Runtime
+must gate the additive v0.8 fields on that capability; Python retains legacy
+zero defaults for source compatibility. Uptime and endpoint last-success
+timestamps use the monotonic boot clock and are nanoseconds, not wall time.
+Conversion nanoseconds are cumulative work duration. Accepted minus
+disconnected control clients equals active clients; rejected clients are a
+separate total.
+
+`diagnostics` creates a versioned point-in-time support snapshot. Its generation
+time is both RFC 3339 text and Unix-epoch milliseconds (a JSON-safe integer),
+never an epoch-nanosecond JSON number. `--output`
+uses a private `0600` regular file, refuses symbolic links, and writes no PCM,
+provider/transcript text, environment variables, credentials, source names, or
+data-socket capabilities. JSON-mode CLI failures return a structured error
+envelope and a nonzero exit status.
+
+Output session status reports
 queue depth/high-water, buffered duration, conversion time, route changes,
 underruns, overruns, late frames, producer attachment, session uptime, active
 device format, and estimated software-queue plus HAL latency. The estimate
@@ -431,17 +468,32 @@ sampled off the realtime callback.
 ## Security and trust model
 
 - The Runtime uses only `AF_UNIX`; it does not bind TCP or public-network interfaces.
-- The socket directory must be a real directory owned by the current UID and is forced to mode `0700`; sockets are mode `0600`.
+- The default socket directory lives below macOS's private per-user temporary
+  directory. It must be a real directory owned by the current UID and is forced
+  to mode `0700`; sockets are mode `0600`.
 - Accepted peers must match the Runtime's real UID (`getpeereid` versus
   `getuid()`; equal to the effective UID in the supported nonprivileged launch
   model). Descriptors use `FD_CLOEXEC`.
-- Existing live sockets are never replaced. Stale sockets are removed only for the same owner, and shutdown unlinks only the device/inode originally bound by that listener.
+- Swift clients reciprocally authenticate the Runtime peer UID. Python and
+  TypeScript validate a same-UID socket node in a private same-UID directory
+  before and after connection.
+- An owner lock serializes Runtime startup. Existing live sockets are never
+  replaced. Strictly named stale session sockets are reaped only while holding
+  that lock, and shutdown unlinks only the device/inode originally bound by the
+  listener.
+- Pre-handshake clients have an absolute five-second hello deadline, so partial
+  trickle input cannot retain a slot. Post-handshake reads remain idle-capable
+  for long-running SDKs, while every control response has a bounded send
+  deadline so a non-reading peer cannot retain a worker forever.
 - Control messages, PCM packets, clients, sessions, event subscriptions, stream subscribers, and in-process queues have explicit limits.
 - Sonexis Runtime trusts the local macOS account. Any accepted same-UID client may query or stop a session by ID; the creating connection owns automatic cleanup and quota accounting. This intentional account-wide management policy keeps `sonexisctl stop SESSION` usable. Any unsandboxed process running as the same user is within the trust boundary and can use the Runtime's granted capture permission or inject audio into an output session. Do not run the Runtime privileged or place its sockets in a shared multi-user directory.
 - The same trust boundary applies to output injection. A same-UID client can
   render to speakers or an installed loopback input. Virtual microphone
   selection inside the receiving application is an explicit user action.
 - MCP capture mutation is opt-in. Provider credentials come only from process configuration; common credential forms are redacted from provider exception diagnostics. Examples do not persist audio unless an output path is explicitly supplied. CLI/example recordings are private `0600` regular files, reject symbolic-link targets, and should still be treated as sensitive artifacts that may be committed accidentally. `sonexisctl play` rejects inputs larger than 256 MiB.
+- Detailed Process Tap lifecycle logging is opt-in through
+  `SONEXIS_AUDIO_DEBUG=1`; normal Runtime operation does not persist device UIDs
+  or per-session audio metadata.
 
 ## Troubleshooting
 

@@ -48,9 +48,11 @@ class Sonexis:
 
     def __init__(self, socket_path: Optional[str] = None, *, client_name: str = "sonexis-python",
                  client_version: str = "0.8.0") -> None:
-        self.socket_path = socket_path or os.environ.get(
-            "SONEXIS_RUNTIME_SOCKET", os.path.join(
-                tempfile.gettempdir(), f"sx-{os.getuid()}", "control.sock"))
+        configured = socket_path or os.environ.get("SONEXIS_RUNTIME_SOCKET")
+        current = os.path.join(tempfile.gettempdir(), f"sx-{os.getuid()}", "control.sock")
+        legacy = f"/tmp/sonexis-runtime-{os.getuid()}/control.sock"
+        self.socket_path = configured or (legacy if not os.path.exists(current)
+                                          and os.path.exists(legacy) else current)
         self.client_name = client_name
         self.client_version = client_version
         self.handshake: Optional[Handshake] = None
@@ -628,7 +630,14 @@ class Sonexis:
             # connection and let Runtime clean up every resource for this owner.
             self._discarded_request_ids.add(request_id)
             if command in _MUTATING_CONTROL_COMMANDS:
-                await asyncio.shield(self.close())
+                # Do not await close here: callers such as AudioOutput.flush()
+                # may hold an object lock that normal close must acquire. Close
+                # the transport immediately, then reconcile wrappers after the
+                # cancelled stack has unwound and released its locks.
+                writer.close()
+                if self._close_task is None:
+                    self._close_task = asyncio.create_task(
+                        self._finish_close(), name="sonexis-client-cancel-cleanup")
             raise
         except (OSError, ConnectionError) as error:
             raise SonexisConnectionError("connection_lost", str(error), retryable=True) from error

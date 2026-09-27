@@ -140,6 +140,55 @@ private final class SlowStopBackend: RuntimeCaptureBackend, @unchecked Sendable 
     }
 }
 
+private final class SlowStartStopBackend: RuntimeCaptureBackend, @unchecked Sendable {
+    let startEntered = DispatchSemaphore(value: 0)
+    let startRelease = DispatchSemaphore(value: 0)
+    let stopEntered = DispatchSemaphore(value: 0)
+    let stopRelease = DispatchSemaphore(value: 0)
+    func availableSources() throws -> [RuntimeSourceDTO] { [] }
+    func startCapture(sourceID: String, format: RuntimePCMFormatDTO,
+        onFrame: @escaping @Sendable (RuntimeBackendAudioFrame) -> Void,
+        onDeviceChanged: @escaping @Sendable () -> Void,
+        onEnded: @escaping @Sendable (RuntimeErrorDTO?) -> Void)
+        throws -> RuntimeBackendCaptureSession {
+        startEntered.signal(); startRelease.wait()
+        return SlowStopSession(format: format, entered: stopEntered, release: stopRelease)
+    }
+}
+
+private final class SlowStartStopOutputBackend: RuntimeOutputBackend, @unchecked Sendable {
+    let startEntered = DispatchSemaphore(value: 0)
+    let startRelease = DispatchSemaphore(value: 0)
+    let stopEntered = DispatchSemaphore(value: 0)
+    let stopRelease = DispatchSemaphore(value: 0)
+    func availableOutputDestinations() throws -> [RuntimeOutputDestinationDTO] { [] }
+    func startOutput(destinationID: String, format: RuntimePCMFormatDTO,
+                     targetBufferMilliseconds: UInt32,
+                     onEvent: @escaping @Sendable (RuntimeOutputBackendEvent) -> Void,
+                     onEnded: @escaping @Sendable (RuntimeErrorDTO?) -> Void)
+        throws -> RuntimeBackendOutputSession {
+        startEntered.signal(); startRelease.wait()
+        return BlockingOutputSession(format: format, entered: stopEntered, release: stopRelease)
+    }
+}
+
+private final class BlockingOutputSession: RuntimeBackendOutputSession, @unchecked Sendable {
+    let inputFormat: RuntimePCMFormatDTO
+    let destination = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+        name: "Blocking", isAvailable: true, isDefault: true)
+    private let entered: DispatchSemaphore
+    private let release: DispatchSemaphore
+    init(format: RuntimePCMFormatDTO, entered: DispatchSemaphore,
+         release: DispatchSemaphore) {
+        inputFormat = format; self.entered = entered; self.release = release
+    }
+    func write(_ frame: RuntimePCMFrame) throws {}
+    func finish() {}
+    func flush() throws {}
+    func stop() { entered.signal(); release.wait() }
+    func metrics() -> RuntimeOutputMetricsDTO { .init() }
+}
+
 private final class FakeOutputSession: RuntimeBackendOutputSession, @unchecked Sendable {
     let inputFormat: RuntimePCMFormatDTO
     let destination: RuntimeOutputDestinationDTO
@@ -291,6 +340,64 @@ do {
     expect(slowStopGroup.wait(timeout: .now() + 1) == .success,
            "slow backend teardown did not finish after release")
 
+    let lateCaptureBackend = SlowStartStopBackend()
+    let lateCaptureDirectory = directory.appendingPathComponent("late-capture", isDirectory: true)
+    try FileManager.default.createDirectory(at: lateCaptureDirectory,
+        withIntermediateDirectories: true)
+    let lateCaptureCoordinator = RuntimeSessionCoordinator(backend: lateCaptureBackend,
+        socketDirectory: lateCaptureDirectory)
+    let lateCaptureGroup = DispatchGroup()
+    lateCaptureGroup.enter()
+    DispatchQueue.global().async {
+        _ = try? lateCaptureCoordinator.startCapture(sourceID: "late", format: .runtimeDefault,
+            ownerID: "late")
+        lateCaptureGroup.leave()
+    }
+    expect(lateCaptureBackend.startEntered.wait(timeout: .now() + 1) == .success,
+           "late capture fixture did not enter startup")
+    lateCaptureCoordinator.stopAll()
+    lateCaptureBackend.startRelease.signal()
+    expect(lateCaptureBackend.stopEntered.wait(timeout: .now() + 1) == .success,
+           "late capture session did not reconcile")
+    let captureQueueProbe = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        _ = lateCaptureCoordinator.diagnostics(); captureQueueProbe.signal()
+    }
+    expect(captureQueueProbe.wait(timeout: .now() + 1) == .success,
+           "late capture teardown blocked coordinator state")
+    lateCaptureBackend.stopRelease.signal()
+    expect(lateCaptureGroup.wait(timeout: .now() + 1) == .success,
+           "late capture teardown did not finish")
+
+    let lateOutputBackend = SlowStartStopOutputBackend()
+    let lateOutputDirectory = directory.appendingPathComponent("late-output", isDirectory: true)
+    try FileManager.default.createDirectory(at: lateOutputDirectory,
+        withIntermediateDirectories: true)
+    let lateOutputCoordinator = RuntimeOutputCoordinator(backend: lateOutputBackend,
+        socketDirectory: lateOutputDirectory)
+    let lateOutputGroup = DispatchGroup()
+    lateOutputGroup.enter()
+    DispatchQueue.global().async {
+        _ = try? lateOutputCoordinator.startOutput(destinationID: "default",
+            format: .runtimeDefault, ownerID: "late")
+        lateOutputGroup.leave()
+    }
+    expect(lateOutputBackend.startEntered.wait(timeout: .now() + 1) == .success,
+           "late output fixture did not enter startup")
+    lateOutputCoordinator.stopAll()
+    lateOutputBackend.startRelease.signal()
+    expect(lateOutputBackend.stopEntered.wait(timeout: .now() + 1) == .success,
+           "late output session did not reconcile")
+    let outputQueueProbe = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        _ = lateOutputCoordinator.diagnostics(); outputQueueProbe.signal()
+    }
+    expect(outputQueueProbe.wait(timeout: .now() + 1) == .success,
+           "late output teardown blocked coordinator state")
+    lateOutputBackend.stopRelease.signal()
+    expect(lateOutputGroup.wait(timeout: .now() + 1) == .success,
+           "late output teardown did not finish")
+
     let contenders = [
         SonexisRuntimeServer(socketDirectory: directory, backend: FakeBackend()),
         SonexisRuntimeServer(socketDirectory: directory, backend: FakeBackend()),
@@ -320,6 +427,47 @@ do {
     contenderGate.signal(); contenderGate.signal(); contenderGroup.wait()
     expect(contenderResults.filter { $0 }.count == 1,
            "concurrent Runtime startup did not elect exactly one owner")
+
+    let restartDirectory = directory.appendingPathComponent("restart-monitor", isDirectory: true)
+    let restartBackend = FakeBackend()
+    restartBackend.setDiscoveryFailure(true)
+    let restartServer = SonexisRuntimeServer(socketDirectory: restartDirectory,
+        backend: restartBackend, outputBackend: FakeOutputBackend(),
+        handshakeTimeoutMilliseconds: 100)
+    try restartServer.start()
+    let restartClientA = SonexisRuntimeClient(
+        controlSocketPath: restartServer.paths.controlSocketPath)
+    try restartClientA.connect()
+    var sawInitialFailure = false
+    for _ in 0..<50 where !sawInitialFailure {
+        sawInitialFailure = (try restartClientA.runtimeStatus()
+            .totalSourceMonitorFailures ?? 0) > 0
+        if !sawInitialFailure { usleep(10_000) }
+    }
+    expect(sawInitialFailure, "initial monitor failure was not accounted")
+    restartBackend.setDiscoveryFailure(false)
+    var sawInitialRecovery = false
+    for _ in 0..<150 where !sawInitialRecovery {
+        sawInitialRecovery = (try restartClientA.runtimeStatus()
+            .sourceMonitorRecoveries ?? 0) > 0
+        if !sawInitialRecovery { usleep(10_000) }
+    }
+    expect(sawInitialRecovery, "initial monitor failure did not recover")
+    let restartClientB = SonexisRuntimeClient(
+        controlSocketPath: restartServer.paths.controlSocketPath)
+    try restartClientB.connect()
+    restartServer.stop()
+    try restartServer.start()
+    let restartClientC = SonexisRuntimeClient(
+        controlSocketPath: restartServer.paths.controlSocketPath)
+    try restartClientC.connect()
+    let restartedStatus = try restartClientC.runtimeStatus()
+    expect((restartedStatus.totalControlClientsAccepted ?? 0)
+            - (restartedStatus.totalControlClientsDisconnected ?? 0)
+            == UInt64(restartedStatus.activeClients),
+           "control accounting did not reconcile across in-process restart")
+    restartClientC.disconnect()
+    restartServer.stop()
 
     let staleSeed = directory.appendingPathComponent("stale-seed.sock").path
     let stalePath = directory.appendingPathComponent(
@@ -408,6 +556,19 @@ do {
     } catch { }
     idleBeforeHandshake.close()
 
+    let slowHandshake = try UnixSocketSystem.connect(path: server.paths.controlSocketPath)
+    try slowHandshake.write(Data("{".utf8))
+    usleep(60_000)
+    // A receive timeout alone is inactivity-based. This second byte must not
+    // extend the absolute hello deadline.
+    try slowHandshake.write(Data(" ".utf8))
+    usleep(100_000)
+    do {
+        _ = try slowHandshake.read()
+        fatalError("slow partial handshake retained a control slot past its deadline")
+    } catch { }
+    slowHandshake.close()
+
     if let cliPath = ProcessInfo.processInfo.environment["SONEXISCTL_BINARY"] {
         let process = Process()
         let output = Pipe()
@@ -435,6 +596,14 @@ do {
         let diagnosticsJSON = try JSONSerialization.jsonObject(with: diagnosticsData) as? [String: Any]
         expect(diagnostics.terminationStatus == 0 && diagnosticsJSON?["schema_version"] as? Int == 1,
                "sonexisctl diagnostics did not produce its versioned JSON bundle")
+        let allowedBundleKeys: Set<String> = ["schema_version", "generated_at",
+            "generated_at_unix_milliseconds", "protocol_version", "runtime_version",
+            "runtime_instance_id", "capabilities", "limits", "status"]
+        expect(Set(diagnosticsJSON?.keys.map { $0 } ?? []) == allowedBundleKeys
+                && diagnosticsJSON?["generated_at"] is String
+                && diagnosticsJSON?["generated_at_unix_milliseconds"] is NSNumber
+                && diagnosticsJSON?["generated_at_nanoseconds"] == nil,
+               "diagnostic bundle schema leaked fields or used unsafe epoch nanoseconds")
 
         let bundlePath = directory.appendingPathComponent("support-bundle.json").path
         let bundle = Process()
@@ -455,6 +624,22 @@ do {
         let bundleText = String(decoding: bundleData, as: UTF8.self)
         expect(!bundleText.contains("data_socket_path") && !bundleText.contains("api_key"),
                "diagnostic bundle contained a socket capability or credential field")
+        let bundleTarget = directory.appendingPathComponent("bundle-target.json")
+        let bundleLink = directory.appendingPathComponent("bundle-link.json")
+        try FileManager.default.createSymbolicLink(at: bundleLink,
+            withDestinationURL: bundleTarget)
+        let symlinkBundle = Process()
+        let symlinkOutput = Pipe()
+        symlinkBundle.executableURL = URL(fileURLWithPath: cliPath)
+        symlinkBundle.arguments = ["diagnostics", "--output", bundleLink.path,
+            "--socket", server.paths.controlSocketPath]
+        symlinkBundle.standardOutput = symlinkOutput
+        symlinkBundle.standardError = symlinkOutput
+        try symlinkBundle.run()
+        symlinkBundle.waitUntilExit()
+        expect(symlinkBundle.terminationStatus != 0
+                && !FileManager.default.fileExists(atPath: bundleTarget.path),
+               "diagnostic bundle followed a symbolic-link output")
 
         let unavailable = Process()
         let unavailableOutput = Pipe()
@@ -600,6 +785,10 @@ do {
             && (runtimeStatus.openFileDescriptors ?? 0) > 0
             && (runtimeStatus.threadCount ?? 0) > 0,
            "process resource diagnostics were unavailable")
+    expect(runtimeStatus.exactCounters?.count == 41
+            && runtimeStatus.exactCounters?["total_output_conversion_nanoseconds"] != nil
+            && runtimeStatus.exactCounters?["source_monitor_last_success_nanoseconds"] != nil,
+           "exact diagnostic mirrors did not cover every UInt64 status field")
 
     let firstTerminal = try client.startCapture(sourceID: sources[0].id)
     _ = try client.stopCapture(sessionID: firstTerminal.id)

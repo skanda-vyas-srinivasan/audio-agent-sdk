@@ -1,6 +1,6 @@
 """Typed public models for Sonexis Runtime."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -479,6 +479,7 @@ class RuntimeStatus:
     peak_resident_memory_bytes: int = 0
     open_file_descriptors: int = 0
     thread_count: int = 0
+    exact_counters: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "RuntimeStatus":
@@ -531,7 +532,9 @@ class RuntimeStatus:
                    int(value.get("resident_memory_bytes", 0)),
                    int(value.get("peak_resident_memory_bytes", 0)),
                    int(value.get("open_file_descriptors", 0)),
-                   int(value.get("thread_count", 0)))
+                   int(value.get("thread_count", 0)),
+                   {str(key): str(item)
+                    for key, item in value.get("exact_counters", {}).items()})
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,52 @@
 # Sonexis Runtime benchmarks
 
+## v0.8 reliability checkpoint
+
+The v0.8 offline benchmark set was rerun on 2026-09-27 on the Apple M4/macOS
+27.0 host used by earlier checkpoints. These commands do not open a Process Tap
+or physical output device:
+
+```sh
+Scripts/benchmark-runtime.sh
+Scripts/benchmark-runtime-v03.sh
+Scripts/benchmark-runtime-v04.sh
+Scripts/test-runtime-soak.sh
+```
+
+Capture normalization processed 85.333 seconds of 48 kHz stereo Float32 input
+between 10,182.5× and 31,476.2× realtime across the six advertised formats.
+Protocol-v2 frame encode/header-decode completed 100,000 iterations in
+0.096615 seconds: 1,035,031 packets/s and 397.5 MB/s including the 64-byte
+header.
+
+| Output path | Represented audio | Wall time | Realtime factor |
+| --- | ---: | ---: | ---: |
+| PCM16 24 kHz mono → Float32 48 kHz stereo | 200 s | 0.026980 s | 7,412.9× |
+| PCM16 48 kHz stereo → Float32 48 kHz stereo | 200 s | 0.008279 s | 24,157.4× |
+| Float32 48 kHz mono → Float32 44.1 kHz stereo | 200 s | 0.025867 s | 7,731.8× |
+| two-channel ring write/read | 200 s | 0.017781 s | 11,248.1× |
+
+The deterministic provider/replay benchmark completed 4,000 frames in
+484.999 ms (replay), 518.885 ms (OpenAI base64), and 517.232 ms (Gemini blob).
+Its forced eight-frame slow-consumer queue stayed at a high-water mark of eight;
+1,896 frames were consumed and all 2,104 discarded frames were accounted.
+Peak process RSS was 25,182,208 bytes and Python `tracemalloc` peak was
+1,300,045 bytes.
+
+The new hours-equivalent lifecycle/PCM soak completed 10,000 capture cycles,
+10,000 output cycles, 2,000 framed output-burst sessions, 2,000 control
+connections, and 16 parallel sessions in 13.020 seconds. Descriptor growth was
+two while the Runtime remained inside its deferred shutdown scope. Current RSS
+grew from 6,635,520 to 12,468,224 bytes (5,799,936 bytes retained); active
+sessions/subscribers/producers returned to zero and every queue remained within
+its declared bound. This is deterministic high-churn evidence, not an 8-hour
+wall-clock soak or live-HAL measurement.
+
+v0.8 adds status/resource sampling off realtime threads only. It does not alter
+capture normalization, playback conversion, either C ring, or PCM framing, and
+the benchmark changes are normal host/run variance rather than an optimization
+claim.
+
 ## v0.6 endpoint/routing validation
 
 The v0.6 optimized converter/ring benchmark was rerun on 2026-09-27 on the

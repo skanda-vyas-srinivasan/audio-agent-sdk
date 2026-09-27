@@ -182,12 +182,13 @@ do {
 
     let fdGrowth = descriptorCount() - startingFDs
     expect(fdGrowth <= 8, "file descriptors grew by \(fdGrowth)")
-    let retainedRSSGrowth = currentRSS() > startingCurrentRSS
-        ? currentRSS() - startingCurrentRSS : 0
+    let endingCurrentRSS = currentRSS()
+    let retainedRSSGrowth = endingCurrentRSS > startingCurrentRSS
+        ? endingCurrentRSS - startingCurrentRSS : 0
     expect(retainedRSSGrowth <= 64 * 1_024 * 1_024,
            "current resident memory grew by \(retainedRSSGrowth) bytes")
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
-    print("Runtime stress passed: capture_cycles=\(captureCycles) output_cycles=\(outputCycles) pcm_burst_cycles=\(pcmBurstCycles) connections=\(connectionCycles) parallel_sessions=16 elapsed_seconds=\(String(format: "%.3f", elapsed)) fd_growth=\(fdGrowth) current_rss_bytes=\(currentRSS()) baseline_current_rss_bytes=\(startingCurrentRSS) retained_rss_growth_bytes=\(retainedRSSGrowth) peak_rss_bytes=\(peakRSS()) baseline_peak_rss_bytes=\(startingRSS)")
+    print("Runtime stress passed: capture_cycles=\(captureCycles) output_cycles=\(outputCycles) pcm_burst_cycles=\(pcmBurstCycles) connections=\(connectionCycles) parallel_sessions=16 elapsed_seconds=\(String(format: "%.3f", elapsed)) fd_growth=\(fdGrowth) current_rss_bytes=\(endingCurrentRSS) baseline_current_rss_bytes=\(startingCurrentRSS) retained_rss_growth_bytes=\(retainedRSSGrowth) peak_rss_bytes=\(peakRSS()) baseline_peak_rss_bytes=\(startingRSS)")
 } catch {
     server.stop()
     try? FileManager.default.removeItem(at: directory)

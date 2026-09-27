@@ -26,7 +26,7 @@ private struct Arguments {
         var explicitOptions: Set<String> = []
         var output: String?
         var socketPath = ProcessInfo.processInfo.environment["SONEXIS_RUNTIME_SOCKET"]
-            ?? RuntimeSocketPaths.userDefault.controlSocketPath
+            ?? RuntimeSocketPaths.compatibleControlSocketPath
         var debug = false
         var json = false
         var sampleRate: UInt32 = 16_000
@@ -179,7 +179,8 @@ private func terminalSafe(_ value: String) -> String {
 
 private struct RuntimeDiagnosticsBundle: Codable {
     let schemaVersion: Int
-    let generatedAtNanoseconds: UInt64
+    let generatedAt: String
+    let generatedAtUnixMilliseconds: UInt64
     let protocolVersion: Int
     let runtimeVersion: String
     let runtimeInstanceID: String
@@ -449,7 +450,8 @@ do {
         }
         let bundle = RuntimeDiagnosticsBundle(
             schemaVersion: 1,
-            generatedAtNanoseconds: UInt64(Date().timeIntervalSince1970 * 1_000_000_000),
+            generatedAt: ISO8601DateFormatter().string(from: Date()),
+            generatedAtUnixMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000),
             protocolVersion: handshake.protocolVersion,
             runtimeVersion: handshake.runtimeVersion,
             runtimeInstanceID: handshake.runtimeInstanceID,

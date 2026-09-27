@@ -97,7 +97,9 @@ class FakeRuntime:
                         "runtime_instance_id": "instance", "uptime_nanoseconds": 12,
                         "active_clients": 1, "active_sessions": 0, "event_subscribers": 0,
                         "total_sessions_started": 1, "total_frames_forwarded": 160,
-                        "total_dropped_frames": 0, "total_bytes_transmitted": 320}
+                        "total_dropped_frames": 0, "total_bytes_transmitted": 320,
+                        "exact_counters": {
+                            "total_sessions_started": "9007199254740993"}}
                 elif command == "session_status":
                     response["session"] = {"id": request["session_id"],
                         "stream_id": str(self.stream_id), "source_id": "app.test",
@@ -175,6 +177,8 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sources[0].process_ids, [123])
             status = await client.status()
             self.assertEqual(status.total_frames_forwarded, 160)
+            self.assertEqual(status.exact_counters["total_sessions_started"],
+                             "9007199254740993")
             with self.assertRaises(SonexisError) as caught:
                 await client.capture("bad")
             self.assertEqual(caught.exception.code, "source_not_found")
@@ -247,7 +251,7 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await request
         for _ in range(100):
-            if self.runtime.control_disconnects:
+            if self.runtime.control_disconnects and client.handshake is None:
                 break
             await asyncio.sleep(0.001)
         self.assertGreaterEqual(self.runtime.control_disconnects, 1)

@@ -38,6 +38,8 @@ class FakeOutputRuntime:
         self.packets = [[], []]
         self.stream_closed = []
         self.flush_count = 0
+        self.flush_delay = 0.0
+        self.flush_received = asyncio.Event()
         self.status_state = "stopped"
 
     async def start(self):
@@ -116,6 +118,9 @@ class FakeOutputRuntime:
                             "message": "device vanished", "retryable": True}
                     response["output_session"] = session
                 elif command == "flush_output":
+                    self.flush_received.set()
+                    if self.flush_delay:
+                        await asyncio.sleep(self.flush_delay)
                     self.flush_count = 1
                     response["output_session"] = self.session(1)
                 elif command == "stop_output":
@@ -124,10 +129,16 @@ class FakeOutputRuntime:
                     response.update(ok=False, error={
                         "code": "unknown_command", "message": command, "retryable": False})
                 writer.write(json.dumps(response).encode() + b"\n")
-                await writer.drain()
+                try:
+                    await writer.drain()
+                except (ConnectionError, OSError):
+                    break
         finally:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
 
     async def _stream(self, index, reader, writer):
         try:
@@ -240,6 +251,26 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_header[6], 0)
         self.assertEqual(uuid.UUID(bytes=second_header[5]), self.runtime.stream_ids[1])
         self.assertEqual(self.runtime.commands.count("flush_output"), 1)
+
+    async def test_cancelling_delayed_flush_closes_owner_without_deadlock(self):
+        client = Sonexis(self.runtime.control_path)
+        await client.connect()
+        output = await client.playback()
+        self.runtime.flush_delay = 1.0
+        task = asyncio.create_task(output.flush())
+        await asyncio.wait_for(self.runtime.flush_received.wait(), timeout=1.0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+
+        async def cleanup_finished():
+            for _ in range(100):
+                if client.handshake is None and output.closed:
+                    return
+                await asyncio.sleep(0.01)
+            self.fail("mutating cancellation did not finish owner cleanup")
+
+        await asyncio.wait_for(cleanup_finished(), timeout=2.0)
 
     async def test_cancel_is_no_eos_and_close_tracks_outputs(self):
         client = Sonexis(self.runtime.control_path)

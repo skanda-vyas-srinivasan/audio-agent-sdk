@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createConnection, Socket } from "node:net";
@@ -389,6 +390,8 @@ export interface RuntimeStatus {
   peak_resident_memory_bytes?: number;
   open_file_descriptors?: number;
   thread_count?: number;
+  /** Exact decimal mirrors for UInt64 counters that may exceed Number.MAX_SAFE_INTEGER. */
+  exact_counters?: Record<string, string>;
 }
 export interface Handshake {
   protocol_version: 2;
@@ -623,7 +626,9 @@ function defaultSocketPath(): string {
   if (typeof process.getuid !== "function") {
     throw new SonexisError("unsupported_platform", "Sonexis Runtime requires macOS/Unix sockets");
   }
-  return `${tmpdir().replace(/\/$/, "")}/sx-${process.getuid()}/control.sock`;
+  const current = `${tmpdir().replace(/\/$/, "")}/sx-${process.getuid()}/control.sock`;
+  const legacy = `/tmp/sonexis-runtime-${process.getuid()}/control.sock`;
+  return !existsSync(current) && existsSync(legacy) ? legacy : current;
 }
 
 const MutatingControlCommands = new Set([
@@ -636,6 +641,7 @@ export class Sonexis extends EventEmitter {
   private socket?: Socket;
   private controlBuffer = Buffer.alloc(0);
   private connectPromise?: Promise<Handshake>;
+  private connectionGeneration = 0;
   private readonly discardedRequestIds = new Set<string>();
   private readonly pending = new Map<string, {
     resolve: (value: WireResponse) => void; reject: (error: Error) => void;
@@ -663,7 +669,12 @@ export class Sonexis extends EventEmitter {
   }
 
   private async finishConnect(): Promise<Handshake> {
+    const generation = this.connectionGeneration;
     const socket = await openSocket(this.socketPath);
+    if (generation !== this.connectionGeneration) {
+      socket.destroy();
+      throw new SonexisError("connection_cancelled", "Connection was closed while opening", true);
+    }
     this.socket = socket;
     socket.on("data", (chunk) => this.consumeControl(chunk));
     socket.on("close", () => this.handleDisconnect(socket, new SonexisError(
@@ -686,6 +697,7 @@ export class Sonexis extends EventEmitter {
   }
 
   async close(): Promise<void> {
+    this.connectionGeneration++;
     await Promise.allSettled([
       ...[...this.captures].map((capture) => capture.close()),
       ...[...this.eventStreams].map((events) => events.close()),

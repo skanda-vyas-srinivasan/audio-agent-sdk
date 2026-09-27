@@ -9,13 +9,20 @@ private final class RuntimeInstanceLock {
         let fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
         guard fd >= 0 else { throw UnixSocketError.systemCall("open", errno) }
         var status = stat()
-        guard fstat(fd, &status) == 0,
-              status.st_mode & S_IFMT == S_IFREG,
-              status.st_uid == getuid(),
-              fchmod(fd, mode_t(0o600)) == 0 else {
+        guard fstat(fd, &status) == 0 else {
             let code = errno
             close(fd)
             throw UnixSocketError.systemCall("fstat", code)
+        }
+        guard status.st_mode & S_IFMT == S_IFREG, status.st_uid == getuid() else {
+            close(fd)
+            throw RuntimeErrorDTO(code: "unsafe_instance_lock",
+                message: "Runtime instance lock must be a same-user regular file")
+        }
+        guard fchmod(fd, mode_t(0o600)) == 0 else {
+            let code = errno
+            close(fd)
+            throw UnixSocketError.systemCall("fchmod", code)
         }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             let code = errno
@@ -48,6 +55,20 @@ public struct RuntimeSocketPaths: Equatable, Sendable {
     public static var userDefault: RuntimeSocketPaths {
         RuntimeSocketPaths(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("sx-\(getuid())", isDirectory: true))
+    }
+
+    /// v0.1-v0.7 discovery location. v0.8 prefers the per-user Darwin temp
+    /// directory but keeps a guarded compatibility listener during migration.
+    public static var legacyUserDefault: RuntimeSocketPaths {
+        RuntimeSocketPaths(directory: URL(fileURLWithPath:
+            "/tmp/sonexis-runtime-\(getuid())", isDirectory: true))
+    }
+
+    public static var compatibleControlSocketPath: String {
+        let current = userDefault.controlSocketPath
+        if FileManager.default.fileExists(atPath: current) { return current }
+        let legacy = legacyUserDefault.controlSocketPath
+        return FileManager.default.fileExists(atPath: legacy) ? legacy : current
     }
 
     public func prepareDirectory() throws {
@@ -121,6 +142,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     private let startedAt = DispatchTime.now().uptimeNanoseconds
     private var clients: [String: UnixSocketConnection] = [:]
     private var listener: UnixSocketListener?
+    private var legacyListener: UnixSocketListener?
     private var instanceLock: RuntimeInstanceLock?
     private var endpointTimer: DispatchSourceTimer?
     private var sourceSnapshot: [String: RuntimeSourceDTO] = [:]
@@ -186,8 +208,6 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 guard let self, let newListener else { connection.close(); return }
                 self.accept(connection, listener: newListener, generation: listenerGeneration)
             }
-            stateLock.unlock()
-            startSourceMonitor(generation: listenerGeneration)
         } catch {
             listener = nil
             instanceLock = nil
@@ -195,11 +215,38 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             stateLock.unlock()
             throw error
         }
+        stateLock.unlock()
+        do {
+            try startLegacyCompatibilityListener(generation: listenerGeneration)
+        } catch {
+            stop()
+            throw error
+        }
+        startSourceMonitor(generation: listenerGeneration)
     }
 
     public func stop() {
         coordinator.prepareForShutdown()
         outputCoordinator.prepareForShutdown()
+        stateLock.lock()
+        let oldListener = listener
+        let oldLegacyListener = legacyListener
+        let oldInstanceLock = instanceLock
+        listener = nil
+        legacyListener = nil
+        instanceLock = nil
+        generation &+= 1
+        let activeClients = Array(clients.values)
+        totalControlClientsDisconnected &+= UInt64(clients.count)
+        clients.removeAll()
+        stateLock.unlock()
+        oldListener?.stop()
+        oldLegacyListener?.stop()
+        // Event sockets are independent of the control socket. Publish before
+        // closing owners so subscribers deterministically see shutdown.
+        eventHub.publish(RuntimeEventDTO(type: .runtimeShuttingDown,
+            message: "Runtime is shutting down"))
+        activeClients.forEach { $0.close() }
         monitorQueue.sync {
             endpointTimer?.setEventHandler {}
             endpointTimer?.cancel()
@@ -211,18 +258,6 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         }
         coordinator.stopAll()
         outputCoordinator.stopAll()
-        eventHub.publish(RuntimeEventDTO(type: .runtimeShuttingDown, message: "Runtime is shutting down"))
-        stateLock.lock()
-        let oldListener = listener
-        let oldInstanceLock = instanceLock
-        listener = nil
-        instanceLock = nil
-        generation &+= 1
-        let activeClients = Array(clients.values)
-        clients.removeAll()
-        stateLock.unlock()
-        oldListener?.stop()
-        activeClients.forEach { $0.close() }
         eventHub.stopAll()
         oldInstanceLock?.release()
     }
@@ -232,7 +267,8 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                         generation acceptedGeneration: UInt64) {
         let ownerID = UUID().uuidString.lowercased()
         stateLock.lock()
-        guard listener === acceptedListener, generation == acceptedGeneration else {
+        guard (listener === acceptedListener || legacyListener === acceptedListener),
+              generation == acceptedGeneration else {
             stateLock.unlock()
             connection.close()
             return
@@ -250,7 +286,12 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         clients[ownerID] = connection
         totalControlClientsAccepted &+= 1
         stateLock.unlock()
-        do { try connection.setReceiveTimeout(milliseconds: handshakeTimeoutMilliseconds) }
+        let handshakeDeadline = DispatchTime.now().uptimeNanoseconds
+            &+ UInt64(handshakeTimeoutMilliseconds) * 1_000_000
+        do {
+            try connection.setReceiveTimeout(milliseconds: handshakeTimeoutMilliseconds)
+            try connection.setSendTimeout(milliseconds: handshakeTimeoutMilliseconds)
+        }
         catch {
             stateLock.lock()
             clients.removeValue(forKey: ownerID)
@@ -260,10 +301,57 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             connection.close()
             return
         }
-        clientQueue.async { [weak self] in self?.serve(connection: connection, ownerID: ownerID) }
+        clientQueue.async { [weak self] in
+            self?.serve(connection: connection, ownerID: ownerID,
+                        handshakeDeadline: handshakeDeadline)
+        }
     }
 
-    private func serve(connection: UnixSocketConnection, ownerID: String) {
+    private func startLegacyCompatibilityListener(generation expectedGeneration: UInt64) throws {
+        guard paths.directory.standardizedFileURL
+                == RuntimeSocketPaths.userDefault.directory.standardizedFileURL else { return }
+        let legacyPaths = RuntimeSocketPaths.legacyUserDefault
+        do {
+            // Refuse an attacker-owned path. An existing live v0.7 Runtime also
+            // makes listener startup fail safely, leaving the v0.8 endpoint live.
+            try legacyPaths.prepareDirectory()
+            let candidate = UnixSocketListener(path: legacyPaths.controlSocketPath,
+                queue: acceptQueue)
+            stateLock.lock()
+            guard listener != nil, generation == expectedGeneration,
+                  legacyListener == nil else {
+                stateLock.unlock()
+                return
+            }
+            legacyListener = candidate
+            do {
+                try candidate.start { [weak self, weak candidate] connection in
+                    guard let self, let candidate else { connection.close(); return }
+                    self.accept(connection, listener: candidate,
+                                generation: expectedGeneration)
+                }
+                stateLock.unlock()
+            } catch UnixSocketError.pathOccupied {
+                legacyListener = nil
+                stateLock.unlock()
+                candidate.stop()
+                throw RuntimeErrorDTO(code: "already_running",
+                    message: "A legacy Sonexis Runtime already owns the default socket")
+            } catch {
+                legacyListener = nil
+                stateLock.unlock()
+                candidate.stop()
+            }
+        } catch {
+            if let runtimeError = error as? RuntimeErrorDTO,
+               runtimeError.code == "already_running" { throw runtimeError }
+            // Compatibility is best effort. The secure primary endpoint remains
+            // authoritative and is never weakened by a hostile legacy path.
+        }
+    }
+
+    private func serve(connection: UnixSocketConnection, ownerID: String,
+                       handshakeDeadline: UInt64) {
         defer {
             coordinator.stopSessions(ownerID: ownerID)
             outputCoordinator.stopSessions(ownerID: ownerID)
@@ -280,6 +368,19 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         var handshakeTimeoutCleared = false
         while true {
             do {
+                if !handshaken {
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    guard now < handshakeDeadline else {
+                        stateLock.lock()
+                        totalControlHandshakeTimeouts &+= 1
+                        totalControlErrors &+= 1
+                        stateLock.unlock()
+                        return
+                    }
+                    let remainingMilliseconds = max(1,
+                        Int((handshakeDeadline - now + 999_999) / 1_000_000))
+                    try connection.setReceiveTimeout(milliseconds: remainingMilliseconds)
+                }
                 let bytes = try connection.read()
                 let lines: [Data]
                 do {
@@ -477,9 +578,53 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         let sourceLastSuccess = sourceMonitorLastSuccessNanoseconds
         let destinationLastSuccess = destinationMonitorLastSuccessNanoseconds
         stateLock.unlock()
+        let uptime = DispatchTime.now().uptimeNanoseconds - startedAt
+        let exactCounters = [
+            "uptime_nanoseconds": String(uptime),
+            "total_sessions_started": String(metrics.totalSessionsStarted),
+            "total_frames_forwarded": String(metrics.frames),
+            "total_dropped_frames": String(metrics.dropped),
+            "total_bytes_transmitted": String(metrics.bytes),
+            "total_events_dropped": String(eventHub.totalDroppedEvents),
+            "total_capture_ring_dropped_frames": String(metrics.ringDropped),
+            "total_capture_delivery_dropped_frames": String(metrics.deliveryDropped),
+            "total_capture_queue_dropped_frames": String(metrics.queueDropped),
+            "total_capture_no_subscriber_frames": String(metrics.noSubscriber),
+            "total_output_sessions_started": String(outputMetrics.totalSessionsStarted),
+            "total_output_frames_received": String(outputMetrics.received),
+            "total_output_frames_rendered": String(outputMetrics.rendered),
+            "total_output_frames_dropped": String(outputMetrics.dropped),
+            "total_output_frames_lost": String(outputMetrics.lost),
+            "total_output_frames_flushed": String(outputMetrics.flushed),
+            "total_output_frames_late": String(outputMetrics.late),
+            "total_output_underrun_frames": String(outputMetrics.underrunFrames),
+            "total_output_underrun_events": String(outputMetrics.underrunEvents),
+            "total_output_overrun_events": String(outputMetrics.overrunEvents),
+            "total_output_route_changes": String(outputMetrics.routeChanges),
+            "total_output_conversion_batches": String(outputMetrics.conversionBatches),
+            "total_output_conversion_nanoseconds": String(outputMetrics.conversionNanoseconds),
+            "total_output_bytes_received": String(outputMetrics.bytes),
+            "total_control_clients_accepted": String(controlClientsAccepted),
+            "total_control_clients_disconnected": String(controlClientsDisconnected),
+            "total_control_clients_rejected": String(controlClientsRejected),
+            "total_control_requests": String(controlRequests),
+            "total_control_errors": String(controlErrors),
+            "total_malformed_control_messages": String(malformedControlMessages),
+            "total_control_handshake_timeouts": String(controlHandshakeTimeouts),
+            "total_source_monitor_failures": String(sourceMonitorFailures),
+            "total_destination_monitor_failures": String(destinationMonitorFailures),
+            "source_monitor_consecutive_failures": String(sourceMonitorConsecutive),
+            "destination_monitor_consecutive_failures": String(destinationMonitorConsecutive),
+            "source_monitor_recoveries": String(sourceRecoveries),
+            "destination_monitor_recoveries": String(destinationRecoveries),
+            "source_monitor_last_success_nanoseconds": String(sourceLastSuccess),
+            "destination_monitor_last_success_nanoseconds": String(destinationLastSuccess),
+            "resident_memory_bytes": String(processMetrics.residentBytes),
+            "peak_resident_memory_bytes": String(processMetrics.peakResidentBytes),
+        ]
         return RuntimeStatusDTO(runtimeVersion: RuntimeProtocolInfo.runtimeVersion,
             runtimeInstanceID: runtimeInstanceID,
-            uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds - startedAt,
+            uptimeNanoseconds: uptime,
             activeClients: clientCount, activeSessions: metrics.activeSessions,
             eventSubscribers: eventHub.count, totalSessionsStarted: metrics.totalSessionsStarted,
             totalFramesForwarded: metrics.frames, totalDroppedFrames: metrics.dropped,
@@ -527,7 +672,8 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             residentMemoryBytes: processMetrics.residentBytes,
             peakResidentMemoryBytes: processMetrics.peakResidentBytes,
             openFileDescriptors: processMetrics.openDescriptors,
-            threadCount: processMetrics.threadCount)
+            threadCount: processMetrics.threadCount,
+            exactCounters: exactCounters)
     }
 
     private static func processMetrics() -> (residentBytes: UInt64, peakResidentBytes: UInt64,
@@ -554,6 +700,10 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             guard shouldStart else { return }
             self.refreshSources(publishChanges: false)
             self.refreshDestinations(publishChanges: false)
+            self.stateLock.lock()
+            let stillCurrent = self.listener != nil && self.generation == expectedGeneration
+            self.stateLock.unlock()
+            guard stillCurrent else { return }
             let timer = DispatchSource.makeTimerSource(queue: self.monitorQueue)
             timer.schedule(deadline: .now() + 1, repeating: .seconds(1), leeway: .milliseconds(100))
             timer.setEventHandler { [weak self] in
@@ -595,13 +745,13 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             }
         } catch {
             let description = String(describing: error)
+            let firstFailure = sourceMonitorError == nil
+            sourceMonitorError = description
             stateLock.lock()
             totalSourceMonitorFailures &+= 1
             sourceMonitorConsecutiveFailures &+= 1
             stateLock.unlock()
-            guard publishChanges else { return }
-            guard sourceMonitorError != description else { return }
-            sourceMonitorError = description
+            guard publishChanges, firstFailure else { return }
             eventHub.publish(RuntimeEventDTO(type: .runtimeWarning,
                 message: "Source discovery failed", error: RuntimeErrorDTO(
                     code: "source_discovery_failed", message: description, retryable: true)))
@@ -646,13 +796,13 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             }
         } catch {
             let description = String(describing: error)
+            let firstFailure = destinationMonitorError == nil
+            destinationMonitorError = description
             stateLock.lock()
             totalDestinationMonitorFailures &+= 1
             destinationMonitorConsecutiveFailures &+= 1
             stateLock.unlock()
-            guard publishChanges else { return }
-            guard destinationMonitorError != description else { return }
-            destinationMonitorError = description
+            guard publishChanges, firstFailure else { return }
             eventHub.publish(RuntimeEventDTO(type: .runtimeWarning,
                 message: "Output destination discovery failed", error: RuntimeErrorDTO(
                     code: "output_destination_discovery_failed", message: description,
