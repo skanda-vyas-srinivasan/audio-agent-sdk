@@ -242,6 +242,7 @@ export class AudioActivityDetector {
   private state: "idle" | "starting" | "active" = "idle";
   private candidateMs = 0;
   private silenceMs = 0;
+  private streamId?: string;
 
   constructor(options: ActivityDetectionOptions = {}) {
     this.options = {
@@ -271,6 +272,11 @@ export class AudioActivityDetector {
   }
 
   observe(frame: AudioFrame): ActivityEvent | undefined {
+    if (this.streamId === undefined) this.streamId = frame.streamId;
+    else if (this.streamId !== frame.streamId) {
+      throw new SonexisError("activity_stream_mismatch",
+        "Use one AudioActivityDetector per Sonexis stream");
+    }
     if (frame.discontinuity) this.reset();
     const durationMs = frame.frameCount * 1000 / frame.format.sample_rate;
     const threshold = this.active
@@ -1864,8 +1870,13 @@ export class MultiSourceSession {
         }
         const localDroppedFramesBefore = this.pendingDrops.get(label) ?? 0;
         this.pendingDrops.set(label, 0);
-        queue.push({ label, frame, source: frame.source, sessionId: frame.sessionId,
-          streamId: frame.streamId, timestampNs: frame.timestampNs,
+        const forwarded = localDroppedFramesBefore > 0
+          ? { ...frame, discontinuity: true,
+            droppedFramesBefore: frame.droppedFramesBefore + localDroppedFramesBefore }
+          : frame;
+        queue.push({ label, frame: forwarded, source: forwarded.source,
+          sessionId: forwarded.sessionId,
+          streamId: forwarded.streamId, timestampNs: forwarded.timestampNs,
           localDroppedFramesBefore,
           discontinuity: frame.discontinuity || localDroppedFramesBefore > 0 });
         this.wake();

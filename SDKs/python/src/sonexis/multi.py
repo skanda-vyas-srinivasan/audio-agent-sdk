@@ -137,6 +137,16 @@ class MultiSourceSession:
                     continue
                 dropped = self._pending_drops[label]
                 self._pending_drops[label] = 0
+                if dropped:
+                    frame = AudioFrame(
+                        frame.stream_id, frame.sequence, frame.timestamp_ns,
+                        frame.frame_count, frame.format, frame.data,
+                        discontinuity=True,
+                        dropped_frames_before=frame.dropped_frames_before + dropped,
+                        source=frame.source, session_id=frame.session_id,
+                        runtime_started_at_ns=frame.runtime_started_at_ns,
+                        received_at_ns=frame.received_at_ns,
+                    )
                 queue.append(LabeledAudioFrame(label, frame, dropped))
                 self._available.set()
         except asyncio.CancelledError:

@@ -135,6 +135,8 @@ class ReplayAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         detector.observe(frame(9, 0.2))
         detector.observe(frame(10, 0.2, discontinuity=True))
         self.assertFalse(detector.active)
+        with self.assertRaisesRegex(ValueError, "one AudioActivityDetector"):
+            detector.observe(replace(frame(11, 0.2), stream_id="other"))
 
     def test_activity_configuration_rejects_nonfinite_values(self):
         for value in (float("nan"), float("inf"), -float("inf")):

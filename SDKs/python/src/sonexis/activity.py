@@ -80,6 +80,7 @@ class AudioActivityDetector:
         self.state = ActivityState.IDLE
         self.candidate_duration_ms = 0.0
         self.silence_duration_ms = 0.0
+        self._stream_id: Optional[str] = None
 
     @property
     def active(self) -> bool:
@@ -91,6 +92,10 @@ class AudioActivityDetector:
         self.silence_duration_ms = 0.0
 
     def observe(self, frame: AudioFrame) -> Optional[ActivityEvent]:
+        if self._stream_id is None:
+            self._stream_id = frame.stream_id
+        elif self._stream_id != frame.stream_id:
+            raise ValueError("Use one AudioActivityDetector per Sonexis stream")
         if frame.discontinuity:
             self.reset()
         duration_ms = frame.frame_count * 1_000.0 / frame.format.sample_rate

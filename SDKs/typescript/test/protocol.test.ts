@@ -39,6 +39,8 @@ test("activity detector emits debounced provider-neutral edges", () => {
     .map((value, index) => detector.observe(activityFrame(index + 1, value)))
     .filter((value) => value !== undefined);
   assert.deepEqual(edges.map((edge) => edge.type), ["activity_started", "activity_ended"]);
+  assert.throws(() => detector.observe({ ...activityFrame(9, 0.2), streamId: "other" }),
+    SonexisError);
 });
 
 function source(id: string, name: string, bundle: string, pid: number,

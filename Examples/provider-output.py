@@ -29,13 +29,29 @@ async def play_responses(sx: Sonexis, model: OpenAIRealtimeSink,
 
 async def main(source: str, destination: str) -> None:
     async with Sonexis(client_name="sonexis-provider-output-example") as sx:
-        async with await OpenAIRealtimeSink.connect() as model:
-            responses = asyncio.create_task(play_responses(sx, model, destination))
-            try:
+        model = await OpenAIRealtimeSink.connect()
+        responses = asyncio.create_task(play_responses(sx, model, destination))
+        sending = None
+        try:
+            async def send_input() -> None:
                 async with await sx.capture(source, format=model.required_format) as stream:
                     async for frame in stream:
                         await model.send_audio(frame)
-            finally:
+
+            sending = asyncio.create_task(send_input())
+            finished, _ = await asyncio.wait(
+                {sending, responses}, return_when=asyncio.FIRST_COMPLETED)
+            for task in finished:
+                await task  # propagate provider, playback, capture, or send failure
+        finally:
+            if sending is not None and not sending.done():
+                sending.cancel()
+                await asyncio.gather(sending, return_exceptions=True)
+            # Closing provider input precedes a bounded wait for trailing events.
+            await model.aclose()
+            try:
+                await asyncio.wait_for(asyncio.shield(responses), timeout=1.0)
+            except asyncio.TimeoutError:
                 responses.cancel()
                 await asyncio.gather(responses, return_exceptions=True)
 
