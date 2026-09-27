@@ -399,7 +399,7 @@ The optional Python MCP server exposes Runtime metadata, source lookup,
 diagnostics, and output-destination discovery. Its default inventory is
 read-only. `--allow-capture` additionally registers start/list/get/stop tools,
 restricted to captures owned by that MCP process. Results omit private
-data-socket paths and return bounded structured errors. An external SDK attaches
+data-socket paths and return bounded JSON error text. An external SDK attaches
 by session ID over the normal binary data plane. MCP uses stdio and never
 transports PCM. The server uses the official `mcp` Python package and requires
 Python 3.10+.

@@ -108,18 +108,17 @@ class DuplexSession:
         output, capture = self._output, self._input
         self._output = None
         self._input = None
-        first_error: Optional[BaseException] = None
-        try:
+        async def close_capture() -> None:
             if capture is not None:
                 await capture.aclose()
-        except BaseException as error:
-            first_error = error
-        try:
+
+        async def close_output() -> None:
             if output is not None:
                 await output.aclose(drain=drain_output)
-        except BaseException as error:
-            if first_error is None:
-                first_error = error
+
+        capture_result, output_result = await asyncio.gather(
+            close_capture(), close_output(), return_exceptions=True)
         self._state = "closed"
-        if first_error is not None:
-            raise first_error
+        for result in (capture_result, output_result):
+            if isinstance(result, BaseException):
+                raise result

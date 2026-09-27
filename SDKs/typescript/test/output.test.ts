@@ -429,6 +429,27 @@ test("duplex defaults output format to its input format", async () => {
   await duplex.close();
 });
 
+test("concurrent duplex close callers join the same cleanup", async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const input = { close: async () => blocked } as unknown as CaptureStream;
+  const output = {
+    destination: { id: "default", kind: "playback", name: "Default",
+      is_available: true, is_default: true, follows_system_default: true,
+      supported_formats: [] },
+    close: async () => blocked,
+  } as unknown as AudioOutput;
+  const client = ({ capture: async () => input, playback: async () => output } as unknown as Sonexis);
+  const duplex = await DuplexSession.open(client, "Chrome");
+  let secondDone = false;
+  const first = duplex.close();
+  const second = duplex.close().then(() => { secondDone = true; });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(secondDone, false);
+  release();
+  await Promise.all([first, second]);
+});
+
 async function startRuntime(context: test.TestContext,
                             options: FakeRuntimeOptions = {}): Promise<FakeOutputRuntime> {
   const directory = await mkdtemp(join(tmpdir(), "sonexis-ts-output-"));

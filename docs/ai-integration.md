@@ -187,12 +187,17 @@ not ship an unvalidated speech detector.
 thresholds and sustained-on/sustained-silence debounce. It runs on the SDK
 consumer task, resets on discontinuities, and can use an application-supplied
 `VoiceActivityDetector`. Gemini uses this same primitive for hybrid turn
-finalization. TypeScript exposes the equivalent energy detector.
+finalization. TypeScript exposes the equivalent detector and accepts an
+application-supplied `VoiceActivityDetector` classifier.
+Detectors are stream-affine; create one detector for each labeled capture.
 
 Provider events carry normalized `response_started` and `response_completed`
 flags plus source, capture-session, and stream correlation learned from input.
 Original provider event types remain available; `raw` is unstable
 provider-private diagnostic data.
+
+For LiveKit/Pipecat/custom-pipeline boundary guidance, see
+[External agent-framework integration](agent-framework-integration.md).
 
 ## MCP control plane
 
@@ -209,8 +214,9 @@ process, and makes sensitive mutation explicit. Results omit private socket
 paths. A start result tells a consumer to call
 `await sx.attach_capture(session_id)` with the SDK. Audio never passes through
 MCP. The MCP control connection continues to own that session and must remain
-alive until capture stops. The server is stdio-only and returns bounded
-structured errors. Realtime PCM never passes through MCP.
+alive until capture stops. The server is stdio-only and returns bounded JSON
+error text (the current MCP Python SDK does not expose typed error
+`structuredContent`). Realtime PCM never passes through MCP.
 
 ## Latency and failure semantics
 

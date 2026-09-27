@@ -8,6 +8,7 @@ import struct
 import sys
 import tempfile
 import threading
+import traceback
 import unittest
 import wave
 from dataclasses import replace
@@ -20,7 +21,8 @@ from sonexis import (ActivityDetectionConfig, AudioActivityDetector,
                      AmbiguousSourceError, AudioFormat, AudioFrame, AudioSource,
                      CaptureInfo, CaptureSession, EventSubscription, LatencyTracker,
                      MultiSourceSession, ReplayStream, SampleFormat, SessionMetrics,
-                     SonexisProtocolError, SourceNotFoundError, measure_activity)
+                     SonexisError, SonexisProtocolError, SourceNotFoundError,
+                     measure_activity)
 from sonexis.diagnostics import send_receipt
 from sonexis.errors import sanitized_provider_error
 from sonexis.mcp_control import SonexisControlTools
@@ -574,6 +576,23 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         await sink.aclose()
         self.assertFalse(any(value.get("audio_stream_end") for value in session.values))
 
+    async def test_gemini_discontinuity_ends_open_segment_and_clears_onset(self):
+        session = FakeGeminiSession()
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value,
+            turn_detection=self.turn_config(minimum_activity_ms=200))
+        await sink.send_audio(self.pcm_frame(1, 0.2))
+        discontinuous = replace(self.pcm_frame(2, 0.2), discontinuity=True)
+        await sink.send_audio(discontinuous)
+        self.assertEqual(session.values, [])
+        await sink.send_audio(self.pcm_frame(3, 0.2))
+        audio_values = [value for value in session.values if "audio" in value]
+        self.assertEqual(len(audio_values), 2)
+        await sink.send_audio(replace(self.pcm_frame(4, 0.0), discontinuity=True))
+        self.assertEqual(len([value for value in session.values
+                              if value.get("audio_stream_end")]), 1)
+        await sink.aclose()
+
     async def test_gemini_output_transcription_and_turn_debug_events(self):
         session = FakeGeminiSession()
         debug = []
@@ -605,12 +624,16 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_events_retain_stream_correlation(self):
         connection = FakeOpenAIConnection()
         sink = OpenAIRealtimeSink(connection)
-        await sink.send_audio(self.frame(AudioFormat.openai_realtime()))
+        frame = self.frame(AudioFormat.openai_realtime())
+        await sink.send_audio(frame)
         event = sink._event_for_sink(SimpleNamespace(type="response.created"))
         self.assertTrue(event.response_started)
         self.assertEqual(event.source_id, "app.test")
         self.assertEqual(event.session_id, "session")
         self.assertEqual(event.stream_id, "stream")
+        with self.assertRaises(Exception) as mismatch:
+            await sink.send_audio(replace(frame, stream_id="other", sequence=2))
+        self.assertEqual(mismatch.exception.code, "provider_stream_mismatch")
         await sink.aclose()
 
     def test_openai_rejects_malformed_output_audio(self):
@@ -693,6 +716,57 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             await sending
         self.assertEqual(closed.exception.code, "provider_closed")
 
+    async def test_provider_concurrent_sends_validate_inside_ordering_lock(self):
+        connection = FakeOpenAIConnection()
+        sink = OpenAIRealtimeSink(connection)
+        await sink._send_lock.acquire()
+        first = self.frame(AudioFormat.openai_realtime())
+        sequence_two = asyncio.create_task(sink.send_audio(replace(first, sequence=2)))
+        await asyncio.sleep(0)
+        sequence_one = asyncio.create_task(sink.send_audio(replace(first, sequence=1)))
+        sink._send_lock.release()
+        await sequence_two
+        with self.assertRaises(Exception) as error:
+            await sequence_one
+        self.assertEqual(error.exception.code, "provider_sequence_error")
+        await sink.aclose()
+
+    async def test_cancelled_provider_send_is_terminal_and_traceback_is_redacted(self):
+        connection = FakeOpenAIConnection()
+        accepted = asyncio.Event()
+
+        async def accepted_then_blocked(*, audio):
+            accepted.set()
+            await asyncio.Event().wait()
+
+        connection.session.input_audio.append = accepted_then_blocked
+        sink = OpenAIRealtimeSink(connection)
+        frame = self.frame(AudioFormat.openai_realtime())
+        sending = asyncio.create_task(sink.send_audio(frame))
+        await accepted.wait()
+        sending.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await sending
+        with self.assertRaises(Exception) as terminal:
+            await sink.send_audio(frame)
+        self.assertEqual(terminal.exception.code, "provider_failed")
+        await sink.aclose()
+
+        async def leak_secret(*, audio):
+            raise RuntimeError("Authorization=secret-value")
+
+        connection = FakeOpenAIConnection()
+        connection.session.input_audio.append = leak_secret
+        sink = OpenAIRealtimeSink(connection)
+        try:
+            await sink.send_audio(frame)
+        except Exception as error:
+            formatted = "".join(traceback.format_exception(
+                type(error), error, error.__traceback__))
+        self.assertNotIn("secret-value", formatted)
+        self.assertIn("[REDACTED]", formatted)
+        await sink.aclose()
+
 
 class FakeControlClient:
     def __init__(self):
@@ -756,6 +830,38 @@ class MCPControlTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception) as error:
             await tools.get_source("Test", 1)
         self.assertEqual(error.exception.code, "invalid_argument")
+
+    async def test_mcp_capture_ownership_survives_cancellation_and_stop_error(self):
+        class SlowClient(FakeControlClient):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.fail_stop = False
+
+            async def create_capture(self, source, format):
+                self.started.set()
+                await self.release.wait()
+                return await super().create_capture(source, format)
+
+            async def stop(self, session_id):
+                if self.fail_stop:
+                    raise SonexisError("temporary_stop_failure", "try again", retryable=True)
+                return await super().stop(session_id)
+
+        client = SlowClient()
+        tools = SonexisControlTools(client, allow_capture=True)
+        creating = asyncio.create_task(tools.start_capture("Test"))
+        await client.started.wait()
+        creating.cancel()
+        client.release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await creating
+        self.assertEqual((await tools.get_session("session"))["session"]["id"], "session")
+        client.fail_stop = True
+        with self.assertRaises(SonexisError):
+            await tools.stop_capture("session")
+        self.assertEqual((await tools.get_session("session"))["session"]["id"], "session")
 
 
 class OutputSecurityTests(unittest.TestCase):
@@ -828,6 +934,9 @@ class ReferenceProviderOutputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.audio_format, AudioFormat.speech_16k())
         self.assertEqual(len(event.audio), 3_200)
         self.assertEqual(event.stream_id, "stream")
+        with self.assertRaises(Exception) as mismatch:
+            await sink.send_audio(replace(frame, stream_id="other", sequence=2))
+        self.assertEqual(mismatch.exception.code, "provider_stream_mismatch")
         await sink.aclose()
 
     async def test_provider_audio_uses_public_runtime_output_and_drains(self):

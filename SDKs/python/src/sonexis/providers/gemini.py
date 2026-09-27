@@ -144,7 +144,7 @@ class GeminiLiveSink:
             if isinstance(error, (asyncio.CancelledError, ProviderError)):
                 raise
             raise ProviderError("provider_handshake_failed",
-                                sanitized_provider_error(error), retryable=True) from error
+                                sanitized_provider_error(error), retryable=True) from None
 
     async def __aenter__(self) -> "GeminiLiveSink":
         return self
@@ -185,6 +185,13 @@ class GeminiLiveSink:
             await self._send_frame(frame)
             return len(frame.data)
 
+        if frame.discontinuity:
+            if self._segment_open:
+                self._debug("local activity end (discontinuity)")
+                await self._send_audio_stream_end()
+            self._activity_detector.reset()
+            self._candidate_frames.clear()
+
         was_active = self._activity_detector.active
         transition = self._activity_detector.observe(frame)
         if not was_active:
@@ -214,18 +221,21 @@ class GeminiLiveSink:
     async def send_audio(self, frame: AudioFrame) -> AudioSendReceipt:
         if self._closed:
             raise ProviderError("provider_closed", "Gemini session is closed")
-        if self._terminal_send_error:
-            raise ProviderError("provider_failed", "Gemini send stream is no longer usable")
-        self._validator.validate(frame)
         async with self._send_lock:
+            if self._closed:
+                raise ProviderError("provider_closed", "Gemini session is closed")
+            if self._terminal_send_error:
+                raise ProviderError("provider_failed", "Gemini send stream is no longer usable")
+            self._validator.validate(frame)
             try:
                 payload_bytes = await self._send_with_turn_detection(frame)
             except asyncio.CancelledError:
+                self._terminal_send_error = True
                 raise
             except BaseException as error:
                 self._terminal_send_error = True
                 raise ProviderError("provider_send_failed",
-                                    sanitized_provider_error(error), retryable=False) from error
+                                    sanitized_provider_error(error), retryable=False) from None
             if self._closed:
                 raise ProviderError("provider_closed", "Gemini session closed during send")
             self._validator.commit(frame)
@@ -296,7 +306,7 @@ class GeminiLiveSink:
             if self._closed:
                 return
             raise ProviderError("provider_receive_failed",
-                                sanitized_provider_error(error), retryable=True) from error
+                                sanitized_provider_error(error), retryable=True) from None
         finally:
             self._events_active = False
 

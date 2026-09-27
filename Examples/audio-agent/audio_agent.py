@@ -49,6 +49,7 @@ class MockRealtimeSink:
         self._next_summary = audio_format.sample_rate * 5
         self._closed = False
         self._stream_id: Optional[str] = None
+        self._last_sequence: Optional[int] = None
 
     async def __aenter__(self) -> "MockRealtimeSink":
         return self
@@ -64,9 +65,20 @@ class MockRealtimeSink:
                 "unsupported_provider_format",
                 f"Mock provider expected {self.required_format!r}; got {frame.format!r}",
             )
+        expected = (frame.frame_count * frame.format.channels
+                    * frame.format.sample_format.bytes_per_sample)
+        if frame.frame_count < 1 or len(frame.data) != expected:
+            raise ProviderError("invalid_audio", "PCM payload does not match frame metadata")
+        if self._stream_id is not None and self._stream_id != frame.stream_id:
+            raise ProviderError("provider_stream_mismatch",
+                                "Use one mock sink per Sonexis stream")
+        if self._last_sequence is not None and frame.sequence <= self._last_sequence:
+            raise ProviderError("provider_sequence_error",
+                                "Audio frames must be sent in sequence order")
         self._frames += frame.frame_count
         if self._stream_id is None:
             self._stream_id = frame.stream_id
+        self._last_sequence = frame.sequence
         if self._frames >= self._next_summary:
             seconds = self._frames / self.required_format.sample_rate
             # A quiet 100 ms tone makes the credential-free reference path
@@ -450,17 +462,20 @@ async def run_live(
                     }
                     if not args.non_interactive:
                         tasks.add(asyncio.create_task(read_command()))
-                    completed, pending = await asyncio.wait(
-                        tasks, return_when=asyncio.FIRST_COMPLETED)
-                    result = "quit"
-                    for task in completed:
-                        value = task.result()
-                        if isinstance(value, str):
-                            result = value
-                            break
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
+                    try:
+                        completed, _ = await asyncio.wait(
+                            tasks, return_when=asyncio.FIRST_COMPLETED)
+                        result = "quit"
+                        for task in completed:
+                            value = task.result()
+                            if isinstance(value, str):
+                                result = value
+                                break
+                    finally:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
             finally:
                 await close_provider_session(sink, provider_events)
             print(f"Final stream stats: {stats.line()}")

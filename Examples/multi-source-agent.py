@@ -30,13 +30,25 @@ async def main(conversation: str, media: str, duration: float) -> None:
             await inputs.add("conversation", conversation,
                              format=AudioFormat.speech_16k())
             await inputs.add("media", media, format=AudioFormat.speech_16k())
-            async for item in inputs.frames():
-                if stop.is_set():
-                    break
-                if item.label == "conversation":
-                    await consumer.send_audio(item.frame)
-                elif item.frame.sequence % 100 == 0:
-                    print(f"media observed: {item.source.name} seq={item.frame.sequence}")
+            async def route_inputs() -> None:
+                async for item in inputs.frames():
+                    if item.label == "conversation":
+                        await consumer.send_audio(item.frame)
+                    elif item.frame.sequence % 100 == 0:
+                        print(f"media observed: {item.source.name} seq={item.frame.sequence}")
+
+            routing = asyncio.create_task(route_inputs())
+            stopping = asyncio.create_task(stop.wait())
+            try:
+                finished, _ = await asyncio.wait(
+                    {routing, stopping}, return_when=asyncio.FIRST_COMPLETED)
+                if routing in finished:
+                    await routing
+            finally:
+                for task in (routing, stopping):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(routing, stopping, return_exceptions=True)
 
             for label, error in inputs.errors_by_label.items():
                 print(f"{label} ended independently: {error}")

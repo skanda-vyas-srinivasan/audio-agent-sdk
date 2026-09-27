@@ -41,6 +41,10 @@ test("activity detector emits debounced provider-neutral edges", () => {
   assert.deepEqual(edges.map((edge) => edge.type), ["activity_started", "activity_ended"]);
   assert.throws(() => detector.observe({ ...activityFrame(9, 0.2), streamId: "other" }),
     SonexisError);
+  const semantic = new AudioActivityDetector(
+    { minimumActivityMs: 100 }, { isSpeech: () => true });
+  assert.equal(semantic.observe(activityFrame(1, 0))?.type, "activity_started");
+  assert.equal(semantic.state, "active");
 });
 
 function source(id: string, name: string, bundle: string, pid: number,

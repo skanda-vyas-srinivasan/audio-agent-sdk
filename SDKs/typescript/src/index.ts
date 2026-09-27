@@ -206,6 +206,10 @@ export interface ActivityDetectionOptions {
   silenceDurationMs?: number;
 }
 
+export interface VoiceActivityDetector {
+  isSpeech(frame: AudioFrame): boolean;
+}
+
 export interface ActivityEvent {
   type: "activity_started" | "activity_ended";
   timestampNs: bigint;
@@ -239,12 +243,13 @@ export function measureActivity(frame: AudioFrame, threshold = 0.01): AudioActiv
 /** Consumer-side hysteresis/debounce for provider-neutral signal activity. */
 export class AudioActivityDetector {
   readonly options: Required<ActivityDetectionOptions>;
-  private state: "idle" | "starting" | "active" = "idle";
+  private activityState: "idle" | "starting" | "active" = "idle";
   private candidateMs = 0;
   private silenceMs = 0;
   private streamId?: string;
 
-  constructor(options: ActivityDetectionOptions = {}) {
+  constructor(options: ActivityDetectionOptions = {},
+              readonly voiceActivityDetector?: VoiceActivityDetector) {
     this.options = {
       activityStartThreshold: options.activityStartThreshold ?? 0.015,
       activityEndThreshold: options.activityEndThreshold ?? 0.008,
@@ -263,10 +268,11 @@ export class AudioActivityDetector {
     }
   }
 
-  get active(): boolean { return this.state === "active"; }
+  get active(): boolean { return this.activityState === "active"; }
+  get state(): "idle" | "starting" | "active" { return this.activityState; }
 
   reset(): void {
-    this.state = "idle";
+    this.activityState = "idle";
     this.candidateMs = 0;
     this.silenceMs = 0;
   }
@@ -281,13 +287,15 @@ export class AudioActivityDetector {
     const durationMs = frame.frameCount * 1000 / frame.format.sample_rate;
     const threshold = this.active
       ? this.options.activityEndThreshold : this.options.activityStartThreshold;
-    const frameActive = measureActivity(frame, threshold).active;
+    const frameActive = this.voiceActivityDetector !== undefined
+      ? Boolean(this.voiceActivityDetector.isSpeech(frame))
+      : measureActivity(frame, threshold).active;
     if (!this.active) {
       if (!frameActive) { this.reset(); return undefined; }
-      this.state = "starting";
+      this.activityState = "starting";
       this.candidateMs += durationMs;
       if (this.candidateMs < this.options.minimumActivityMs) return undefined;
-      this.state = "active";
+      this.activityState = "active";
       this.candidateMs = 0;
       this.silenceMs = 0;
       return this.event("activity_started", frame);
@@ -1685,6 +1693,7 @@ export interface LabeledAudioFrame {
 /** Convenience ownership boundary for one input and one independent output. */
 export class DuplexSession {
   private closed = false;
+  private closePromise?: Promise<void>;
 
   private constructor(readonly input: CaptureStream, readonly output: AudioOutput) {}
 
@@ -1715,7 +1724,11 @@ export class DuplexSession {
 
   /** Drain response audio on normal shutdown; pass false for barge-in. */
   async close(drainOutput = true): Promise<void> {
-    if (this.closed) return;
+    this.closePromise ??= this.finishClose(drainOutput);
+    return this.closePromise;
+  }
+
+  private async finishClose(drainOutput: boolean): Promise<void> {
     this.closed = true;
     const results = await Promise.allSettled([
       this.output.close({ drain: drainOutput }),
@@ -1871,8 +1884,7 @@ export class MultiSourceSession {
         const localDroppedFramesBefore = this.pendingDrops.get(label) ?? 0;
         this.pendingDrops.set(label, 0);
         const forwarded = localDroppedFramesBefore > 0
-          ? { ...frame, discontinuity: true,
-            droppedFramesBefore: frame.droppedFramesBefore + localDroppedFramesBefore }
+          ? { ...frame, discontinuity: true }
           : frame;
         queue.push({ label, frame: forwarded, source: forwarded.source,
           sessionId: forwarded.sessionId,
@@ -1884,6 +1896,7 @@ export class MultiSourceSession {
     } catch (caught) {
       error = caught instanceof Error ? caught : new Error(String(caught));
     } finally {
+      if (error && !this.failFast) this.errorsByLabel.set(label, error);
       if (this.captures.get(label) === capture) this.ends.set(label, { label, error });
       this.wake();
     }

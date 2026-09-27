@@ -2,6 +2,7 @@
 
 from dataclasses import asdict, is_dataclass
 from enum import Enum
+import asyncio
 from typing import Any, Dict, Optional, Set
 
 from .client import Sonexis
@@ -102,7 +103,17 @@ class SonexisControlTools:
         if factory is None:
             raise SonexisError("invalid_format_profile",
                                f"Unknown format profile: {format_profile}")
-        info = await self.client.create_capture(source, format=factory())
+        creation = asyncio.create_task(
+            self.client.create_capture(source, format=factory()),
+            name="sonexis-mcp-start-capture")
+        try:
+            info = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            # The Runtime mutation may already have succeeded. Resolve it before
+            # propagating cancellation so ownership is never lost.
+            info = await creation
+            self._owned_capture_ids.add(info.id)
+            raise
         self._owned_capture_ids.add(info.id)
         return {
             "session": _capture_json(info),
@@ -112,10 +123,16 @@ class SonexisControlTools:
     async def stop_capture(self, session_id: str) -> Dict[str, Any]:
         self._require_capture_control()
         self._require_owned_session(session_id)
+        stopping = asyncio.create_task(
+            self.client.stop(session_id), name="sonexis-mcp-stop-capture")
         try:
-            return {"session": _capture_json(await self.client.stop(session_id))}
-        finally:
+            stopped = await asyncio.shield(stopping)
+        except asyncio.CancelledError:
+            stopped = await stopping
             self._owned_capture_ids.discard(session_id)
+            raise
+        self._owned_capture_ids.discard(session_id)
+        return {"session": _capture_json(stopped)}
 
     def _require_owned_session(self, session_id: str) -> None:
         if session_id not in self._owned_capture_ids:

@@ -93,7 +93,7 @@ class OpenAIRealtimeSink:
             if isinstance(error, (asyncio.CancelledError, ProviderError)):
                 raise
             raise ProviderError("provider_handshake_failed",
-                                sanitized_provider_error(error), retryable=True) from error
+                                sanitized_provider_error(error), retryable=True) from None
 
     async def __aenter__(self) -> "OpenAIRealtimeSink":
         return self
@@ -104,19 +104,22 @@ class OpenAIRealtimeSink:
     async def send_audio(self, frame: AudioFrame) -> AudioSendReceipt:
         if self._closed:
             raise ProviderError("provider_closed", "OpenAI session is closed")
-        if self._terminal_send_error:
-            raise ProviderError("provider_failed", "OpenAI send stream is no longer usable")
-        self._validator.validate(frame)
         async with self._send_lock:
+            if self._closed:
+                raise ProviderError("provider_closed", "OpenAI session is closed")
+            if self._terminal_send_error:
+                raise ProviderError("provider_failed", "OpenAI send stream is no longer usable")
+            self._validator.validate(frame)
             encoded = base64.b64encode(frame.data).decode("ascii")
             try:
                 await self._connection.session.input_audio.append(audio=encoded)
             except asyncio.CancelledError:
+                self._terminal_send_error = True
                 raise
             except BaseException as error:
                 self._terminal_send_error = True
                 raise ProviderError("provider_send_failed",
-                                    sanitized_provider_error(error), retryable=False) from error
+                                    sanitized_provider_error(error), retryable=False) from None
             if self._closed:
                 raise ProviderError("provider_closed", "OpenAI session closed during send")
             self._validator.commit(frame)
@@ -146,7 +149,7 @@ class OpenAIRealtimeSink:
             if self._closed:
                 return
             raise ProviderError("provider_receive_failed",
-                                sanitized_provider_error(error), retryable=True) from error
+                                sanitized_provider_error(error), retryable=True) from None
         finally:
             self._events_active = False
 
@@ -184,7 +187,7 @@ class OpenAIRealtimeSink:
                 text = None
             except (ValueError, binascii.Error) as error:
                 raise ProviderError("invalid_provider_audio",
-                                    "OpenAI returned malformed base64 audio") from error
+                                    "OpenAI returned malformed base64 audio") from None
         return ProviderEvent(
             "openai", event_type, text=text if isinstance(text, str) else None,
             audio=audio,

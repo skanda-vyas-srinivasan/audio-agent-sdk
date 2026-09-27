@@ -142,7 +142,7 @@ class MultiSourceSession:
                         frame.stream_id, frame.sequence, frame.timestamp_ns,
                         frame.frame_count, frame.format, frame.data,
                         discontinuity=True,
-                        dropped_frames_before=frame.dropped_frames_before + dropped,
+                        dropped_frames_before=frame.dropped_frames_before,
                         source=frame.source, session_id=frame.session_id,
                         runtime_started_at_ns=frame.runtime_started_at_ns,
                         received_at_ns=frame.received_at_ns,
@@ -154,6 +154,8 @@ class MultiSourceSession:
         except BaseException as caught:
             error = caught
         finally:
+            if error is not None and not self.fail_fast:
+                self._errors_by_label[label] = error
             self._terminals[label] = _StreamEnded(label, error)
             self._available.set()
 

@@ -64,7 +64,12 @@ playback library. Use `sonexisctl outputs` to select a fixed speaker/headphone
 or an installed loopback device. Raw returned-audio byte diagnostics stay
 behind `--debug`.
 
-Provider modes select their required Sonexis format preset automatically. No credential or captured audio is logged or stored unless `--output` is explicitly supplied. Recordings are created as private regular files (`0600`), and symbolic-link targets are refused.
+Provider modes select their required Sonexis format preset automatically. No
+credential or raw captured PCM is logged or stored unless `--output` is
+explicitly supplied. Provider text/transcription and source/session identifiers
+are printed to the terminal and may contain sensitive context. Recordings are
+created as private regular files (`0600`), and symbolic-link targets are
+refused.
 
 For deterministic offline development, replay a matching PCM16 WAV:
 
@@ -77,3 +82,14 @@ python Examples/audio-agent/audio_agent.py \
 ```
 
 Use `--help` for socket, raw PCM, sample-rate, and channel options. Live OpenAI/Gemini network behavior still depends on the installed provider SDK, valid credentials, model availability, and the provider's current service API.
+
+To exercise live capture, a deterministic mock response, and Runtime-owned
+speaker output without provider credentials, use headphones and run:
+
+```sh
+python Examples/audio-agent/audio_agent.py \
+  --provider mock \
+  --source "Google Chrome" \
+  --response-output default \
+  --non-interactive
+```

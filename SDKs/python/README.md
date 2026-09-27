@@ -237,7 +237,9 @@ does not claim to detect speech. Applications may implement the
 `AudioActivityDetector(ActivityDetectionConfig(...))` provides debounced
 `activity_started` / `activity_ended` edges with source/session/stream context.
 It runs on the consuming task, resets on discontinuities, and accepts an
-optional `VoiceActivityDetector` for speech-aware classification.
+optional `VoiceActivityDetector` for speech-aware classification. Use one
+detector per Sonexis stream; `reset()` clears debounce state but deliberately
+retains stream affinity.
 
 `LatencyTracker` keeps a bounded sample window and reports p50/p95/p99 estimates
 from Runtime session presentation time to SDK receipt. These estimates exclude

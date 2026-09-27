@@ -10,6 +10,17 @@ configurable hysteresis and debounce. Its energy measurement detects signal
 activity, not semantic speech. Duplex output defaults to the selected input
 format; specify a provider response format explicitly when it differs.
 
+Use one detector per stream. `detector.state` distinguishes `idle`, `starting`,
+and `active`. To replace energy classification with a speech detector, pass it
+as the second constructor argument:
+
+```ts
+const activity = new AudioActivityDetector(
+  { minimumActivityMs: 250, silenceDurationMs: 1200 },
+  { isSpeech: (frame) => vad(frame.data) },
+);
+```
+
 ```sh
 npm install
 npm run build
