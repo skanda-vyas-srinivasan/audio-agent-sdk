@@ -1,6 +1,6 @@
 # Sonexis Python SDK
 
-The source-aware, bidirectional async SDK for Sonexis Runtime v0.4. It connects
+The source-aware, bidirectional async SDK for Sonexis Runtime v0.5. It connects
 only to the local Unix-domain Runtime and keeps Core Audio details out of
 application code. The core package has no runtime dependencies and supports
 Python 3.9+.
@@ -8,7 +8,7 @@ Python 3.9+.
 ## Install for repository development
 
 ```sh
-cd ~/Sonexis
+cd /path/to/Sonexis
 /usr/bin/python3 -m venv --system-site-packages .venv
 . .venv/bin/activate
 python -m pip install --no-deps --no-build-isolation -e SDKs/python

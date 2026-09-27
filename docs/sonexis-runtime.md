@@ -1,4 +1,4 @@
-# Sonexis Runtime v0.4
+# Sonexis Runtime v0.5
 
 ## Purpose
 
@@ -8,14 +8,42 @@ realtime PCM back to normal or virtual macOS output devices without using Core
 Audio. v0.4 adds a bounded client-to-Runtime data plane, HAL playback, output
 destinations/sessions/events/diagnostics, Python and TypeScript output APIs,
 duplex composition, deterministic output replay, and provider-response
-playback while preserving v0.3's source-aware input APIs.
+playback while preserving v0.3's source-aware input APIs. v0.5 adds an explicit
+per-user development install, foreground/background lifecycle tooling, locally
+buildable SDK artifacts, focused examples, synchronized version checks, and
+actionable connection errors without changing protocol or audio semantics.
 
 The Runtime is audio infrastructure. It does not provide transcription, models,
 cloud transport, authentication, accounts, or acoustic echo cancellation, and
 it never opens a TCP port. It can target an installed virtual loopback device;
 it does not install a Sonexis-branded driver in v0.4.
 
-## Build and run
+## Zero-to-audio development quickstart
+
+Configure an Apple Development team for the `sonexis-runtime` and `sonexisctl`
+Xcode targets, then run:
+
+```sh
+git clone https://github.com/skanda-vyas-srinivasan/Sonexis.git
+cd Sonexis
+./Scripts/setup-runtime-dev.sh
+./Scripts/runtime-dev.sh start
+"$HOME/Library/Application Support/SonexisRuntime/dev/bin/sonexisctl" sources
+
+/usr/bin/python3 -m venv --system-site-packages .venv-runtime
+. .venv-runtime/bin/activate
+python -m pip install --no-deps --no-build-isolation -e SDKs/python
+python Examples/capture-one-source.py "Google Chrome" --frames 16000
+```
+
+The installer verifies the signature, identifiers, capture usage description,
+versions, and hashes before replacing its exact managed prefix. It never uses
+`sudo` or installs a launch agent. `Scripts/runtime-dev.sh` supports
+`start|status|stop|foreground|logs`; background start is opt-in. Override the
+install location with `SONEXIS_DEV_PREFIX`, and another developer team with
+`SONEXIS_DEVELOPMENT_TEAM`.
+
+To build and run directly from the repository instead:
 
 ```sh
 xcodebuild -project Sonexis.xcodeproj -scheme sonexis-runtime \
@@ -40,6 +68,10 @@ In another terminal:
 ```
 
 Append `--socket PATH` to a CLI command or set `SONEXIS_RUNTIME_SOCKET`. Set `SONEXIS_RUNTIME_DIR` when starting the Runtime to move all of its sockets.
+
+`SONEXIS_RUNTIME_DIR` names the server directory; client SDKs and CLI use the
+full `SONEXIS_RUNTIME_SOCKET` control-socket path. With defaults, all use
+`/tmp/sonexis-runtime-$UID/control.sock`.
 
 The Runtime executable embeds `NSAudioCaptureUsageDescription`, uses the stable identifier `com.sonexis.runtime`, and is development-signed by Xcode. Live capture uses that identity for macOS Screen & System Audio Recording permission.
 
@@ -101,7 +133,7 @@ A successful response includes a distinct response ID and the negotiated platfor
   "ok": true,
   "handshake": {
     "protocol_version": 2,
-    "runtime_version": "0.4.0",
+    "runtime_version": "0.5.0",
     "runtime_instance_id": "UUID",
     "capabilities": ["application_sources", "capture_sessions", "event_stream", "format_negotiation", "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions", "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush", "default_device_playback"],
     "supported_formats": [
@@ -126,7 +158,7 @@ A successful response includes a distinct response ID and the negotiated platfor
 }
 ```
 
-Protocol version 2 remains mandatory in v0.4. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
+Protocol version 2 remains mandatory in v0.5. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
 
 Supported commands:
 
@@ -305,9 +337,10 @@ npm run build
 npm test
 ```
 
-The TypeScript v0.4 client also provides destinations, bounded binary output,
+The TypeScript client also provides destinations, bounded binary output,
 EOS/drain, flush, cancellation/AbortSignal, metrics, and duplex ownership. It
-was compiled on this host; the final test count is recorded in the v0.4 report.
+is compiled, tested, packed, and imported from a clean temporary consumer by
+the v0.5 release gate.
 
 ## MCP control
 
@@ -345,7 +378,7 @@ sampled off the realtime callback.
   model). Descriptors use `FD_CLOEXEC`.
 - Existing live sockets are never replaced. Stale sockets are removed only for the same owner, and shutdown unlinks only the device/inode originally bound by that listener.
 - Control messages, PCM packets, clients, sessions, event subscriptions, stream subscribers, and in-process queues have explicit limits.
-- v0.4 trusts the local macOS account. Any accepted same-UID client may query or stop a session by ID; the creating connection owns automatic cleanup and quota accounting. This intentional account-wide management policy keeps `sonexisctl stop SESSION` usable. Any unsandboxed process running as the same user is within the trust boundary and can use the Runtime's granted capture permission or inject audio into an output session. Do not run the Runtime privileged or place its sockets in a shared multi-user directory.
+- Sonexis Runtime trusts the local macOS account. Any accepted same-UID client may query or stop a session by ID; the creating connection owns automatic cleanup and quota accounting. This intentional account-wide management policy keeps `sonexisctl stop SESSION` usable. Any unsandboxed process running as the same user is within the trust boundary and can use the Runtime's granted capture permission or inject audio into an output session. Do not run the Runtime privileged or place its sockets in a shared multi-user directory.
 - The same trust boundary applies to output injection. A same-UID client can
   render to speakers or an installed loopback input. Virtual microphone
   selection inside the receiving application is an explicit user action.
@@ -388,7 +421,7 @@ sampled off the realtime callback.
   schemas were validated, but no third-party MCP host was used end to end.
 - JSON event/control nanoseconds and large counters are JavaScript `number`s and lose integer precision after `2^53`; binary PCM timestamps are `bigint`. A later protocol should encode JSON `u64` fields as decimal strings.
 - Protocol v2 is the first developer-preview contract. Fields were finalized within this milestone; future incompatible changes require a new protocol version rather than adding required v2 fields.
-- v0.4 has generic loopback-device routing but no bundled `Sonexis Agent Input`
+- The current Runtime has generic loopback-device routing but no bundled `Sonexis Agent Input`
   driver. See [virtual device design](virtual-audio-device-design.md).
 - Sonexis prevents an internal digital loop for process-specific capture but
   does not implement acoustic echo cancellation, automatic muting, or ducking.

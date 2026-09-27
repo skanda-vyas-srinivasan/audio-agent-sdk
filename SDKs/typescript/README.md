@@ -1,8 +1,9 @@
 # Sonexis TypeScript SDK
 
-The dependency-free `@sonexis/runtime` client targets Node.js 18+ and Sonexis Runtime protocol
-v2. Version 0.4 adds typed, bounded client-to-Runtime audio output while preserving the source-aware
-capture, AI format presets, and labeled multi-source APIs from v0.3.
+The dependency-free `@sonexis/runtime` client targets Node.js 18+ and Sonexis
+Runtime protocol v2. Version 0.5 is locally packageable for external consumers
+and includes typed, bounded client-to-Runtime audio output, source-aware capture,
+AI format presets, and labeled multi-source APIs.
 
 ```sh
 npm install

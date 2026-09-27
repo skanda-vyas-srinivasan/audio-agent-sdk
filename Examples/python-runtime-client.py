@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
-"""Small compatibility example built entirely on the public Sonexis SDK."""
+"""List sources and capture a short stream through the public Sonexis SDK."""
 
+import argparse
 import asyncio
-import sys
-from pathlib import Path
 
-try:
-    from sonexis import Sonexis
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).parents[1] / "SDKs/python/src"))
-    from sonexis import Sonexis
+from sonexis import Sonexis
 
 
-async def main():
-    requested = sys.argv[1] if len(sys.argv) > 1 else None
+async def run(requested, packet_limit):
     async with Sonexis(client_name="sonexis-example") as client:
         sources = await client.sources()
         for source in sources:
@@ -28,9 +22,17 @@ async def main():
                 print(f"sequence={frame.sequence} timestamp_ns={frame.timestamp_ns} "
                       f"frames={frame.frame_count} bytes={len(frame.data)}")
                 count += 1
-                if count == 50:
+                if count == packet_limit:
                     break
 
 
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", nargs="?", help="source ID; defaults to the first source")
+    parser.add_argument("--packets", type=int, default=50)
+    arguments = parser.parse_args()
+    asyncio.run(run(arguments.source, arguments.packets))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
