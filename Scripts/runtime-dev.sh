@@ -3,7 +3,11 @@ set -eu
 
 PREFIX=${SONEXIS_DEV_PREFIX:-"$HOME/Library/Application Support/SonexisRuntime/dev"}
 STATE_DIR=${SONEXIS_RUNTIME_STATE_DIR:-"$HOME/Library/Application Support/SonexisRuntime/state"}
-RUNTIME_DIR=${SONEXIS_RUNTIME_DIR:-"/tmp/sonexis-runtime-$(id -u)"}
+USER_TEMP_DIR=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)
+if [ -z "$USER_TEMP_DIR" ]; then
+    USER_TEMP_DIR=${TMPDIR:-/tmp}
+fi
+RUNTIME_DIR=${SONEXIS_RUNTIME_DIR:-"${USER_TEMP_DIR%/}/sx-$(id -u)"}
 if [ -d "$PREFIX" ] && [ ! -L "$PREFIX" ]; then
     PREFIX=$(CDPATH= cd -- "$PREFIX" && pwd -P)
 fi

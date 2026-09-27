@@ -5,6 +5,7 @@ import math
 from dataclasses import replace
 import json
 import os
+import tempfile
 import time
 import uuid
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, TYPE_CHECKING, Union
@@ -16,6 +17,7 @@ from .errors import (AmbiguousOutputDestinationError, AmbiguousSourceError,
 from .models import (AudioFormat, AudioFrame, AudioOutputDestination, AudioSource,
                      CaptureInfo, Handshake, OutputInfo, RuntimeEvent, RuntimeStatus)
 from .protocol import FLAG_EOS, MAX_CONTROL_BYTES, PROTOCOL_VERSION, read_frame
+from .unix_socket import open_trusted_unix_connection
 
 SourceSelector = Union[str, int, AudioSource]
 OutputDestinationSelector = Union[str, AudioOutputDestination]
@@ -29,6 +31,13 @@ RUNTIME_EVENT_TYPES = (
     "output_destination_removed", "output_destination_updated", "output_default_changed",
 )
 
+# Once one of these requests is written, cancellation cannot prove whether the
+# Runtime created a resource. Closing the owner connection is the only protocol
+# v2 operation that deterministically reconciles every possible late result.
+_MUTATING_CONTROL_COMMANDS = frozenset({
+    "start_capture", "subscribe_events", "start_output", "flush_output",
+})
+
 if TYPE_CHECKING:
     from .duplex import DuplexSession
     from .output import AudioOutput
@@ -38,9 +47,10 @@ class Sonexis:
     """A reusable asynchronous connection to the local Sonexis Runtime."""
 
     def __init__(self, socket_path: Optional[str] = None, *, client_name: str = "sonexis-python",
-                 client_version: str = "0.7.0") -> None:
+                 client_version: str = "0.8.0") -> None:
         self.socket_path = socket_path or os.environ.get(
-            "SONEXIS_RUNTIME_SOCKET", f"/tmp/sonexis-runtime-{os.getuid()}/control.sock")
+            "SONEXIS_RUNTIME_SOCKET", os.path.join(
+                tempfile.gettempdir(), f"sx-{os.getuid()}", "control.sock"))
         self.client_name = client_name
         self.client_version = client_version
         self.handshake: Optional[Handshake] = None
@@ -86,7 +96,7 @@ class Sonexis:
         last_error: Optional[BaseException] = None
         for attempt in range(reconnect_attempts + 1):
             try:
-                self._reader, self._writer = await asyncio.open_unix_connection(
+                self._reader, self._writer = await open_trusted_unix_connection(
                     self.socket_path, limit=MAX_CONTROL_BYTES + 1)
                 self._reader_task = asyncio.create_task(self._control_reader(),
                                                         name="sonexis-control-reader")
@@ -613,9 +623,12 @@ class Sonexis:
                 await writer.drain()
             return await future
         except asyncio.CancelledError:
-            # The request may already be in the kernel buffer. Its eventual
-            # response is valid but no longer has a waiter.
+            # A mutating request may already be in the kernel buffer. Protocol
+            # v2 has no request-cancellation command, so terminate the owning
+            # connection and let Runtime clean up every resource for this owner.
             self._discarded_request_ids.add(request_id)
+            if command in _MUTATING_CONTROL_COMMANDS:
+                await asyncio.shield(self.close())
             raise
         except (OSError, ConnectionError) as error:
             raise SonexisConnectionError("connection_lost", str(error), retryable=True) from error
@@ -717,7 +730,8 @@ class CaptureSession(AsyncIterator[AudioFrame]):
         return f"CaptureSession(id={self.info.id!r}, source={name!r}, format={self.info.format!r})"
 
     async def _open(self) -> None:
-        self._reader, self._writer = await asyncio.open_unix_connection(self.info.data_socket_path)
+        self._reader, self._writer = await open_trusted_unix_connection(
+            self.info.data_socket_path)
 
     async def __aenter__(self) -> "CaptureSession":
         return self
@@ -801,7 +815,7 @@ class EventSubscription(AsyncIterator[RuntimeEvent]):
         self._cleanup_task: Optional[asyncio.Task] = None
 
     async def _open(self) -> None:
-        self._reader, self._writer = await asyncio.open_unix_connection(
+        self._reader, self._writer = await open_trusted_unix_connection(
             self.socket_path, limit=MAX_CONTROL_BYTES + 1)
 
     async def __aenter__(self) -> "EventSubscription":

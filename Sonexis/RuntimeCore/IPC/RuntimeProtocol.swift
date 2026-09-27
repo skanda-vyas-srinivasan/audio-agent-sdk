@@ -2,10 +2,11 @@ import Foundation
 
 public enum RuntimeProtocolInfo {
     public static let protocolVersion = 2
-    public static let runtimeVersion = "0.7.0"
+    public static let runtimeVersion = "0.8.0"
     public static let capabilities = [
         "application_sources", "capture_sessions", "event_stream", "format_negotiation",
-        "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions",
+        "multiple_sessions", "pcm_v2", "runtime_diagnostics", "runtime_diagnostics_v2",
+        "output_sessions",
         "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush",
         "default_device_playback", "output_destination_events",
     ]
@@ -264,6 +265,7 @@ public struct RuntimeResourceLimitsDTO: Codable, Equatable, Sendable {
     public let maximumOutputSessionsPerClient: Int?
     public let maximumOutputPacketMilliseconds: Int?
     public let maximumOutputDestinations: Int?
+    public let maximumSources: Int?
 
     public init(maximumControlClients: Int = 32, maximumSessions: Int = 16,
                 maximumSessionsPerClient: Int = 8, maximumSubscribersPerStream: Int = 4,
@@ -273,7 +275,8 @@ public struct RuntimeResourceLimitsDTO: Codable, Equatable, Sendable {
                 maximumOutputSessions: Int? = 8,
                 maximumOutputSessionsPerClient: Int? = 4,
                 maximumOutputPacketMilliseconds: Int? = 200,
-                maximumOutputDestinations: Int? = 32) {
+                maximumOutputDestinations: Int? = 32,
+                maximumSources: Int? = 256) {
         self.maximumControlClients = maximumControlClients
         self.maximumSessions = maximumSessions
         self.maximumSessionsPerClient = maximumSessionsPerClient
@@ -285,6 +288,7 @@ public struct RuntimeResourceLimitsDTO: Codable, Equatable, Sendable {
         self.maximumOutputSessionsPerClient = maximumOutputSessionsPerClient
         self.maximumOutputPacketMilliseconds = maximumOutputPacketMilliseconds
         self.maximumOutputDestinations = maximumOutputDestinations
+        self.maximumSources = maximumSources
     }
 }
 
@@ -332,6 +336,46 @@ public struct RuntimeStatusDTO: Codable, Equatable, Sendable {
     public let totalOutputFramesRendered: UInt64?
     public let totalOutputFramesDropped: UInt64?
     public let totalOutputBytesReceived: UInt64?
+    public let totalCaptureRingDroppedFrames: UInt64?
+    public let totalCaptureDeliveryDroppedFrames: UInt64?
+    public let totalCaptureQueueDroppedFrames: UInt64?
+    public let totalCaptureNoSubscriberFrames: UInt64?
+    public let connectedCaptureSubscribers: Int?
+    public let retainedCaptureSessions: Int?
+    public let reservedCaptureStarts: Int?
+    /// `totalOutputFramesDropped` is the legacy discarded total (lost + flushed).
+    public let totalOutputFramesLost: UInt64?
+    public let totalOutputFramesFlushed: UInt64?
+    public let totalOutputFramesLate: UInt64?
+    public let totalOutputUnderrunFrames: UInt64?
+    public let totalOutputUnderrunEvents: UInt64?
+    public let totalOutputOverrunEvents: UInt64?
+    public let totalOutputRouteChanges: UInt64?
+    public let totalOutputConversionBatches: UInt64?
+    public let totalOutputConversionNanoseconds: UInt64?
+    public let connectedOutputProducers: Int?
+    public let retainedOutputSessions: Int?
+    public let reservedOutputStarts: Int?
+    /// Additive control-plane diagnostics; nil when decoding a pre-v0.8 response.
+    public let totalControlClientsAccepted: UInt64?
+    public let totalControlClientsDisconnected: UInt64?
+    public let totalControlClientsRejected: UInt64?
+    public let totalControlRequests: UInt64?
+    public let totalControlErrors: UInt64?
+    public let totalMalformedControlMessages: UInt64?
+    public let totalControlHandshakeTimeouts: UInt64?
+    public let totalSourceMonitorFailures: UInt64?
+    public let totalDestinationMonitorFailures: UInt64?
+    public let sourceMonitorConsecutiveFailures: UInt64?
+    public let destinationMonitorConsecutiveFailures: UInt64?
+    public let sourceMonitorRecoveries: UInt64?
+    public let destinationMonitorRecoveries: UInt64?
+    public let sourceMonitorLastSuccessNanoseconds: UInt64?
+    public let destinationMonitorLastSuccessNanoseconds: UInt64?
+    public let residentMemoryBytes: UInt64?
+    public let peakResidentMemoryBytes: UInt64?
+    public let openFileDescriptors: Int?
+    public let threadCount: Int?
 
     public init(runtimeVersion: String, runtimeInstanceID: String, uptimeNanoseconds: UInt64,
                 activeClients: Int, activeSessions: Int, eventSubscribers: Int,
@@ -342,7 +386,45 @@ public struct RuntimeStatusDTO: Codable, Equatable, Sendable {
                 totalOutputFramesReceived: UInt64? = nil,
                 totalOutputFramesRendered: UInt64? = nil,
                 totalOutputFramesDropped: UInt64? = nil,
-                totalOutputBytesReceived: UInt64? = nil) {
+                totalOutputBytesReceived: UInt64? = nil,
+                totalCaptureRingDroppedFrames: UInt64? = nil,
+                totalCaptureDeliveryDroppedFrames: UInt64? = nil,
+                totalCaptureQueueDroppedFrames: UInt64? = nil,
+                totalCaptureNoSubscriberFrames: UInt64? = nil,
+                connectedCaptureSubscribers: Int? = nil,
+                retainedCaptureSessions: Int? = nil,
+                reservedCaptureStarts: Int? = nil,
+                totalOutputFramesLost: UInt64? = nil,
+                totalOutputFramesFlushed: UInt64? = nil,
+                totalOutputFramesLate: UInt64? = nil,
+                totalOutputUnderrunFrames: UInt64? = nil,
+                totalOutputUnderrunEvents: UInt64? = nil,
+                totalOutputOverrunEvents: UInt64? = nil,
+                totalOutputRouteChanges: UInt64? = nil,
+                totalOutputConversionBatches: UInt64? = nil,
+                totalOutputConversionNanoseconds: UInt64? = nil,
+                connectedOutputProducers: Int? = nil,
+                retainedOutputSessions: Int? = nil,
+                reservedOutputStarts: Int? = nil,
+                totalControlClientsAccepted: UInt64? = nil,
+                totalControlClientsDisconnected: UInt64? = nil,
+                totalControlClientsRejected: UInt64? = nil,
+                totalControlRequests: UInt64? = nil,
+                totalControlErrors: UInt64? = nil,
+                totalMalformedControlMessages: UInt64? = nil,
+                totalControlHandshakeTimeouts: UInt64? = nil,
+                totalSourceMonitorFailures: UInt64? = nil,
+                totalDestinationMonitorFailures: UInt64? = nil,
+                sourceMonitorConsecutiveFailures: UInt64? = nil,
+                destinationMonitorConsecutiveFailures: UInt64? = nil,
+                sourceMonitorRecoveries: UInt64? = nil,
+                destinationMonitorRecoveries: UInt64? = nil,
+                sourceMonitorLastSuccessNanoseconds: UInt64? = nil,
+                destinationMonitorLastSuccessNanoseconds: UInt64? = nil,
+                residentMemoryBytes: UInt64? = nil,
+                peakResidentMemoryBytes: UInt64? = nil,
+                openFileDescriptors: Int? = nil,
+                threadCount: Int? = nil) {
         self.runtimeVersion = runtimeVersion
         self.runtimeInstanceID = runtimeInstanceID
         self.uptimeNanoseconds = uptimeNanoseconds
@@ -360,6 +442,44 @@ public struct RuntimeStatusDTO: Codable, Equatable, Sendable {
         self.totalOutputFramesRendered = totalOutputFramesRendered
         self.totalOutputFramesDropped = totalOutputFramesDropped
         self.totalOutputBytesReceived = totalOutputBytesReceived
+        self.totalCaptureRingDroppedFrames = totalCaptureRingDroppedFrames
+        self.totalCaptureDeliveryDroppedFrames = totalCaptureDeliveryDroppedFrames
+        self.totalCaptureQueueDroppedFrames = totalCaptureQueueDroppedFrames
+        self.totalCaptureNoSubscriberFrames = totalCaptureNoSubscriberFrames
+        self.connectedCaptureSubscribers = connectedCaptureSubscribers
+        self.retainedCaptureSessions = retainedCaptureSessions
+        self.reservedCaptureStarts = reservedCaptureStarts
+        self.totalOutputFramesLost = totalOutputFramesLost
+        self.totalOutputFramesFlushed = totalOutputFramesFlushed
+        self.totalOutputFramesLate = totalOutputFramesLate
+        self.totalOutputUnderrunFrames = totalOutputUnderrunFrames
+        self.totalOutputUnderrunEvents = totalOutputUnderrunEvents
+        self.totalOutputOverrunEvents = totalOutputOverrunEvents
+        self.totalOutputRouteChanges = totalOutputRouteChanges
+        self.totalOutputConversionBatches = totalOutputConversionBatches
+        self.totalOutputConversionNanoseconds = totalOutputConversionNanoseconds
+        self.connectedOutputProducers = connectedOutputProducers
+        self.retainedOutputSessions = retainedOutputSessions
+        self.reservedOutputStarts = reservedOutputStarts
+        self.totalControlClientsAccepted = totalControlClientsAccepted
+        self.totalControlClientsDisconnected = totalControlClientsDisconnected
+        self.totalControlClientsRejected = totalControlClientsRejected
+        self.totalControlRequests = totalControlRequests
+        self.totalControlErrors = totalControlErrors
+        self.totalMalformedControlMessages = totalMalformedControlMessages
+        self.totalControlHandshakeTimeouts = totalControlHandshakeTimeouts
+        self.totalSourceMonitorFailures = totalSourceMonitorFailures
+        self.totalDestinationMonitorFailures = totalDestinationMonitorFailures
+        self.sourceMonitorConsecutiveFailures = sourceMonitorConsecutiveFailures
+        self.destinationMonitorConsecutiveFailures = destinationMonitorConsecutiveFailures
+        self.sourceMonitorRecoveries = sourceMonitorRecoveries
+        self.destinationMonitorRecoveries = destinationMonitorRecoveries
+        self.sourceMonitorLastSuccessNanoseconds = sourceMonitorLastSuccessNanoseconds
+        self.destinationMonitorLastSuccessNanoseconds = destinationMonitorLastSuccessNanoseconds
+        self.residentMemoryBytes = residentMemoryBytes
+        self.peakResidentMemoryBytes = peakResidentMemoryBytes
+        self.openFileDescriptors = openFileDescriptors
+        self.threadCount = threadCount
     }
 }
 

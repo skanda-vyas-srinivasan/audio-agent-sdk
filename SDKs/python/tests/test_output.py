@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from sonexis import (AmbiguousOutputDestinationError, AudioFormat, AudioOutput,
                      AudioOutputDestination, OutputDestinationNotFoundError, OutputInfo,
                      OutputFailedError, OutputMetrics, RuntimeEvent, SampleFormat,
-                     Sonexis, SonexisError, UnsupportedFormatError)
+                     Sonexis, SonexisConnectionError, SonexisError,
+                     UnsupportedFormatError)
 from sonexis.protocol import FLAG_DISCONTINUITY, FLAG_EOS, PCM_HEADER, PCM_MAGIC
 
 
@@ -285,8 +286,9 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
             missing_path = original_path + ".missing"
             self.runtime.stream_paths[0] = missing_path
             try:
-                with self.assertRaises(OSError):
+                with self.assertRaises(SonexisConnectionError) as caught:
                     await client.playback()
+                self.assertEqual(caught.exception.code, "runtime_unavailable")
             finally:
                 self.runtime.stream_paths[0] = original_path
             self.assertIn("stop_output", self.runtime.commands)

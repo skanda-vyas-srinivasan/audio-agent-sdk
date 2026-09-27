@@ -14,7 +14,7 @@ private struct Arguments {
 
     init(_ values: [String]) throws {
         guard let command = values.first else { throw RuntimeErrorDTO(code: "usage", message: Self.usage) }
-        let commands: Set<String> = ["sources", "status", "capture", "stop", "watch",
+        let commands: Set<String> = ["sources", "status", "diagnostics", "capture", "stop", "watch",
             "outputs", "play", "output-status", "output-stop", "help", "--help", "-h",
             "version", "--version"]
         guard commands.contains(command) else {
@@ -103,6 +103,9 @@ private struct Arguments {
         case "status":
             allowedOptions = common.union(["--json"])
             minimumPositionals = 0; maximumPositionals = 1
+        case "diagnostics":
+            allowedOptions = common.union(["--json", "--output"])
+            minimumPositionals = 0; maximumPositionals = 0
         case "capture":
             allowedOptions = common.union(["--sample-rate", "--channels", "--sample-format",
                 "--output", "--debug", "--json"])
@@ -141,6 +144,7 @@ private struct Arguments {
     Usage:
       sonexisctl sources [--json]
       sonexisctl status [session-id] [--json]
+      sonexisctl diagnostics [--json] [--output private-file.json]
       sonexisctl capture <source-id> [--sample-rate Hz] [--channels 1|2] \
         [--sample-format pcm_s16le|float32_le] [--output file.pcm] [--debug]
       sonexisctl stop <session-id> [--json]
@@ -160,8 +164,37 @@ private func printJSON<T: Encodable>(_ value: T) throws {
     FileHandle.standardOutput.write(line)
 }
 
+private func terminalSafe(_ value: String) -> String {
+    var result = ""
+    result.reserveCapacity(value.utf8.count)
+    for scalar in value.unicodeScalars {
+        if scalar.value < 0x20 || (0x7f...0x9f).contains(scalar.value) {
+            result += String(format: "\\u{%04X}", scalar.value)
+        } else {
+            result.unicodeScalars.append(scalar)
+        }
+    }
+    return result
+}
+
+private struct RuntimeDiagnosticsBundle: Codable {
+    let schemaVersion: Int
+    let generatedAtNanoseconds: UInt64
+    let protocolVersion: Int
+    let runtimeVersion: String
+    let runtimeInstanceID: String
+    let capabilities: [String]
+    let limits: RuntimeResourceLimitsDTO
+    let status: RuntimeStatusDTO
+}
+
+private struct CLIErrorEnvelope: Codable {
+    let ok: Bool
+    let error: RuntimeErrorDTO
+}
+
 private func printSession(_ session: RuntimeSessionDTO) {
-    print("session=\(session.id) stream=\(session.streamID) state=\(session.state.rawValue) source=\(session.sourceID) format=\(session.format.sampleFormat.rawValue)/\(session.format.sampleRate)Hz/\(session.format.channelCount)ch frames=\(session.metrics.framesForwarded) dropped=\(session.metrics.droppedFrames)")
+    print("session=\(terminalSafe(session.id)) stream=\(terminalSafe(session.streamID)) state=\(session.state.rawValue) source=\(terminalSafe(session.sourceID)) format=\(session.format.sampleFormat.rawValue)/\(session.format.sampleRate)Hz/\(session.format.channelCount)ch frames=\(session.metrics.framesForwarded) dropped=\(session.metrics.droppedFrames)")
 }
 
 private func printOutputSession(_ session: RuntimeOutputSessionDTO) {
@@ -169,7 +202,7 @@ private func printOutputSession(_ session: RuntimeOutputSessionDTO) {
     let device = metrics.deviceSampleRate.map { "\($0)Hz/\(metrics.deviceChannelCount ?? 0)ch" } ?? "unavailable"
     let latency = metrics.estimatedOutputLatencyMilliseconds
         .map { String(format: "%.2f", $0) } ?? "unavailable"
-    print("output_session=\(session.id) stream=\(session.streamID) state=\(session.state.rawValue) destination=\(session.destinationID) format=\(session.format.sampleFormat.rawValue)/\(session.format.sampleRate)Hz/\(session.format.channelCount)ch device_format=\(device) received=\(metrics.inputFramesReceived) enqueued=\(metrics.deviceFramesEnqueued) rendered=\(metrics.deviceFramesRendered) dropped=\(metrics.droppedFrames) late=\(metrics.lateFrames) underruns=\(metrics.underrunEvents) overruns=\(metrics.overrunEvents) queue_frames=\(metrics.queueDepthFrames) buffered_ms=\(String(format: "%.2f", metrics.bufferedMilliseconds)) estimated_output_latency_ms=\(latency) conversion_us=\(String(format: "%.2f", metrics.averageConversionMicroseconds))")
+    print("output_session=\(terminalSafe(session.id)) stream=\(terminalSafe(session.streamID)) state=\(session.state.rawValue) destination=\(terminalSafe(session.destinationID)) format=\(session.format.sampleFormat.rawValue)/\(session.format.sampleRate)Hz/\(session.format.channelCount)ch device_format=\(device) received=\(metrics.inputFramesReceived) enqueued=\(metrics.deviceFramesEnqueued) rendered=\(metrics.deviceFramesRendered) dropped=\(metrics.droppedFrames) late=\(metrics.lateFrames) underruns=\(metrics.underrunEvents) overruns=\(metrics.overrunEvents) queue_frames=\(metrics.queueDepthFrames) buffered_ms=\(String(format: "%.2f", metrics.bufferedMilliseconds)) estimated_output_latency_ms=\(latency) conversion_us=\(String(format: "%.2f", metrics.averageConversionMicroseconds))")
 }
 
 private func resolveOutputDestination(_ selector: String,
@@ -316,8 +349,10 @@ private func secureOutputHandle(path: String) throws -> FileHandle {
     return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
 }
 
+let rawArguments = Array(CommandLine.arguments.dropFirst())
+let requestedJSON = rawArguments.contains("--json")
 do {
-    let arguments = try Arguments(Array(CommandLine.arguments.dropFirst()))
+    let arguments = try Arguments(rawArguments)
     if ["help", "--help", "-h"].contains(arguments.command) {
         print(Arguments.usage)
         exit(EXIT_SUCCESS)
@@ -342,7 +377,7 @@ do {
         if arguments.json { try printJSON(sources); break }
         print("\("ID".padding(toLength: 42, withPad: " ", startingAt: 0))  \("STATUS".padding(toLength: 8, withPad: " ", startingAt: 0))  APP")
         for source in sources {
-            print("\(source.id.padding(toLength: 42, withPad: " ", startingAt: 0))  \((source.isAvailable ? "active" : "inactive").padding(toLength: 8, withPad: " ", startingAt: 0))  \(source.name)")
+            print("\(terminalSafe(source.id).padding(toLength: 42, withPad: " ", startingAt: 0))  \((source.isAvailable ? "active" : "inactive").padding(toLength: 8, withPad: " ", startingAt: 0))  \(terminalSafe(source.name))")
         }
     case "capture":
         guard let sourceID = arguments.value else { throw RuntimeErrorDTO(code: "usage", message: Arguments.usage) }
@@ -391,7 +426,12 @@ do {
                 print("runtime=\(status.runtimeVersion) instance=\(status.runtimeInstanceID)")
                 print("uptime_seconds=\(String(format: "%.3f", Double(status.uptimeNanoseconds) / 1e9)) clients=\(status.activeClients) sessions=\(status.activeSessions) event_subscribers=\(status.eventSubscribers)")
                 print("sessions_started=\(status.totalSessionsStarted) frames=\(status.totalFramesForwarded) dropped=\(status.totalDroppedFrames) bytes=\(status.totalBytesTransmitted) events_dropped=\(status.totalEventsDropped)")
-                print("output_sessions=\(status.activeOutputSessions ?? 0) output_started=\(status.totalOutputSessionsStarted ?? 0) output_received=\(status.totalOutputFramesReceived ?? 0) output_rendered=\(status.totalOutputFramesRendered ?? 0) output_dropped=\(status.totalOutputFramesDropped ?? 0) output_bytes=\(status.totalOutputBytesReceived ?? 0)")
+                print("capture_ring_dropped=\(status.totalCaptureRingDroppedFrames ?? 0) capture_delivery_dropped=\(status.totalCaptureDeliveryDroppedFrames ?? 0) capture_queue_dropped=\(status.totalCaptureQueueDroppedFrames ?? 0) capture_no_subscriber=\(status.totalCaptureNoSubscriberFrames ?? 0) subscribers=\(status.connectedCaptureSubscribers ?? 0) retained=\(status.retainedCaptureSessions ?? 0) reserved=\(status.reservedCaptureStarts ?? 0)")
+                print("output_sessions=\(status.activeOutputSessions ?? 0) output_started=\(status.totalOutputSessionsStarted ?? 0) output_received=\(status.totalOutputFramesReceived ?? 0) output_rendered=\(status.totalOutputFramesRendered ?? 0) output_discarded=\(status.totalOutputFramesDropped ?? 0) output_lost=\(status.totalOutputFramesLost ?? 0) output_flushed=\(status.totalOutputFramesFlushed ?? 0) output_bytes=\(status.totalOutputBytesReceived ?? 0)")
+                print("output_late=\(status.totalOutputFramesLate ?? 0) underrun_frames=\(status.totalOutputUnderrunFrames ?? 0) underrun_events=\(status.totalOutputUnderrunEvents ?? 0) overrun_events=\(status.totalOutputOverrunEvents ?? 0) route_changes=\(status.totalOutputRouteChanges ?? 0) producers=\(status.connectedOutputProducers ?? 0) retained=\(status.retainedOutputSessions ?? 0) reserved=\(status.reservedOutputStarts ?? 0)")
+                print("control_accepted=\(status.totalControlClientsAccepted ?? 0) control_disconnected=\(status.totalControlClientsDisconnected ?? 0) control_rejected=\(status.totalControlClientsRejected ?? 0) control_requests=\(status.totalControlRequests ?? 0) control_errors=\(status.totalControlErrors ?? 0) malformed=\(status.totalMalformedControlMessages ?? 0) handshake_timeouts=\(status.totalControlHandshakeTimeouts ?? 0)")
+                print("source_monitor_failures=\(status.totalSourceMonitorFailures ?? 0) source_monitor_consecutive=\(status.sourceMonitorConsecutiveFailures ?? 0) source_monitor_recoveries=\(status.sourceMonitorRecoveries ?? 0) destination_monitor_failures=\(status.totalDestinationMonitorFailures ?? 0) destination_monitor_consecutive=\(status.destinationMonitorConsecutiveFailures ?? 0) destination_monitor_recoveries=\(status.destinationMonitorRecoveries ?? 0)")
+                print("resident_bytes=\(status.residentMemoryBytes ?? 0) peak_resident_bytes=\(status.peakResidentMemoryBytes ?? 0) open_fds=\(status.openFileDescriptors ?? 0) threads=\(status.threadCount ?? 0)")
             }
         }
     case "outputs":
@@ -400,7 +440,31 @@ do {
         print("ID                          KIND           STATUS     DESTINATION")
         for destination in destinations {
             let resolved = destination.activeDeviceID.map { " [\($0)]" } ?? ""
-            print("\(destination.id.padding(toLength: 27, withPad: " ", startingAt: 0)) \(destination.kind.rawValue.padding(toLength: 14, withPad: " ", startingAt: 0)) \((destination.isAvailable ? "available" : "missing").padding(toLength: 10, withPad: " ", startingAt: 0)) \(destination.name)\(destination.activeDeviceName.map { " (\($0))" } ?? "")\(resolved)")
+            print("\(terminalSafe(destination.id).padding(toLength: 27, withPad: " ", startingAt: 0)) \(destination.kind.rawValue.padding(toLength: 14, withPad: " ", startingAt: 0)) \((destination.isAvailable ? "available" : "missing").padding(toLength: 10, withPad: " ", startingAt: 0)) \(terminalSafe(destination.name))\(destination.activeDeviceName.map { " (\(terminalSafe($0)))" } ?? "")\(terminalSafe(resolved))")
+        }
+    case "diagnostics":
+        guard let handshake = client.handshake else {
+            throw RuntimeErrorDTO(code: "invalid_handshake",
+                message: "Runtime handshake metadata is unavailable")
+        }
+        let bundle = RuntimeDiagnosticsBundle(
+            schemaVersion: 1,
+            generatedAtNanoseconds: UInt64(Date().timeIntervalSince1970 * 1_000_000_000),
+            protocolVersion: handshake.protocolVersion,
+            runtimeVersion: handshake.runtimeVersion,
+            runtimeInstanceID: handshake.runtimeInstanceID,
+            capabilities: handshake.capabilities.sorted(), limits: handshake.limits,
+            status: try client.runtimeStatus())
+        if let path = arguments.output {
+            let handle = try secureOutputHandle(path: path)
+            try handle.write(contentsOf: RuntimeProtocolCodec.encodeLine(bundle))
+            try handle.close()
+        }
+        if arguments.json { try printJSON(bundle) }
+        else {
+            print("diagnostics_schema=\(bundle.schemaVersion) runtime=\(bundle.runtimeVersion) instance=\(bundle.runtimeInstanceID)")
+            print("uptime_seconds=\(String(format: "%.3f", Double(bundle.status.uptimeNanoseconds) / 1e9)) resident_bytes=\(bundle.status.residentMemoryBytes ?? 0) peak_resident_bytes=\(bundle.status.peakResidentMemoryBytes ?? 0) open_fds=\(bundle.status.openFileDescriptors ?? 0) threads=\(bundle.status.threadCount ?? 0)")
+            if let path = arguments.output { print("wrote_private_bundle=\(terminalSafe(path))") }
         }
     case "play":
         guard let path = arguments.value else {
@@ -457,7 +521,7 @@ do {
             else {
                 let sequence = event.eventSequence.map(String.init) ?? "-"
                 let missed = event.droppedEventsBefore ?? 0
-                print("\(event.timestampNanoseconds) seq=\(sequence) missed=\(missed) \(event.type.rawValue) source=\(event.sourceID ?? "-") session=\(event.sessionID ?? "-") \(event.message ?? "")")
+                print("\(event.timestampNanoseconds) seq=\(sequence) missed=\(missed) \(event.type.rawValue) source=\(terminalSafe(event.sourceID ?? "-")) session=\(terminalSafe(event.sessionID ?? "-")) \(terminalSafe(event.message ?? ""))")
             }
             return true
         }
@@ -465,6 +529,12 @@ do {
         throw RuntimeErrorDTO(code: "usage", message: Arguments.usage)
     }
 } catch {
-    fputs("sonexisctl: \(error.localizedDescription)\n", stderr)
+    if requestedJSON {
+        let runtimeError = error as? RuntimeErrorDTO ?? RuntimeErrorDTO(
+            code: "cli_error", message: terminalSafe(error.localizedDescription))
+        try? printJSON(CLIErrorEnvelope(ok: false, error: runtimeError))
+    } else {
+        fputs("sonexisctl: \(terminalSafe(error.localizedDescription))\n", stderr)
+    }
     exit(EXIT_FAILURE)
 }

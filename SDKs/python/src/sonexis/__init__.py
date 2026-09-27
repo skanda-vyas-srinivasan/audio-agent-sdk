@@ -21,7 +21,7 @@ from .replay import ReplayStream
 from .duplex import DuplexSession
 
 SonexisClient = Sonexis
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "ActivityDetectionConfig", "ActivityEvent", "ActivityState",

@@ -347,7 +347,8 @@ public final class RuntimeEventHub: @unchecked Sendable {
         defer {
             if reservationActive { queue.sync { reservedSubscriptions -= 1 } }
         }
-        let path = directory.appendingPathComponent("events-\(id).sock").path
+        let compactID = id.replacingOccurrences(of: "-", with: "")
+        let path = directory.appendingPathComponent("e-\(compactID).sock").path
         let plane = RuntimeEventPlane(path: path)
         try plane.start()
         queue.sync {

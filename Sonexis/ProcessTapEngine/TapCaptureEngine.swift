@@ -1,6 +1,11 @@
 import CoreAudio
 import Foundation
 
+private func tapDebugLog(_ message: @autoclosure () -> String) {
+    guard ProcessInfo.processInfo.environment["SONEXIS_AUDIO_DEBUG"] == "1" else { return }
+    print(message())
+}
+
 private func tapInputIOProc(
     _ inDevice: AudioObjectID,
     _ inNow: UnsafePointer<AudioTimeStamp>,
@@ -72,7 +77,7 @@ final class TapCaptureEngine {
             operation: "AudioHardwareCreateProcessTap"
         )
         tapID = createdTapID
-        print("Created process tap: AudioObjectID \(tapID)")
+        tapDebugLog("Created process tap: AudioObjectID \(tapID)")
 
         let installedTapDescription = try CoreAudioSupport.tapDescription(tapID)
         guard installedTapDescription.isExclusive == isExclusive,
@@ -87,11 +92,11 @@ final class TapCaptureEngine {
                 message: "Process tap source UID mismatch. Expected \(defaultOutput.uid), got \(installedTapDescription.deviceUID ?? "nil")."
             )
         }
-        print("Verified tap source selection excludes Sonexis playback.")
-        print("Tap source device: \(defaultOutput)")
+        tapDebugLog("Verified tap source selection excludes Sonexis playback.")
+        tapDebugLog("Tap source device: \(defaultOutput)")
 
         let createdTapFormat = try CoreAudioSupport.tapFormat(tapID)
-        print("Tap format: \(createdTapFormat.formatSummary)")
+        tapDebugLog("Tap format: \(createdTapFormat.formatSummary)")
         if let outputStreamFormat {
             guard createdTapFormat.isPlaybackCompatible(with: outputStreamFormat) else {
                 throw SonexisError(
@@ -102,7 +107,7 @@ final class TapCaptureEngine {
 
         let tapUID = try CoreAudioSupport.tapUID(tapID)
         aggregateDeviceID = try createPrivateAggregateDevice(tapUID: tapUID)
-        print("Created private aggregate device: AudioDeviceID \(aggregateDeviceID)")
+        tapDebugLog("Created private aggregate device: AudioDeviceID \(aggregateDeviceID)")
 
         sourceDevice = defaultOutput
         tapFormat = createdTapFormat
@@ -117,7 +122,9 @@ final class TapCaptureEngine {
                 self.lastRefreshError = nil
             } catch {
                 let message = String(describing: error)
-                if self.lastRefreshError != message { print("Audio source refresh failed: \(message)") }
+                if self.lastRefreshError != message {
+                    tapDebugLog("Audio source refresh failed: \(message)")
+                }
                 self.lastRefreshError = message
             }
         }

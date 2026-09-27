@@ -98,14 +98,21 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.sonexis.runtime.output-sessions")
     private let cleanupQueue = DispatchQueue(label: "com.sonexis.runtime.output-cleanup",
                                               attributes: .concurrent)
-    private let startGroup = DispatchGroup()
     private var records: [String: Record] = [:]
     private var acceptingStarts = true
     private var reservedStarts = 0
     private var totalSessionsStarted: UInt64 = 0
     private var archivedReceived: UInt64 = 0
     private var archivedRendered: UInt64 = 0
-    private var archivedDropped: UInt64 = 0
+    private var archivedLost: UInt64 = 0
+    private var archivedFlushed: UInt64 = 0
+    private var archivedLate: UInt64 = 0
+    private var archivedUnderrunFrames: UInt64 = 0
+    private var archivedUnderrunEvents: UInt64 = 0
+    private var archivedOverrunEvents: UInt64 = 0
+    private var archivedRouteChanges: UInt64 = 0
+    private var archivedConversionBatches: UInt64 = 0
+    private var archivedConversionNanoseconds: UInt64 = 0
     private var archivedBytes: UInt64 = 0
 
     public init(backend: RuntimeOutputBackend, socketDirectory: URL,
@@ -180,7 +187,6 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
                 message: "target_buffer_milliseconds must be between 20 and 250")
         }
         try reserveStart(ownerID: ownerID)
-        defer { startGroup.leave() }
         var reservationActive = true
         defer {
             if reservationActive { queue.sync { reservedStarts -= 1 } }
@@ -194,11 +200,20 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
             startedAt: DispatchTime.now().uptimeNanoseconds, format: format,
             targetBufferMilliseconds: targetBufferMilliseconds,
             streamID: streamID, dataPlane: plane)
-        queue.sync {
-            reservedStarts -= 1
-            reservationActive = false
-            records[sessionID] = record
-            totalSessionsStarted &+= 1
+        do {
+            try queue.sync {
+                guard acceptingStarts else {
+                    throw RuntimeErrorDTO(code: "runtime_shutting_down",
+                        message: "Runtime is shutting down", retryable: true)
+                }
+                reservedStarts -= 1
+                reservationActive = false
+                records[sessionID] = record
+                totalSessionsStarted &+= 1
+            }
+        } catch {
+            plane.stop()
+            throw error
         }
 
         do {
@@ -347,30 +362,52 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
                 return wasActive ? (record, record.dataPlane, record.backendSession) : nil
             }
         }
-        active.forEach { _, plane, session in plane.stop(); session?.stop() }
+        active.forEach { _, plane, session in
+            plane.stop()
+            if let session { cleanupQueue.async { session.stop() } }
+        }
         queue.sync { Array(records.values).forEach(archiveAndRemove) }
     }
 
     public func prepareForShutdown() {
         queue.sync { acceptingStarts = false }
-        startGroup.wait()
     }
 
     public func resume() { queue.sync { acceptingStarts = true } }
 
     public func diagnostics() -> (activeSessions: Int, totalSessionsStarted: UInt64,
                                   received: UInt64, rendered: UInt64,
-                                  dropped: UInt64, bytes: UInt64) {
+                                  dropped: UInt64, bytes: UInt64,
+                                  lost: UInt64, flushed: UInt64, late: UInt64,
+                                  underrunFrames: UInt64, underrunEvents: UInt64,
+                                  overrunEvents: UInt64, routeChanges: UInt64,
+                                  conversionBatches: UInt64, conversionNanoseconds: UInt64,
+                                  connectedProducers: Int, retainedTerminalRecords: Int,
+                                  reservedStarts: Int) {
         queue.sync {
             let active = records.values.filter {
                 $0.state == .starting || $0.state == .ready || $0.state == .draining
             }
             let values = records.values.map { snapshot($0).metrics }
+            let lost = archivedLost &+ values.reduce(0) { $0 &+ $1.droppedFrames }
+            let flushed = archivedFlushed &+ values.reduce(0) { $0 &+ $1.flushedFrames }
+            let terminalCount = records.values.filter {
+                $0.state == .stopped || $0.state == .cancelled || $0.state == .failed
+            }.count
             return (active.count, totalSessionsStarted,
                 archivedReceived &+ values.reduce(0) { $0 &+ $1.inputFramesReceived },
                 archivedRendered &+ values.reduce(0) { $0 &+ $1.deviceFramesRendered },
-                archivedDropped &+ values.reduce(0) { $0 &+ $1.droppedFrames &+ $1.flushedFrames },
-                archivedBytes &+ values.reduce(0) { $0 &+ $1.inputBytesReceived })
+                lost &+ flushed,
+                archivedBytes &+ values.reduce(0) { $0 &+ $1.inputBytesReceived },
+                lost, flushed,
+                archivedLate &+ values.reduce(0) { $0 &+ $1.lateFrames },
+                archivedUnderrunFrames &+ values.reduce(0) { $0 &+ $1.underrunFrames },
+                archivedUnderrunEvents &+ values.reduce(0) { $0 &+ $1.underrunEvents },
+                archivedOverrunEvents &+ values.reduce(0) { $0 &+ $1.overrunEvents },
+                archivedRouteChanges &+ values.reduce(0) { $0 &+ $1.routeChanges },
+                archivedConversionBatches &+ values.reduce(0) { $0 &+ $1.conversionBatches },
+                archivedConversionNanoseconds &+ values.reduce(0) { $0 &+ $1.conversionNanoseconds },
+                values.filter(\.producerConnected).count, terminalCount, reservedStarts)
         }
     }
 
@@ -393,14 +430,14 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
                     message: "Client output session limit reached", retryable: true)
             }
             reservedStarts += 1
-            startGroup.enter()
         }
     }
 
     private func makeDataPlane(sessionID: String, streamID: UUID,
                                format: RuntimePCMFormatDTO) -> RuntimeOutputDataPlane {
-        let path = socketDirectory.appendingPathComponent(
-            "output-\(streamID.uuidString.lowercased()).sock").path
+        let compactStreamID = streamID.uuidString.lowercased()
+            .replacingOccurrences(of: "-", with: "")
+        let path = socketDirectory.appendingPathComponent("o-\(compactStreamID).sock").path
         return RuntimeOutputDataPlane(path: path, streamID: streamID, format: format,
             maximumPacketMilliseconds: UInt32(limits.maximumOutputPacketMilliseconds ?? 200),
             onFrame: { [weak self] frame in
@@ -545,7 +582,15 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
         let metrics = snapshot(record).metrics
         archivedReceived &+= metrics.inputFramesReceived
         archivedRendered &+= metrics.deviceFramesRendered
-        archivedDropped &+= metrics.droppedFrames &+ metrics.flushedFrames
+        archivedLost &+= metrics.droppedFrames
+        archivedFlushed &+= metrics.flushedFrames
+        archivedLate &+= metrics.lateFrames
+        archivedUnderrunFrames &+= metrics.underrunFrames
+        archivedUnderrunEvents &+= metrics.underrunEvents
+        archivedOverrunEvents &+= metrics.overrunEvents
+        archivedRouteChanges &+= metrics.routeChanges
+        archivedConversionBatches &+= metrics.conversionBatches
+        archivedConversionNanoseconds &+= metrics.conversionNanoseconds
         archivedBytes &+= metrics.inputBytesReceived
     }
 

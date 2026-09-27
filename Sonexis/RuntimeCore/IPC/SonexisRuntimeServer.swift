@@ -1,6 +1,44 @@
 import Darwin
 import Foundation
 
+private final class RuntimeInstanceLock {
+    private var descriptor: Int32
+
+    init(directory: URL) throws {
+        let path = directory.appendingPathComponent("instance.lock").path
+        let fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
+        guard fd >= 0 else { throw UnixSocketError.systemCall("open", errno) }
+        var status = stat()
+        guard fstat(fd, &status) == 0,
+              status.st_mode & S_IFMT == S_IFREG,
+              status.st_uid == getuid(),
+              fchmod(fd, mode_t(0o600)) == 0 else {
+            let code = errno
+            close(fd)
+            throw UnixSocketError.systemCall("fstat", code)
+        }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            let code = errno
+            close(fd)
+            if code == EWOULDBLOCK {
+                throw RuntimeErrorDTO(code: "already_running",
+                    message: "Another Sonexis Runtime owns this socket directory")
+            }
+            throw UnixSocketError.systemCall("flock", code)
+        }
+        descriptor = fd
+    }
+
+    func release() {
+        guard descriptor >= 0 else { return }
+        _ = flock(descriptor, LOCK_UN)
+        close(descriptor)
+        descriptor = -1
+    }
+
+    deinit { release() }
+}
+
 public struct RuntimeSocketPaths: Equatable, Sendable {
     public let directory: URL
     public var controlSocketPath: String { directory.appendingPathComponent("control.sock").path }
@@ -8,7 +46,8 @@ public struct RuntimeSocketPaths: Equatable, Sendable {
     public init(directory: URL) { self.directory = directory }
 
     public static var userDefault: RuntimeSocketPaths {
-        RuntimeSocketPaths(directory: URL(fileURLWithPath: "/tmp/sonexis-runtime-\(getuid())", isDirectory: true))
+        RuntimeSocketPaths(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("sx-\(getuid())", isDirectory: true))
     }
 
     public func prepareDirectory() throws {
@@ -29,6 +68,42 @@ public struct RuntimeSocketPaths: Equatable, Sendable {
         }
         try manager.setAttributes([.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: directory.path)
     }
+
+    fileprivate func removeStaleSessionSockets() {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        for name in names where Self.isSessionSocketName(name) {
+            let path = directory.appendingPathComponent(name).path
+            var status = stat()
+            guard lstat(path, &status) == 0,
+                  status.st_mode & S_IFMT == S_IFSOCK,
+                  status.st_uid == getuid() else { continue }
+            do {
+                let live = try UnixSocketSystem.connect(path: path)
+                live.close()
+            } catch UnixSocketError.systemCall("connect", let code)
+                where code == ECONNREFUSED || code == ENOENT {
+                _ = unlink(path)
+            } catch {
+                // Preserve anything that cannot be positively identified as stale.
+            }
+        }
+    }
+
+    private static func isSessionSocketName(_ name: String) -> Bool {
+        guard name.hasSuffix(".sock") else { return false }
+        for prefix in ["stream-", "output-", "events-"] where name.hasPrefix(prefix) {
+            let start = name.index(name.startIndex, offsetBy: prefix.count)
+            let end = name.index(name.endIndex, offsetBy: -5)
+            return UUID(uuidString: String(name[start..<end])) != nil
+        }
+        for prefix in ["i-", "o-", "e-"] where name.hasPrefix(prefix) {
+            let start = name.index(name.startIndex, offsetBy: prefix.count)
+            let end = name.index(name.endIndex, offsetBy: -5)
+            let identifier = name[start..<end]
+            return identifier.count == 32 && identifier.allSatisfy { $0.isHexDigit }
+        }
+        return false
+    }
 }
 
 public final class SonexisRuntimeServer: @unchecked Sendable {
@@ -38,6 +113,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     private let coordinator: RuntimeSessionCoordinator
     private let outputCoordinator: RuntimeOutputCoordinator
     private let eventHub: RuntimeEventHub
+    private let handshakeTimeoutMilliseconds: Int
     private let acceptQueue = DispatchQueue(label: "com.sonexis.runtime.control.accept")
     private let clientQueue = DispatchQueue(label: "com.sonexis.runtime.control.clients", attributes: .concurrent)
     private let monitorQueue = DispatchQueue(label: "com.sonexis.runtime.endpoint-monitor")
@@ -45,18 +121,37 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     private let startedAt = DispatchTime.now().uptimeNanoseconds
     private var clients: [String: UnixSocketConnection] = [:]
     private var listener: UnixSocketListener?
+    private var instanceLock: RuntimeInstanceLock?
     private var endpointTimer: DispatchSourceTimer?
     private var sourceSnapshot: [String: RuntimeSourceDTO] = [:]
     private var destinationSnapshot: [String: RuntimeOutputDestinationDTO] = [:]
+    private var sourceMonitorError: String?
     private var destinationMonitorError: String?
+    private var totalControlClientsAccepted: UInt64 = 0
+    private var totalControlClientsDisconnected: UInt64 = 0
+    private var totalControlClientsRejected: UInt64 = 0
+    private var totalControlRequests: UInt64 = 0
+    private var totalControlErrors: UInt64 = 0
+    private var totalMalformedControlMessages: UInt64 = 0
+    private var totalControlHandshakeTimeouts: UInt64 = 0
+    private var totalSourceMonitorFailures: UInt64 = 0
+    private var totalDestinationMonitorFailures: UInt64 = 0
+    private var sourceMonitorConsecutiveFailures: UInt64 = 0
+    private var destinationMonitorConsecutiveFailures: UInt64 = 0
+    private var sourceMonitorRecoveries: UInt64 = 0
+    private var destinationMonitorRecoveries: UInt64 = 0
+    private var sourceMonitorLastSuccessNanoseconds: UInt64 = 0
+    private var destinationMonitorLastSuccessNanoseconds: UInt64 = 0
     private var generation: UInt64 = 0
 
     public init(socketDirectory: URL = RuntimeSocketPaths.userDefault.directory,
                 backend: RuntimeCaptureBackend,
                 outputBackend: RuntimeOutputBackend = UnavailableRuntimeOutputBackend(),
-                limits: RuntimeResourceLimitsDTO = .init()) {
+                limits: RuntimeResourceLimitsDTO = .init(),
+                handshakeTimeoutMilliseconds: Int = 5_000) {
         paths = RuntimeSocketPaths(directory: socketDirectory)
         self.limits = limits
+        self.handshakeTimeoutMilliseconds = max(100, handshakeTimeoutMilliseconds)
         let hub = RuntimeEventHub(directory: socketDirectory, limits: limits)
         eventHub = hub
         coordinator = RuntimeSessionCoordinator(backend: backend, socketDirectory: socketDirectory,
@@ -68,14 +163,24 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
 
     public func start() throws {
         try paths.prepareDirectory()
+        stateLock.lock()
+        if listener != nil { stateLock.unlock(); return }
+        stateLock.unlock()
+        let acquiredLock = try RuntimeInstanceLock(directory: paths.directory)
+        paths.removeStaleSessionSockets()
         coordinator.resume()
         outputCoordinator.resume()
         stateLock.lock()
-        guard listener == nil else { stateLock.unlock(); return }
+        guard listener == nil else {
+            stateLock.unlock()
+            acquiredLock.release()
+            return
+        }
         let newListener = UnixSocketListener(path: paths.controlSocketPath, queue: acceptQueue)
         generation &+= 1
         let listenerGeneration = generation
         listener = newListener
+        instanceLock = acquiredLock
         do {
             try newListener.start { [weak self, weak newListener] connection in
                 guard let self, let newListener else { connection.close(); return }
@@ -85,6 +190,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             startSourceMonitor(generation: listenerGeneration)
         } catch {
             listener = nil
+            instanceLock = nil
             generation &+= 1
             stateLock.unlock()
             throw error
@@ -100,6 +206,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             endpointTimer = nil
             sourceSnapshot.removeAll()
             destinationSnapshot.removeAll()
+            sourceMonitorError = nil
             destinationMonitorError = nil
         }
         coordinator.stopAll()
@@ -107,7 +214,9 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         eventHub.publish(RuntimeEventDTO(type: .runtimeShuttingDown, message: "Runtime is shutting down"))
         stateLock.lock()
         let oldListener = listener
+        let oldInstanceLock = instanceLock
         listener = nil
+        instanceLock = nil
         generation &+= 1
         let activeClients = Array(clients.values)
         clients.removeAll()
@@ -115,6 +224,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         oldListener?.stop()
         activeClients.forEach { $0.close() }
         eventHub.stopAll()
+        oldInstanceLock?.release()
     }
 
     private func accept(_ connection: UnixSocketConnection,
@@ -128,6 +238,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             return
         }
         guard clients.count < limits.maximumControlClients else {
+            totalControlClientsRejected &+= 1
             stateLock.unlock()
             let error = RuntimeErrorDTO(code: "client_limit_exceeded",
                 message: "Runtime control client limit reached", retryable: true)
@@ -137,7 +248,18 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             return
         }
         clients[ownerID] = connection
+        totalControlClientsAccepted &+= 1
         stateLock.unlock()
+        do { try connection.setReceiveTimeout(milliseconds: handshakeTimeoutMilliseconds) }
+        catch {
+            stateLock.lock()
+            clients.removeValue(forKey: ownerID)
+            totalControlClientsDisconnected &+= 1
+            totalControlErrors &+= 1
+            stateLock.unlock()
+            connection.close()
+            return
+        }
         clientQueue.async { [weak self] in self?.serve(connection: connection, ownerID: ownerID) }
     }
 
@@ -146,11 +268,16 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             coordinator.stopSessions(ownerID: ownerID)
             outputCoordinator.stopSessions(ownerID: ownerID)
             eventHub.removeSubscriptions(ownerID: ownerID)
-            stateLock.lock(); clients.removeValue(forKey: ownerID); stateLock.unlock()
+            stateLock.lock()
+            if clients.removeValue(forKey: ownerID) != nil {
+                totalControlClientsDisconnected &+= 1
+            }
+            stateLock.unlock()
             connection.close()
         }
         var parser = RuntimeNDJSONParser()
         var handshaken = false
+        var handshakeTimeoutCleared = false
         while true {
             do {
                 let bytes = try connection.read()
@@ -158,25 +285,51 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 do {
                     lines = try parser.append(bytes)
                 } catch let error as RuntimeErrorDTO {
+                    recordControlError(malformed: true)
                     try? connection.write(RuntimeProtocolCodec.encodeLine(
                         RuntimeResponse(requestID: "unknown", error: error)))
                     return
                 }
                 for line in lines {
+                    stateLock.lock()
+                    totalControlRequests &+= 1
+                    stateLock.unlock()
                     let response: RuntimeResponse
+                    var malformed = false
                     do {
                         let command = try RuntimeProtocolCodec.decodeLine(RuntimeCommand.self, from: line)
                         response = execute(command, ownerID: ownerID, handshaken: &handshaken)
                     } catch let error as RuntimeErrorDTO {
+                        malformed = true
                         response = RuntimeResponse(requestID: "unknown", error: error)
                     } catch {
+                        malformed = true
                         response = RuntimeResponse(requestID: "unknown", error: RuntimeErrorDTO(
                             code: "internal_error", message: "Runtime could not process the request"))
                     }
+                    if response.error != nil { recordControlError(malformed: malformed) }
                     try connection.write(RuntimeProtocolCodec.encodeLine(response))
+                    if handshaken && !handshakeTimeoutCleared {
+                        try connection.setReceiveTimeout(milliseconds: 0)
+                        handshakeTimeoutCleared = true
+                    }
                 }
+            } catch UnixSocketError.systemCall("recv", let code)
+                where !handshaken && (code == EAGAIN || code == EWOULDBLOCK) {
+                stateLock.lock()
+                totalControlHandshakeTimeouts &+= 1
+                totalControlErrors &+= 1
+                stateLock.unlock()
+                return
             } catch { return }
         }
+    }
+
+    private func recordControlError(malformed: Bool) {
+        stateLock.lock()
+        totalControlErrors &+= 1
+        if malformed { totalMalformedControlMessages &+= 1 }
+        stateLock.unlock()
     }
 
     private func execute(_ command: RuntimeCommand, ownerID: String,
@@ -305,8 +458,24 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     private func runtimeStatus() -> RuntimeStatusDTO {
         let metrics = coordinator.diagnostics()
         let outputMetrics = outputCoordinator.diagnostics()
+        let processMetrics = Self.processMetrics()
         stateLock.lock()
         let clientCount = clients.count
+        let controlClientsAccepted = totalControlClientsAccepted
+        let controlClientsDisconnected = totalControlClientsDisconnected
+        let controlClientsRejected = totalControlClientsRejected
+        let controlRequests = totalControlRequests
+        let controlErrors = totalControlErrors
+        let malformedControlMessages = totalMalformedControlMessages
+        let controlHandshakeTimeouts = totalControlHandshakeTimeouts
+        let sourceMonitorFailures = totalSourceMonitorFailures
+        let destinationMonitorFailures = totalDestinationMonitorFailures
+        let sourceMonitorConsecutive = sourceMonitorConsecutiveFailures
+        let destinationMonitorConsecutive = destinationMonitorConsecutiveFailures
+        let sourceRecoveries = sourceMonitorRecoveries
+        let destinationRecoveries = destinationMonitorRecoveries
+        let sourceLastSuccess = sourceMonitorLastSuccessNanoseconds
+        let destinationLastSuccess = destinationMonitorLastSuccessNanoseconds
         stateLock.unlock()
         return RuntimeStatusDTO(runtimeVersion: RuntimeProtocolInfo.runtimeVersion,
             runtimeInstanceID: runtimeInstanceID,
@@ -320,7 +489,60 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             totalOutputFramesReceived: outputMetrics.received,
             totalOutputFramesRendered: outputMetrics.rendered,
             totalOutputFramesDropped: outputMetrics.dropped,
-            totalOutputBytesReceived: outputMetrics.bytes)
+            totalOutputBytesReceived: outputMetrics.bytes,
+            totalCaptureRingDroppedFrames: metrics.ringDropped,
+            totalCaptureDeliveryDroppedFrames: metrics.deliveryDropped,
+            totalCaptureQueueDroppedFrames: metrics.queueDropped,
+            totalCaptureNoSubscriberFrames: metrics.noSubscriber,
+            connectedCaptureSubscribers: metrics.connectedSubscribers,
+            retainedCaptureSessions: metrics.retainedTerminalRecords,
+            reservedCaptureStarts: metrics.reservedStarts,
+            totalOutputFramesLost: outputMetrics.lost,
+            totalOutputFramesFlushed: outputMetrics.flushed,
+            totalOutputFramesLate: outputMetrics.late,
+            totalOutputUnderrunFrames: outputMetrics.underrunFrames,
+            totalOutputUnderrunEvents: outputMetrics.underrunEvents,
+            totalOutputOverrunEvents: outputMetrics.overrunEvents,
+            totalOutputRouteChanges: outputMetrics.routeChanges,
+            totalOutputConversionBatches: outputMetrics.conversionBatches,
+            totalOutputConversionNanoseconds: outputMetrics.conversionNanoseconds,
+            connectedOutputProducers: outputMetrics.connectedProducers,
+            retainedOutputSessions: outputMetrics.retainedTerminalRecords,
+            reservedOutputStarts: outputMetrics.reservedStarts,
+            totalControlClientsAccepted: controlClientsAccepted,
+            totalControlClientsDisconnected: controlClientsDisconnected,
+            totalControlClientsRejected: controlClientsRejected,
+            totalControlRequests: controlRequests,
+            totalControlErrors: controlErrors,
+            totalMalformedControlMessages: malformedControlMessages,
+            totalControlHandshakeTimeouts: controlHandshakeTimeouts,
+            totalSourceMonitorFailures: sourceMonitorFailures,
+            totalDestinationMonitorFailures: destinationMonitorFailures,
+            sourceMonitorConsecutiveFailures: sourceMonitorConsecutive,
+            destinationMonitorConsecutiveFailures: destinationMonitorConsecutive,
+            sourceMonitorRecoveries: sourceRecoveries,
+            destinationMonitorRecoveries: destinationRecoveries,
+            sourceMonitorLastSuccessNanoseconds: sourceLastSuccess,
+            destinationMonitorLastSuccessNanoseconds: destinationLastSuccess,
+            residentMemoryBytes: processMetrics.residentBytes,
+            peakResidentMemoryBytes: processMetrics.peakResidentBytes,
+            openFileDescriptors: processMetrics.openDescriptors,
+            threadCount: processMetrics.threadCount)
+    }
+
+    private static func processMetrics() -> (residentBytes: UInt64, peakResidentBytes: UInt64,
+                                               openDescriptors: Int, threadCount: Int) {
+        var task = proc_taskinfo()
+        let taskSize = MemoryLayout<proc_taskinfo>.size
+        let taskResult = withUnsafeMutablePointer(to: &task) {
+            proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, $0, Int32(taskSize))
+        }
+        var usage = rusage()
+        getrusage(RUSAGE_SELF, &usage)
+        return (taskResult == Int32(taskSize) ? task.pti_resident_size : 0,
+                UInt64(max(0, usage.ru_maxrss)),
+                (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? 0,
+                taskResult == Int32(taskSize) ? Int(task.pti_threadnum) : 0)
     }
 
     private func startSourceMonitor(generation expectedGeneration: UInt64) {
@@ -360,10 +582,29 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 }
             }
             sourceSnapshot = next
+            let recovered = sourceMonitorError != nil
+            sourceMonitorError = nil
+            stateLock.lock()
+            if recovered { sourceMonitorRecoveries &+= 1 }
+            sourceMonitorConsecutiveFailures = 0
+            sourceMonitorLastSuccessNanoseconds = DispatchTime.now().uptimeNanoseconds
+            stateLock.unlock()
+            if publishChanges && recovered {
+                eventHub.publish(RuntimeEventDTO(type: .runtimeWarning,
+                    message: "Source discovery recovered"))
+            }
         } catch {
+            let description = String(describing: error)
+            stateLock.lock()
+            totalSourceMonitorFailures &+= 1
+            sourceMonitorConsecutiveFailures &+= 1
+            stateLock.unlock()
+            guard publishChanges else { return }
+            guard sourceMonitorError != description else { return }
+            sourceMonitorError = description
             eventHub.publish(RuntimeEventDTO(type: .runtimeWarning,
                 message: "Source discovery failed", error: RuntimeErrorDTO(
-                    code: "source_discovery_failed", message: String(describing: error), retryable: true)))
+                    code: "source_discovery_failed", message: description, retryable: true)))
         }
     }
 
@@ -392,9 +633,23 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                 }
             }
             destinationSnapshot = next
+            let recovered = destinationMonitorError != nil
             destinationMonitorError = nil
+            stateLock.lock()
+            if recovered { destinationMonitorRecoveries &+= 1 }
+            destinationMonitorConsecutiveFailures = 0
+            destinationMonitorLastSuccessNanoseconds = DispatchTime.now().uptimeNanoseconds
+            stateLock.unlock()
+            if publishChanges && recovered {
+                eventHub.publish(RuntimeEventDTO(type: .runtimeWarning,
+                    message: "Output destination discovery recovered"))
+            }
         } catch {
             let description = String(describing: error)
+            stateLock.lock()
+            totalDestinationMonitorFailures &+= 1
+            destinationMonitorConsecutiveFailures &+= 1
+            stateLock.unlock()
             guard publishChanges else { return }
             guard destinationMonitorError != description else { return }
             destinationMonitorError = description

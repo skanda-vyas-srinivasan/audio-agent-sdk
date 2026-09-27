@@ -29,6 +29,8 @@ class FakeRuntime:
         self.commands = []
         self.requests = []
         self.malformed_handshake = False
+        self.delay_start_capture = 0.0
+        self.control_disconnects = 0
         self.sources = [{"id": "app.test", "kind": "application",
             "name": "Test Audio", "process_ids": [123], "bundle_identifier": "test",
             "process_state": "running", "is_available": True,
@@ -71,6 +73,8 @@ class FakeRuntime:
                 elif command == "list_sources":
                     response["sources"] = self.sources
                 elif command == "start_capture":
+                    if self.delay_start_capture:
+                        await asyncio.sleep(self.delay_start_capture)
                     if request.get("source_id") == "bad":
                         response.update(ok=False, error={"code": "source_not_found",
                             "message": "missing", "retryable": False})
@@ -110,11 +114,18 @@ class FakeRuntime:
                     response["message"] = "pong"
                 else:
                     response["message"] = "pong"
-                writer.write(json.dumps(response).encode() + b"\n")
-                await writer.drain()
+                try:
+                    writer.write(json.dumps(response).encode() + b"\n")
+                    await writer.drain()
+                except (ConnectionError, OSError):
+                    return
         finally:
+            self.control_disconnects += 1
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
 
     async def _stream(self, reader, writer):
         payload = bytes(range(32)) * 10
@@ -176,6 +187,15 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Start the local sonexis-runtime process", caught.exception.message)
         self.assertEqual(caught.exception.details["socket_path"], path)
 
+    async def test_rejects_socket_in_nonprivate_directory(self):
+        os.chmod(self.temp.name, 0o777)
+        try:
+            with self.assertRaises(SonexisConnectionError) as caught:
+                await Sonexis(self.runtime.control_path).connect()
+            self.assertEqual(caught.exception.code, "untrusted_socket_path")
+        finally:
+            os.chmod(self.temp.name, 0o700)
+
     async def test_capture_iteration_and_eos(self):
         async with Sonexis(self.runtime.control_path) as client:
             async with await client.capture("app.test") as capture:
@@ -215,6 +235,27 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.03)
             self.assertEqual((await client.sources())[0].id, "app.test")
 
+    async def test_cancelled_mutating_request_closes_owner_connection(self):
+        self.runtime.delay_start_capture = 0.05
+        client = Sonexis(self.runtime.control_path)
+        await client.connect()
+        request = asyncio.create_task(client._request(
+            "start_capture", source_id="app.test", format=AudioFormat().to_wire()))
+        while not any(item["command"] == "start_capture" for item in self.runtime.requests):
+            await asyncio.sleep(0)
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+        for _ in range(100):
+            if self.runtime.control_disconnects:
+                break
+            await asyncio.sleep(0.001)
+        self.assertGreaterEqual(self.runtime.control_disconnects, 1)
+        self.assertIsNone(client.handshake)
+        await client.connect()
+        self.assertEqual((await client.sources())[0].id, "app.test")
+        await client.close()
+
     async def test_truncated_and_wrong_stream_frames_fail(self):
         reader = asyncio.StreamReader()
         reader.feed_data(b"short")
@@ -244,8 +285,9 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_capture_attach_failure_rolls_back_runtime_session(self):
         async with Sonexis(self.runtime.control_path) as client:
-            with self.assertRaises(OSError):
+            with self.assertRaises(SonexisConnectionError) as caught:
                 await client.capture("missing-stream")
+            self.assertEqual(caught.exception.code, "runtime_unavailable")
             await asyncio.sleep(0)
             self.assertIn("stop_capture", self.runtime.commands)
 

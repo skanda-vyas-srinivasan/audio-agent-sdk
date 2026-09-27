@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { lstat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { createConnection, Socket } from "node:net";
 import { randomUUID } from "node:crypto";
 
@@ -349,6 +351,44 @@ export interface RuntimeStatus {
   total_output_frames_rendered?: number;
   total_output_frames_dropped?: number;
   total_output_bytes_received?: number;
+  total_capture_ring_dropped_frames?: number;
+  total_capture_delivery_dropped_frames?: number;
+  total_capture_queue_dropped_frames?: number;
+  total_capture_no_subscriber_frames?: number;
+  connected_capture_subscribers?: number;
+  retained_capture_sessions?: number;
+  reserved_capture_starts?: number;
+  total_output_frames_lost?: number;
+  total_output_frames_flushed?: number;
+  total_output_frames_late?: number;
+  total_output_underrun_frames?: number;
+  total_output_underrun_events?: number;
+  total_output_overrun_events?: number;
+  total_output_route_changes?: number;
+  total_output_conversion_batches?: number;
+  total_output_conversion_nanoseconds?: number;
+  connected_output_producers?: number;
+  retained_output_sessions?: number;
+  reserved_output_starts?: number;
+  total_control_clients_accepted?: number;
+  total_control_clients_disconnected?: number;
+  total_control_clients_rejected?: number;
+  total_control_requests?: number;
+  total_control_errors?: number;
+  total_malformed_control_messages?: number;
+  total_control_handshake_timeouts?: number;
+  total_source_monitor_failures?: number;
+  total_destination_monitor_failures?: number;
+  source_monitor_consecutive_failures?: number;
+  destination_monitor_consecutive_failures?: number;
+  source_monitor_recoveries?: number;
+  destination_monitor_recoveries?: number;
+  source_monitor_last_success_nanoseconds?: number;
+  destination_monitor_last_success_nanoseconds?: number;
+  resident_memory_bytes?: number;
+  peak_resident_memory_bytes?: number;
+  open_file_descriptors?: number;
+  thread_count?: number;
 }
 export interface Handshake {
   protocol_version: 2;
@@ -531,8 +571,28 @@ type WireResponse = Record<string, unknown> & {
   error?: { code: string; message: string; retryable?: boolean; details?: Record<string, string> };
 };
 
-function openSocket(path: string): Promise<Socket> {
-  return new Promise((resolve, reject) => {
+async function openSocket(path: string): Promise<Socket> {
+  const slash = path.lastIndexOf("/");
+  const directory = slash > 0 ? path.slice(0, slash) : ".";
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  let directoryStatus;
+  let before;
+  try {
+    directoryStatus = await lstat(directory);
+    before = await lstat(path);
+  } catch (error) {
+    const value = error as NodeJS.ErrnoException;
+    throw new SonexisError("runtime_unavailable",
+      `Cannot connect to Sonexis Runtime at ${path}. Start the local sonexis-runtime process `
+        + `or verify SONEXIS_RUNTIME_SOCKET. (${value.code ?? value.message})`, true,
+      { socket_path: path, cause_code: value.code ?? "socket_error" });
+  }
+  if (!directoryStatus.isDirectory() || uid === undefined || directoryStatus.uid !== uid
+      || (directoryStatus.mode & 0o022) !== 0 || !before.isSocket() || before.uid !== uid) {
+    throw new SonexisError("untrusted_socket_path",
+      "Sonexis sockets must be owned by the current user in a private directory");
+  }
+  const socket = await new Promise<Socket>((resolve, reject) => {
     const socket = createConnection(path);
     socket.once("connect", () => resolve(socket));
     socket.once("error", (error: NodeJS.ErrnoException) => reject(new SonexisError(
@@ -543,6 +603,18 @@ function openSocket(path: string): Promise<Socket> {
       { socket_path: path, cause_code: error.code ?? "socket_error" },
     )));
   });
+  try {
+    const after = await lstat(path);
+    if (!after.isSocket() || after.uid !== uid
+        || before.dev !== after.dev || before.ino !== after.ino) {
+      throw new SonexisError("untrusted_socket_path",
+        "Sonexis socket changed while connecting", true);
+    }
+    return socket;
+  } catch (error) {
+    socket.destroy();
+    throw error;
+  }
 }
 
 function defaultSocketPath(): string {
@@ -551,8 +623,12 @@ function defaultSocketPath(): string {
   if (typeof process.getuid !== "function") {
     throw new SonexisError("unsupported_platform", "Sonexis Runtime requires macOS/Unix sockets");
   }
-  return `/tmp/sonexis-runtime-${process.getuid()}/control.sock`;
+  return `${tmpdir().replace(/\/$/, "")}/sx-${process.getuid()}/control.sock`;
 }
+
+const MutatingControlCommands = new Set([
+  "start_capture", "subscribe_events", "start_output", "flush_output",
+]);
 
 export class Sonexis extends EventEmitter {
   readonly socketPath: string;
@@ -564,6 +640,8 @@ export class Sonexis extends EventEmitter {
   private readonly pending = new Map<string, {
     resolve: (value: WireResponse) => void; reject: (error: Error) => void;
   }>();
+  private readonly captures = new Set<CaptureStream>();
+  private readonly eventStreams = new Set<EventStream>();
   private readonly outputs = new Set<AudioOutput>();
 
   constructor(socketPath = defaultSocketPath()) {
@@ -593,7 +671,7 @@ export class Sonexis extends EventEmitter {
     socket.on("error", (error) => this.handleDisconnect(socket, error));
     try {
       const response = await this.request("hello", {
-        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.7.0",
+        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.8.0",
       });
       const handshake = response.handshake as Handshake;
       if (handshake?.protocol_version !== 2) {
@@ -608,7 +686,11 @@ export class Sonexis extends EventEmitter {
   }
 
   async close(): Promise<void> {
-    await Promise.allSettled([...this.outputs].map((output) => output.cancel()));
+    await Promise.allSettled([
+      ...[...this.captures].map((capture) => capture.close()),
+      ...[...this.eventStreams].map((events) => events.close()),
+      ...[...this.outputs].map((output) => output.cancel()),
+    ]);
     const socket = this.socket;
     this.socket = undefined;
     this.handshake = undefined;
@@ -849,6 +931,10 @@ export class Sonexis extends EventEmitter {
           if (oldest !== undefined) this.discardedRequestIds.delete(oldest);
         }
         reject(new SonexisError("request_timeout", `${command} timed out`, true));
+        // A timed-out mutating request may have completed remotely. Protocol v2
+        // reconciles that ambiguity by closing the owner socket, which causes
+        // Runtime to stop all resources created by this client.
+        if (MutatingControlCommands.has(command)) this.socket?.destroy();
       }, timeoutMs);
       this.pending.set(requestId, {
         resolve: (value) => { clearTimeout(timer); resolve(value); },
@@ -917,6 +1003,8 @@ export class Sonexis extends EventEmitter {
     this.controlBuffer = Buffer.alloc(0);
     this.discardedRequestIds.clear();
     this.failPending(error);
+    for (const capture of [...this.captures]) capture.runtimeDisconnected(error);
+    for (const events of [...this.eventStreams]) events.runtimeDisconnected(error);
     for (const output of [...this.outputs]) output.runtimeDisconnected(error);
   }
 
@@ -950,6 +1038,11 @@ export class Sonexis extends EventEmitter {
   untrackOutput(output: AudioOutput): void {
     this.outputs.delete(output);
   }
+
+  trackCapture(capture: CaptureStream): void { this.captures.add(capture); }
+  untrackCapture(capture: CaptureStream): void { this.captures.delete(capture); }
+  trackEventStream(events: EventStream): void { this.eventStreams.add(events); }
+  untrackEventStream(events: EventStream): void { this.eventStreams.delete(events); }
 
   private requireOutputCapability(): void {
     if (!this.handshake) throw new SonexisError("not_connected", "Connect first");
@@ -1541,6 +1634,7 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
                     source: AudioSource): Promise<CaptureStream> {
     const socket = await openSocket(info.data_socket_path);
     const stream = new CaptureStream(client, info, source, socket);
+    client.trackCapture(stream);
     socket.on("data", (chunk) => stream.consume(chunk));
     socket.on("close", () => {
       const truncated = !stream.closing && !stream.sawEndOfStream
@@ -1560,6 +1654,13 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
     this.socket.destroy();
     this.finish();
     await this.cleanupRuntime();
+  }
+
+  runtimeDisconnected(error: Error): void {
+    this.closing = true;
+    this.socket.destroy();
+    this.finish(error);
+    this.client.untrackCapture(this);
   }
 
 
@@ -1674,6 +1775,7 @@ export class CaptureStream extends EventEmitter implements AsyncIterable<AudioFr
     this.cleanupPromise ??= (async () => {
       try { await this.client.cleanupCapture(this.info.id); }
       catch { /* control teardown is authoritative */ }
+      finally { this.client.untrackCapture(this); }
     })();
     return this.cleanupPromise;
   }
@@ -1928,6 +2030,7 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
   static async open(client: Sonexis, value: { id: string; event_socket_path: string }): Promise<EventStream> {
     const socket = await openSocket(value.event_socket_path);
     const events = new EventStream(client, value.id, socket);
+    client.trackEventStream(events);
     socket.on("data", (chunk) => events.consume(chunk));
     socket.on("close", () => {
       const error = !events.closing
@@ -1947,6 +2050,12 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
     this.closing = true;
     this.socket.destroy(); this.finish();
     await this.cleanupRuntime();
+  }
+  runtimeDisconnected(error: Error): void {
+    this.closing = true;
+    this.socket.destroy();
+    this.finish(error);
+    this.client.untrackEventStream(this);
   }
   async *[Symbol.asyncIterator](): AsyncIterator<RuntimeEvent> {
     if (this.iteratorActive) {
@@ -2025,6 +2134,7 @@ export class EventStream extends EventEmitter implements AsyncIterable<RuntimeEv
   private cleanupRuntime(): Promise<void> {
     this.cleanupPromise ??= (async () => {
       try { await this.client.cleanupSubscription(this.id); } catch { }
+      finally { this.client.untrackEventStream(this); }
     })();
     return this.cleanupPromise;
   }

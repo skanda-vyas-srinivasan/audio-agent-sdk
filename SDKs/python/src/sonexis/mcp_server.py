@@ -32,7 +32,7 @@ def build_server(socket_path: Optional[str], allow_capture: bool):
     except ImportError as error:
         raise SystemExit("Install the Sonexis 'mcp' extra; MCP requires Python 3.10+") from error
 
-    client = Sonexis(socket_path, client_name="sonexis-mcp", client_version="0.7.0")
+    client = Sonexis(socket_path, client_name="sonexis-mcp", client_version="0.8.0")
     tools = SonexisControlTools(client, allow_capture=allow_capture)
 
     @asynccontextmanager
@@ -48,7 +48,7 @@ def build_server(socket_path: Optional[str], allow_capture: bool):
         description="Local control plane for source-aware audio sessions.",
         instructions=("Control metadata and session lifecycle only. MCP never carries PCM; "
                       "use a Sonexis SDK for realtime audio."),
-        version="0.7.0",
+        version="0.8.0",
         lifespan=lifespan,
     )
 

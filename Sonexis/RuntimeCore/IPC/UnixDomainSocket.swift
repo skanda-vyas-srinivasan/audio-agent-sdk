@@ -91,6 +91,18 @@ public final class UnixSocketConnection: @unchecked Sendable {
         return false
     }
 
+    public func setReceiveTimeout(milliseconds: Int) throws {
+        let fd = try beginOperation()
+        defer { endOperation() }
+        var timeout = timeval(tv_sec: milliseconds > 0 ? milliseconds / 1_000 : 0,
+                              tv_usec: milliseconds > 0
+                                ? Int32((milliseconds % 1_000) * 1_000) : 0)
+        guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                         socklen_t(MemoryLayout.size(ofValue: timeout))) == 0 else {
+            throw UnixSocketError.systemCall("setsockopt", errno)
+        }
+    }
+
     private func beginOperation() throws -> Int32 {
         state.lock(); defer { state.unlock() }
         guard descriptor >= 0, !isClosing else { throw UnixSocketError.disconnected }
@@ -228,6 +240,13 @@ public enum UnixSocketSystem {
                 }
             }
             guard result == 0 else { throw UnixSocketError.systemCall("connect", errno) }
+            var peerUID = uid_t(0)
+            var peerGID = gid_t(0)
+            guard getpeereid(fd, &peerUID, &peerGID) == 0,
+                  peerUID == getuid() else {
+                throw RuntimeErrorDTO(code: "untrusted_socket_peer",
+                    message: "Unix socket peer does not belong to the current user")
+            }
             return UnixSocketConnection(descriptor: fd)
         } catch {
             _ = Darwin.close(fd)

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createServer, Server, Socket } from "node:net";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
@@ -27,6 +27,18 @@ test("default event set includes v0.4 output lifecycle events", () => {
   assert.ok(RuntimeEventTypes.includes("output_failed"));
   assert.ok(RuntimeEventTypes.includes("output_destination_changed"));
   assert.ok(RuntimeEventTypes.includes("output_default_changed"));
+});
+
+test("rejects Runtime sockets in nonprivate directories", async (context) => {
+  const runtime = await startRuntime(context);
+  const directory = dirname(runtime.controlPath);
+  await chmod(directory, 0o777);
+  try {
+    await assert.rejects(new Sonexis(runtime.controlPath).connect(), (error: unknown) =>
+      error instanceof SonexisError && error.code === "untrusted_socket_path");
+  } finally {
+    await chmod(directory, 0o700);
+  }
 });
 
 test("resolves output destinations without silently choosing loopback devices", () => {

@@ -103,7 +103,8 @@ Append `--socket PATH` to a CLI command or set `SONEXIS_RUNTIME_SOCKET`. Set `SO
 
 `SONEXIS_RUNTIME_DIR` names the server directory; client SDKs and CLI use the
 full `SONEXIS_RUNTIME_SOCKET` control-socket path. With defaults, all use
-`/tmp/sonexis-runtime-$UID/control.sock`.
+`$DARWIN_USER_TEMP_DIR/sx-$UID/control.sock` (resolved through
+the platform's per-user temporary directory API).
 
 The Runtime executable embeds `NSAudioCaptureUsageDescription`, uses the stable identifier `com.sonexis.runtime`, and is development-signed by Xcode. Live capture uses that identity for macOS Screen & System Audio Recording permission.
 
@@ -165,7 +166,7 @@ A successful response includes a distinct response ID and the negotiated platfor
   "ok": true,
   "handshake": {
     "protocol_version": 2,
-    "runtime_version": "0.7.0",
+    "runtime_version": "0.8.0",
     "runtime_instance_id": "UUID",
     "capabilities": ["application_sources", "capture_sessions", "event_stream", "format_negotiation", "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions", "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush", "default_device_playback", "output_destination_events"],
     "supported_formats": [

@@ -72,13 +72,17 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
     private let backend: RuntimeCaptureBackend
     private let socketDirectory: URL
     private let queue = DispatchQueue(label: "com.sonexis.runtime.sessions")
-    private let startGroup = DispatchGroup()
+    private let cleanupQueue = DispatchQueue(label: "com.sonexis.runtime.session-cleanup",
+                                              attributes: .concurrent)
     private var records: [String: Record] = [:]
     private var acceptingStarts = true
     private var reservedStarts = 0
     private var totalSessionsStarted: UInt64 = 0
     private var archivedFrames: UInt64 = 0
-    private var archivedDrops: UInt64 = 0
+    private var archivedRingDrops: UInt64 = 0
+    private var archivedDeliveryDrops: UInt64 = 0
+    private var archivedQueueDrops: UInt64 = 0
+    private var archivedNoSubscriberFrames: UInt64 = 0
     private var archivedBytes: UInt64 = 0
     private let limits: RuntimeResourceLimitsDTO
     private let eventHandler: @Sendable (RuntimeEventDTO) -> Void
@@ -92,7 +96,36 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
         self.eventHandler = eventHandler
     }
 
-    public func availableSources() throws -> [RuntimeSourceDTO] { try backend.availableSources() }
+    public func availableSources() throws -> [RuntimeSourceDTO] {
+        let sources = try backend.availableSources()
+        let maximum = max(1, limits.maximumSources ?? 256)
+        guard sources.count <= maximum else {
+            throw RuntimeErrorDTO(code: "source_limit_exceeded",
+                message: "Source discovery returned more than \(maximum) sources")
+        }
+        var identifiers = Set<String>()
+        for source in sources {
+            guard !source.id.isEmpty, source.id.utf8.count <= 1_024,
+                  !source.name.isEmpty, source.name.utf8.count <= 256 else {
+                throw RuntimeErrorDTO(code: "invalid_source",
+                    message: "Source discovery returned an invalid source identity")
+            }
+            guard identifiers.insert(source.id).inserted else {
+                throw RuntimeErrorDTO(code: "duplicate_source",
+                    message: "Source discovery returned duplicate source ID \(source.id)")
+            }
+            guard source.processIDs.count <= 128 else {
+                throw RuntimeErrorDTO(code: "invalid_source",
+                    message: "Source \(source.id) contains too many process identifiers")
+            }
+        }
+        let encoded = try RuntimeProtocolCodec.encodeLine(sources)
+        guard encoded.count <= limits.maximumControlMessageBytes - 1_024 else {
+            throw RuntimeErrorDTO(code: "source_response_too_large",
+                message: "Source discovery metadata exceeds the control response limit")
+        }
+        return sources
+    }
 
     public func startCapture(sourceID: String, format: RuntimePCMFormatDTO,
                              ownerID: String) throws -> RuntimeSessionDTO {
@@ -119,16 +152,16 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
                 throw RuntimeErrorDTO(code: "session_limit_exceeded", message: "Client session limit reached", retryable: true)
             }
             reservedStarts += 1
-            startGroup.enter()
         }
-        defer { startGroup.leave() }
         var reservationActive = true
         defer {
             if reservationActive { queue.sync { reservedStarts -= 1 } }
         }
         let sessionID = UUID().uuidString.lowercased()
         let streamID = UUID()
-        let dataPath = socketDirectory.appendingPathComponent("stream-\(streamID.uuidString.lowercased()).sock").path
+        let compactStreamID = streamID.uuidString.lowercased()
+            .replacingOccurrences(of: "-", with: "")
+        let dataPath = socketDirectory.appendingPathComponent("i-\(compactStreamID).sock").path
         let plane = RuntimeDataPlane(path: dataPath, streamID: streamID,
             maximumSubscribers: limits.maximumSubscribersPerStream) { [eventHandler] disconnected in
                 eventHandler(RuntimeEventDTO(type: .clientWarning, sourceID: sourceID,
@@ -140,11 +173,20 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
         let startedAt = DispatchTime.now().uptimeNanoseconds
         let record = Record(id: sessionID, streamID: streamID, sourceID: sourceID, ownerID: ownerID,
                             startedAt: startedAt, format: format, dataPlane: plane)
-        queue.sync {
-            reservedStarts -= 1
-            reservationActive = false
-            records[sessionID] = record
-            totalSessionsStarted &+= 1
+        do {
+            try queue.sync {
+                guard acceptingStarts else {
+                    throw RuntimeErrorDTO(code: "runtime_shutting_down",
+                        message: "Runtime is shutting down", retryable: true)
+                }
+                reservedStarts -= 1
+                reservationActive = false
+                records[sessionID] = record
+                totalSessionsStarted &+= 1
+            }
+        } catch {
+            plane.stop()
+            throw error
         }
 
         do {
@@ -199,20 +241,28 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
     }
 
     public func stopCapture(sessionID: String, ownerID: String) throws -> RuntimeSessionDTO {
-        let result: (RuntimeSessionDTO, Bool) = try queue.sync {
+        let resources: (Record, RuntimeBackendCaptureSession?, Bool) = try queue.sync {
             guard let record = records[sessionID] else {
                 throw RuntimeErrorDTO(code: "session_not_found", message: "No capture session named \(sessionID)")
             }
-            let transitioned = stop(record, state: .stopped, error: nil)
-            let terminal = snapshot(record)
-            pruneTerminalRecords()
-            return (terminal, transitioned)
+            let wasActive = record.state == .starting || record.state == .capturing
+            return (record, beginStop(record, state: .stopped, error: nil), wasActive)
         }
-        if result.1 {
-            eventHandler(RuntimeEventDTO(type: .captureStopped, sourceID: result.0.sourceID,
-                sessionID: result.0.id, streamID: result.0.streamID, session: result.0))
+        if resources.2 {
+            resources.1?.stop()
+            let finalMetrics = resources.1?.metrics()
+            resources.0.dataPlane.stop()
+            let terminal = queue.sync {
+                if let finalMetrics { resources.0.captureMetrics = finalMetrics }
+                let value = snapshot(resources.0)
+                pruneTerminalRecords()
+                return value
+            }
+            eventHandler(RuntimeEventDTO(type: .captureStopped, sourceID: terminal.sourceID,
+                sessionID: terminal.id, streamID: terminal.streamID, session: terminal))
+            return terminal
         }
-        return result.0
+        return queue.sync { snapshot(resources.0) }
     }
 
     public func session(sessionID: String, ownerID: String) throws -> RuntimeSessionDTO {
@@ -225,19 +275,30 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
     }
 
     public func stopSessions(ownerID: String) {
-        let stopped: [RuntimeSessionDTO] = queue.sync {
+        let stopped: [(Record, RuntimeBackendCaptureSession?)] = queue.sync {
             let owned = records.values.filter { $0.ownerID == ownerID }
             let active = owned.filter { $0.state == .starting || $0.state == .capturing }
-            let snapshots = active.compactMap { record -> RuntimeSessionDTO? in
-                stop(record, state: .stopped, error: nil) ? snapshot(record) : nil
+            return active.map { record in
+                (record, beginStop(record, state: .stopped, error: nil))
             }
-            owned.forEach(archiveAndRemove)
-            return snapshots
         }
-        stopped.forEach { terminal in
-            eventHandler(RuntimeEventDTO(type: .captureStopped, sourceID: terminal.sourceID,
-                sessionID: terminal.id, streamID: terminal.streamID, session: terminal,
-                message: "Owning control client disconnected"))
+        stopped.forEach { record, session in
+            record.dataPlane.stop()
+            cleanupQueue.async { [weak self] in
+                session?.stop()
+                let finalMetrics = session?.metrics()
+                guard let self else { return }
+                let terminal = self.queue.sync {
+                    if let finalMetrics { record.captureMetrics = finalMetrics }
+                    let value = self.snapshot(record)
+                    self.archiveAndRemove(record)
+                    return value
+                }
+                self.eventHandler(RuntimeEventDTO(type: .captureStopped,
+                    sourceID: terminal.sourceID, sessionID: terminal.id,
+                    streamID: terminal.streamID, session: terminal,
+                    message: "Owning control client disconnected"))
+            }
         }
     }
 
@@ -251,17 +312,26 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
 
     public func stopAll() {
         prepareForShutdown()
-        queue.sync {
+        let resources: [(RuntimeDataPlane, RuntimeBackendCaptureSession?)] = queue.sync {
             let existing = Array(records.values)
-            existing.filter { $0.state == .starting || $0.state == .capturing }
-                .forEach { stop($0, state: .stopped, error: nil) }
+            let active = existing.filter { $0.state == .starting || $0.state == .capturing }
+                .map { record -> (RuntimeDataPlane, RuntimeBackendCaptureSession?) in
+                    record.state = .stopped
+                    let session = record.backendSession
+                    record.backendSession = nil
+                    return (record.dataPlane, session)
+                }
             existing.forEach(archiveAndRemove)
+            return active
+        }
+        resources.forEach { plane, session in
+            plane.stop()
+            if let session { cleanupQueue.async { session.stop() } }
         }
     }
 
     public func prepareForShutdown() {
         queue.sync { acceptingStarts = false }
-        startGroup.wait()
     }
 
     public func resume() {
@@ -269,49 +339,79 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
     }
 
     public func diagnostics() -> (activeSessions: Int, totalSessionsStarted: UInt64,
-                                  frames: UInt64, dropped: UInt64, bytes: UInt64) {
+                                  frames: UInt64, dropped: UInt64, bytes: UInt64,
+                                  ringDropped: UInt64, deliveryDropped: UInt64,
+                                  queueDropped: UInt64, noSubscriber: UInt64,
+                                  connectedSubscribers: Int, retainedTerminalRecords: Int,
+                                  reservedStarts: Int) {
         queue.sync {
             let active = records.values.filter { $0.state == .starting || $0.state == .capturing }
             let metrics = records.values.map { $0.dataPlane.metrics() }
             for record in records.values {
                 if let session = record.backendSession { record.captureMetrics = session.metrics() }
             }
-            let captureDrops = records.values.reduce(UInt64(0)) {
-                $0 &+ $1.captureMetrics.ringDroppedFrames &+ $1.captureMetrics.deliveryDroppedFrames
+            let ringDropped = archivedRingDrops &+ records.values.reduce(UInt64(0)) {
+                $0 &+ $1.captureMetrics.ringDroppedFrames
             }
+            let deliveryDropped = archivedDeliveryDrops &+ records.values.reduce(UInt64(0)) {
+                $0 &+ $1.captureMetrics.deliveryDroppedFrames
+            }
+            let queueDropped = archivedQueueDrops &+ metrics.reduce(UInt64(0)) {
+                $0 &+ $1.queueDroppedFrames
+            }
+            let noSubscriber = archivedNoSubscriberFrames &+ metrics.reduce(UInt64(0)) {
+                $0 &+ $1.noSubscriberFrames
+            }
+            let terminalCount = records.values.filter {
+                $0.state == .stopped || $0.state == .failed
+            }.count
             return (active.count, totalSessionsStarted,
                 archivedFrames &+ metrics.reduce(0) { $0 &+ $1.framesForwarded },
-                archivedDrops &+ captureDrops &+ metrics.reduce(0) {
-                    $0 &+ $1.queueDroppedFrames &+ $1.noSubscriberFrames
-                }, archivedBytes &+ metrics.reduce(0) { $0 &+ $1.bytesTransmitted })
+                ringDropped &+ deliveryDropped &+ queueDropped &+ noSubscriber,
+                archivedBytes &+ metrics.reduce(0) { $0 &+ $1.bytesTransmitted },
+                ringDropped, deliveryDropped, queueDropped, noSubscriber,
+                metrics.reduce(0) { $0 + $1.connectedClients }, terminalCount,
+                reservedStarts)
         }
     }
 
     private func captureEnded(sessionID: String, error: RuntimeErrorDTO?) {
         queue.async { [weak self] in
             guard let self, let record = self.records[sessionID], record.state == .starting || record.state == .capturing else { return }
-            guard self.stop(record, state: error == nil ? .stopped : .failed, error: error) else { return }
-            let snapshot = self.snapshot(record)
-            self.pruneTerminalRecords()
-            self.eventHandler(RuntimeEventDTO(type: error == nil ? .captureStopped : .captureFailed,
-                sourceID: record.sourceID, sessionID: record.id,
-                streamID: record.streamID.uuidString.lowercased(), session: snapshot, error: error))
+            let session = self.beginStop(record,
+                state: error == nil ? .stopped : .failed, error: error)
+            self.cleanupQueue.async { [weak self] in
+                session?.stop()
+                let finalMetrics = session?.metrics()
+                record.dataPlane.stop()
+                guard let self else { return }
+                let value = self.queue.sync {
+                    if let finalMetrics { record.captureMetrics = finalMetrics }
+                    let snapshot = self.snapshot(record)
+                    self.pruneTerminalRecords()
+                    return snapshot
+                }
+                self.eventHandler(RuntimeEventDTO(
+                    type: error == nil ? .captureStopped : .captureFailed,
+                    sourceID: record.sourceID, sessionID: record.id,
+                    streamID: record.streamID.uuidString.lowercased(), session: value,
+                    error: error))
+            }
         }
     }
 
-    @discardableResult
-    private func stop(_ record: Record, state: RuntimeSessionStateDTO,
-                      error: RuntimeErrorDTO?) -> Bool {
-        guard record.state == .starting || record.state == .capturing else { return false }
+    /// Transitions ownership under `queue`; backend teardown always runs after
+    /// the queue is released so a faulty Core Audio stop cannot block status or
+    /// process shutdown.
+    private func beginStop(_ record: Record, state: RuntimeSessionStateDTO,
+                           error: RuntimeErrorDTO?) -> RuntimeBackendCaptureSession? {
+        guard record.state == .starting || record.state == .capturing else { return nil }
         record.state = state
         record.terminalError = error
         let session = record.backendSession
         if let session { record.captureMetrics = session.metrics() }
         record.backendSession = nil
-        // Stop production before closing subscribers, so no callback can target a removed socket.
-        session?.stop()
-        record.dataPlane.stop()
-        return true
+        return session
     }
 
     private func snapshot(_ record: Record) -> RuntimeSessionDTO {
@@ -353,9 +453,10 @@ public final class RuntimeSessionCoordinator: @unchecked Sendable {
         guard records.removeValue(forKey: record.id) != nil else { return }
         let data = record.dataPlane.metrics()
         archivedFrames &+= data.framesForwarded
-        archivedDrops &+= record.captureMetrics.ringDroppedFrames
-            &+ record.captureMetrics.deliveryDroppedFrames
-            &+ data.queueDroppedFrames &+ data.noSubscriberFrames
+        archivedRingDrops &+= record.captureMetrics.ringDroppedFrames
+        archivedDeliveryDrops &+= record.captureMetrics.deliveryDroppedFrames
+        archivedQueueDrops &+= data.queueDroppedFrames
+        archivedNoSubscriberFrames &+= data.noSubscriberFrames
         archivedBytes &+= data.bytesTransmitted
     }
 }

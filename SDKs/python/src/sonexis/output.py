@@ -7,6 +7,7 @@ from typing import Any, Optional, TYPE_CHECKING, Union
 from .errors import SonexisConnectionError, SonexisError
 from .models import AudioOutputDestination, OutputInfo, OutputMetrics
 from .protocol import encode_frame_header
+from .unix_socket import open_trusted_unix_connection
 
 if TYPE_CHECKING:
     from .client import Sonexis
@@ -51,7 +52,7 @@ class AudioOutput:
         return self.info.metrics
 
     async def _open(self) -> None:
-        self._reader, self._writer = await asyncio.open_unix_connection(
+        self._reader, self._writer = await open_trusted_unix_connection(
             self.info.data_socket_path)
 
     async def __aenter__(self) -> "AudioOutput":

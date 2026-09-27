@@ -39,6 +39,16 @@ GEMINI_SYSTEM_INSTRUCTION = (
 )
 
 
+def terminal_safe(value: object) -> str:
+    """Render untrusted source/provider text without terminal control sequences."""
+    text = str(value)
+    return "".join(
+        character if ord(character) >= 0x20 and not 0x7f <= ord(character) <= 0x9f
+        else f"\\u{{{ord(character):04X}}}"
+        for character in text
+    )
+
+
 class MockRealtimeSink:
     """Offline sink that exercises the same flow as a network provider."""
 
@@ -319,7 +329,7 @@ async def choose_source(client: Sonexis, selector: Optional[str] = None):
     print("\nAvailable sources:\n")
     for index, source in enumerate(sources, 1):
         bundle = f" [{source.bundle_identifier}]" if source.bundle_identifier else ""
-        print(f"  [{index}] {source.name}{bundle}")
+        print(f"  [{index}] {terminal_safe(source.name)}{terminal_safe(bundle)}")
     answer = (await console_input("\nSelect source: ")).strip()
     try:
         return sources[int(answer) - 1]
@@ -337,19 +347,19 @@ async def print_provider_events(
     try:
         async for event in sink.events():
             if event.text:
-                print(f"\nAgent ({event.provider}): {event.text}")
+                print(f"\nAgent ({terminal_safe(event.provider)}): {terminal_safe(event.text)}")
             if event.audio and response_player is not None:
                 await response_player.write(event)
             elif event.audio and debug:
                 print(f"\nAgent ({event.provider}): received {len(event.audio)} audio bytes")
             if (debug and not event.text and not event.audio
                     and event.type not in {"session.started", "session.updated"}):
-                print(f"\nProvider event: {event.type}")
+                print(f"\nProvider event: {terminal_safe(event.type)}")
     except ProviderError as error:
-        print(f"\nProvider receive failed: {error.message} (retryable={error.retryable})")
+        print(f"\nProvider receive failed: {terminal_safe(error.message)} (retryable={error.retryable})")
         done.set()
     except (OSError, RuntimeError, SonexisError) as error:
-        print(f"\nResponse playback failed: {error}")
+        print(f"\nResponse playback failed: {terminal_safe(error)}")
         done.set()
 
 
@@ -402,7 +412,7 @@ async def watch_source(client: Sonexis, source_id: str) -> str:
                 return "quit"
             if event.source_id == source_id:
                 detail = f": {event.message}" if event.message else ""
-                print(f"\nSource event: {event.type}{detail}")
+                print(f"\nSource event: {terminal_safe(event.type)}{terminal_safe(detail)}")
                 return "source-ended"
     return "source-ended"
 
@@ -424,10 +434,10 @@ async def consume(
     except asyncio.CancelledError:
         raise
     except ProviderError as error:
-        print(f"\nProvider send failed: {error.message} (retryable={error.retryable})")
+        print(f"\nProvider send failed: {terminal_safe(error.message)} (retryable={error.retryable})")
         return "quit"
     except SonexisError as error:
-        print(f"\nAudio stream failed: {error.message} (retryable={error.retryable})")
+        print(f"\nAudio stream failed: {terminal_safe(error.message)} (retryable={error.retryable})")
         return "source-ended"
     print("\nAudio stream ended")
     return "source-ended"
@@ -452,8 +462,8 @@ async def run_live(
                 sink, done, debug=args.debug, response_player=response_player))
             try:
                 async with await client.capture(source, format=sink.required_format) as stream:
-                    print(f"\nListening to {source.name} ({source.id})")
-                    print(f"session={stream.info.id} stream={stream.info.stream_id}")
+                    print(f"\nListening to {terminal_safe(source.name)} ({terminal_safe(source.id)})")
+                    print(f"session={terminal_safe(stream.info.id)} stream={terminal_safe(stream.info.stream_id)}")
                     tasks = {
                         asyncio.create_task(consume(stream, sink, output, stats, done)),
                         asyncio.create_task(watch_source(client, source.id)),

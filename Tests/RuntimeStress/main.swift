@@ -75,11 +75,33 @@ private func peakRSS() -> Int64 {
     return Int64(usage.ru_maxrss)
 }
 
+private func currentRSS() -> UInt64 {
+    var task = proc_taskinfo()
+    let size = MemoryLayout<proc_taskinfo>.size
+    let result = withUnsafeMutablePointer(to: &task) {
+        proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, $0, Int32(size))
+    }
+    return result == Int32(size) ? task.pti_resident_size : 0
+}
+
+private func configuredCount(_ name: String, default fallback: Int,
+                             maximum: Int = 1_000_000) -> Int {
+    guard let raw = ProcessInfo.processInfo.environment[name],
+          let value = Int(raw), value >= 0, value <= maximum else { return fallback }
+    return value
+}
+
+let captureCycles = configuredCount("SONEXIS_STRESS_CAPTURE_CYCLES", default: 1_000)
+let outputCycles = configuredCount("SONEXIS_STRESS_OUTPUT_CYCLES", default: 1_000)
+let connectionCycles = configuredCount("SONEXIS_STRESS_CONNECTION_CYCLES", default: 200)
+let pcmBurstCycles = configuredCount("SONEXIS_STRESS_PCM_BURST_CYCLES", default: 100)
+
 let directory = URL(fileURLWithPath: "/tmp/sx-stress-\(UUID().uuidString)", isDirectory: true)
 let server = SonexisRuntimeServer(socketDirectory: directory, backend: SilentBackend(),
     outputBackend: SilentOutputBackend())
 let startingFDs = descriptorCount()
 let startingRSS = peakRSS()
+let startingCurrentRSS = currentRSS()
 let started = DispatchTime.now().uptimeNanoseconds
 
 do {
@@ -91,23 +113,34 @@ do {
     let client = SonexisRuntimeClient(controlSocketPath: server.paths.controlSocketPath)
     try client.connect(clientName: "stress")
 
-    for _ in 0..<1_000 {
+    for _ in 0..<captureCycles {
         let session = try client.startCapture(sourceID: "app.stress")
         _ = try client.stopCapture(sessionID: session.id)
         _ = try client.stopCapture(sessionID: session.id)
     }
 
-    for _ in 0..<1_000 {
+    for _ in 0..<outputCycles {
         let output = try client.startOutput()
         _ = try client.stopOutput(outputSessionID: output.id)
         _ = try client.stopOutput(outputSessionID: output.id)
     }
 
-    for _ in 0..<200 {
+    for _ in 0..<connectionCycles {
         let transient = SonexisRuntimeClient(controlSocketPath: server.paths.controlSocketPath)
         try transient.connect(clientName: "churn")
         _ = try transient.listSources()
         transient.disconnect()
+    }
+
+    for index in 0..<pcmBurstCycles {
+        let output = try client.startOutput()
+        let writer = try client.outputWriter(session: output)
+        for packet in 0..<(1 + index % 8) {
+            try writer.write(Data(repeating: UInt8(truncatingIfNeeded: packet), count: 320),
+                discontinuity: packet == 0 && index % 7 == 0)
+        }
+        writer.cancel()
+        _ = try client.stopOutput(outputSessionID: output.id)
     }
 
     let group = DispatchGroup()
@@ -135,16 +168,26 @@ do {
 
     let status = try client.runtimeStatus()
     expect(status.activeSessions == 0, "stress left active sessions")
-    expect(status.totalSessionsStarted >= 1_016, "session counter lost updates")
-    expect((status.totalOutputSessionsStarted ?? 0) >= 1_000,
+    expect(status.totalSessionsStarted >= UInt64(captureCycles + 16),
+           "session counter lost updates")
+    expect((status.totalOutputSessionsStarted ?? 0) >= UInt64(outputCycles + pcmBurstCycles),
            "output session counter lost updates")
+    expect((status.totalControlClientsAccepted ?? 0) >= UInt64(connectionCycles + 5),
+           "control connection accounting lost updates")
+    expect((status.connectedCaptureSubscribers ?? 0) == 0
+            && (status.connectedOutputProducers ?? 0) == 0,
+           "stress left data-plane clients attached")
     client.disconnect()
     usleep(100_000)
 
     let fdGrowth = descriptorCount() - startingFDs
     expect(fdGrowth <= 8, "file descriptors grew by \(fdGrowth)")
+    let retainedRSSGrowth = currentRSS() > startingCurrentRSS
+        ? currentRSS() - startingCurrentRSS : 0
+    expect(retainedRSSGrowth <= 64 * 1_024 * 1_024,
+           "current resident memory grew by \(retainedRSSGrowth) bytes")
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
-    print("Runtime stress passed: capture_cycles=1000 output_cycles=1000 connections=200 parallel_sessions=16 elapsed_seconds=\(String(format: "%.3f", elapsed)) fd_growth=\(fdGrowth) peak_rss_bytes=\(peakRSS()) baseline_peak_rss_bytes=\(startingRSS)")
+    print("Runtime stress passed: capture_cycles=\(captureCycles) output_cycles=\(outputCycles) pcm_burst_cycles=\(pcmBurstCycles) connections=\(connectionCycles) parallel_sessions=16 elapsed_seconds=\(String(format: "%.3f", elapsed)) fd_growth=\(fdGrowth) current_rss_bytes=\(currentRSS()) baseline_current_rss_bytes=\(startingCurrentRSS) retained_rss_growth_bytes=\(retainedRSSGrowth) peak_rss_bytes=\(peakRSS()) baseline_peak_rss_bytes=\(startingRSS)")
 } catch {
     server.stop()
     try? FileManager.default.removeItem(at: directory)

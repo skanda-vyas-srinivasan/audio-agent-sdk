@@ -4,7 +4,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="sonexis",
-    version="0.7.0",
+    version="0.8.0",
     description="Source-aware bidirectional Python SDK for the local Sonexis audio Runtime",
     url="https://github.com/skanda-vyas-srinivasan/Sonexis",
     license="GPL-2.0-or-later",

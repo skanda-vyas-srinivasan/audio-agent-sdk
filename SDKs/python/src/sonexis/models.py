@@ -441,6 +441,44 @@ class RuntimeStatus:
     total_output_frames_rendered: int = 0
     total_output_frames_dropped: int = 0
     total_output_bytes_received: int = 0
+    total_capture_ring_dropped_frames: int = 0
+    total_capture_delivery_dropped_frames: int = 0
+    total_capture_queue_dropped_frames: int = 0
+    total_capture_no_subscriber_frames: int = 0
+    connected_capture_subscribers: int = 0
+    retained_capture_sessions: int = 0
+    reserved_capture_starts: int = 0
+    total_output_frames_lost: int = 0
+    total_output_frames_flushed: int = 0
+    total_output_frames_late: int = 0
+    total_output_underrun_frames: int = 0
+    total_output_underrun_events: int = 0
+    total_output_overrun_events: int = 0
+    total_output_route_changes: int = 0
+    total_output_conversion_batches: int = 0
+    total_output_conversion_nanoseconds: int = 0
+    connected_output_producers: int = 0
+    retained_output_sessions: int = 0
+    reserved_output_starts: int = 0
+    total_control_clients_accepted: int = 0
+    total_control_clients_disconnected: int = 0
+    total_control_clients_rejected: int = 0
+    total_control_requests: int = 0
+    total_control_errors: int = 0
+    total_malformed_control_messages: int = 0
+    total_control_handshake_timeouts: int = 0
+    total_source_monitor_failures: int = 0
+    total_destination_monitor_failures: int = 0
+    source_monitor_consecutive_failures: int = 0
+    destination_monitor_consecutive_failures: int = 0
+    source_monitor_recoveries: int = 0
+    destination_monitor_recoveries: int = 0
+    source_monitor_last_success_nanoseconds: int = 0
+    destination_monitor_last_success_nanoseconds: int = 0
+    resident_memory_bytes: int = 0
+    peak_resident_memory_bytes: int = 0
+    open_file_descriptors: int = 0
+    thread_count: int = 0
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "RuntimeStatus":
@@ -455,7 +493,45 @@ class RuntimeStatus:
                    int(value.get("total_output_frames_received", 0)),
                    int(value.get("total_output_frames_rendered", 0)),
                    int(value.get("total_output_frames_dropped", 0)),
-                   int(value.get("total_output_bytes_received", 0)))
+                   int(value.get("total_output_bytes_received", 0)),
+                   int(value.get("total_capture_ring_dropped_frames", 0)),
+                   int(value.get("total_capture_delivery_dropped_frames", 0)),
+                   int(value.get("total_capture_queue_dropped_frames", 0)),
+                   int(value.get("total_capture_no_subscriber_frames", 0)),
+                   int(value.get("connected_capture_subscribers", 0)),
+                   int(value.get("retained_capture_sessions", 0)),
+                   int(value.get("reserved_capture_starts", 0)),
+                   int(value.get("total_output_frames_lost", 0)),
+                   int(value.get("total_output_frames_flushed", 0)),
+                   int(value.get("total_output_frames_late", 0)),
+                   int(value.get("total_output_underrun_frames", 0)),
+                   int(value.get("total_output_underrun_events", 0)),
+                   int(value.get("total_output_overrun_events", 0)),
+                   int(value.get("total_output_route_changes", 0)),
+                   int(value.get("total_output_conversion_batches", 0)),
+                   int(value.get("total_output_conversion_nanoseconds", 0)),
+                   int(value.get("connected_output_producers", 0)),
+                   int(value.get("retained_output_sessions", 0)),
+                   int(value.get("reserved_output_starts", 0)),
+                   int(value.get("total_control_clients_accepted", 0)),
+                   int(value.get("total_control_clients_disconnected", 0)),
+                   int(value.get("total_control_clients_rejected", 0)),
+                   int(value.get("total_control_requests", 0)),
+                   int(value.get("total_control_errors", 0)),
+                   int(value.get("total_malformed_control_messages", 0)),
+                   int(value.get("total_control_handshake_timeouts", 0)),
+                   int(value.get("total_source_monitor_failures", 0)),
+                   int(value.get("total_destination_monitor_failures", 0)),
+                   int(value.get("source_monitor_consecutive_failures", 0)),
+                   int(value.get("destination_monitor_consecutive_failures", 0)),
+                   int(value.get("source_monitor_recoveries", 0)),
+                   int(value.get("destination_monitor_recoveries", 0)),
+                   int(value.get("source_monitor_last_success_nanoseconds", 0)),
+                   int(value.get("destination_monitor_last_success_nanoseconds", 0)),
+                   int(value.get("resident_memory_bytes", 0)),
+                   int(value.get("peak_resident_memory_bytes", 0)),
+                   int(value.get("open_file_descriptors", 0)),
+                   int(value.get("thread_count", 0)))
 
 
 @dataclass(frozen=True)
