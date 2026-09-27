@@ -240,6 +240,7 @@ test("enumerates typed destinations and exposes output metrics", async (context)
   assert.equal(destination.active_device_name, "Test Speakers");
   assert.equal(destination.supported_formats[1].channel_count, 2);
   const output = await client.playback({ destination });
+  assert.equal(output.destination.id, "default");
   const status = await output.refresh();
   assert.equal(status.metrics.device_frames_rendered, 240);
   assert.equal(status.metrics.dropped_frames, 3);
@@ -355,6 +356,11 @@ test("duplex composes capture and output and closes both sides", async () => {
   let drained: boolean | undefined;
   const input = { close: async () => { inputClosed++; } } as unknown as CaptureStream;
   const output = {
+    destination: {
+      id: "coreaudio:blackhole", kind: "virtual_input", name: "BlackHole 2ch",
+      is_available: true, is_default: false, follows_system_default: false,
+      supported_formats: [AudioFormats.geminiLiveOutput()],
+    },
     close: async (options: { drain?: boolean }) => {
       outputClosed++;
       drained = options.drain;
@@ -371,6 +377,8 @@ test("duplex composes capture and output and closes both sides", async () => {
   });
   assert.equal(duplex.input, input);
   assert.equal(duplex.output, output);
+  assert.equal(duplex.feedbackRisk, true);
+  assert.match(duplex.feedbackWarning ?? "", /virtual input/);
   await duplex.close(false);
   assert.equal(inputClosed, 1);
   assert.equal(outputClosed, 1);

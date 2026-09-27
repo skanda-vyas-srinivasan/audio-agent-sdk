@@ -228,6 +228,41 @@ do {
     expect(preserve.0[0] > 0.49 && preserve.0[1] < -0.49,
         "stereo conversion did not preserve channel identity")
 
+    for inputFormat in RuntimePCMFormatDTO.supportedOutputFormats {
+        let inputFrames = inputFormat.sampleRate / 10
+        let sampleCount = Int(inputFrames) * Int(inputFormat.channelCount)
+        let matrixPayload: Data
+        if inputFormat.sampleFormat == .pcmS16LE {
+            matrixPayload = [Int16](repeating: 3_000, count: sampleCount)
+                .withUnsafeBytes { Data($0) }
+        } else {
+            matrixPayload = [Float](repeating: 0.125, count: sampleCount)
+                .withUnsafeBytes { Data($0) }
+        }
+        let matrixHeader = RuntimePCMFrameHeader(
+            payloadByteCount: UInt32(matrixPayload.count), streamID: UUID(), sequence: 0,
+            timestampNanoseconds: 0, sampleRate: inputFormat.sampleRate,
+            frameCount: inputFrames, channelCount: inputFormat.channelCount,
+            sampleFormat: inputFormat.sampleFormat)
+        let matrixFrame = RuntimePCMFrame(header: matrixHeader, payload: matrixPayload)
+        for deviceRate in [44_100.0, 48_000.0, 96_000.0] {
+            for deviceChannels: UInt32 in [1, 2] {
+                let converter = try RuntimePlaybackConverter(input: inputFormat,
+                    deviceSampleRate: deviceRate, deviceChannels: deviceChannels)
+                let body = try converter.convert(matrixFrame)
+                let tail = try converter.drain()
+                let expected = UInt32((Double(inputFrames) * deviceRate
+                    / Double(inputFormat.sampleRate)).rounded())
+                expect(body.1 + tail.1 == expected,
+                    "format matrix duration changed for \(inputFormat) -> \(deviceRate)/\(deviceChannels)")
+                let bodySamples = UnsafeBufferPointer(start: body.0,
+                    count: Int(body.1) * Int(deviceChannels))
+                expect(bodySamples.allSatisfy { $0.isFinite && (-1...1).contains($0) },
+                    "format matrix emitted invalid samples")
+            }
+        }
+    }
+
     print("Runtime output core tests passed")
 } catch {
     fatalError("Runtime output core test failed: \(error)")

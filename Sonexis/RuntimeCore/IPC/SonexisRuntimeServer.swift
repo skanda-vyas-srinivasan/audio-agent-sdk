@@ -212,7 +212,7 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
                     runtimeVersion: RuntimeProtocolInfo.runtimeVersion,
                     runtimeInstanceID: runtimeInstanceID,
                     capabilities: RuntimeProtocolInfo.capabilities,
-                    supportedFormats: RuntimePCMFormatDTO.supported,
+                    supportedFormats: RuntimePCMFormatDTO.supportedCaptureFormats,
                     limits: limits))
             case .listSources:
                 return RuntimeResponse(requestID: command.requestID,

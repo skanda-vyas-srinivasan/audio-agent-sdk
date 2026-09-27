@@ -48,6 +48,23 @@ class DuplexSession:
             raise RuntimeError("Duplex session has not been entered or is already closed")
         return self._output
 
+    @property
+    def feedback_risk(self) -> bool:
+        """True when output targets an advisory loopback/virtual-input device.
+
+        This warns about a possible digital loop; it is not echo cancellation
+        and cannot prove that the captured application selected this input.
+        """
+        return bool(self._output and self._output.destination
+                    and self._output.destination.kind == "virtual_input")
+
+    @property
+    def feedback_warning(self) -> Optional[str]:
+        if not self.feedback_risk:
+            return None
+        return ("Output targets a virtual input. Prevent the receiving application from "
+                "feeding generated audio back into the selected capture source.")
+
     async def __aenter__(self) -> "DuplexSession":
         self._input = await self.client.capture(
             self.input_source, format=self.input_format)

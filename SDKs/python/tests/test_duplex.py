@@ -4,12 +4,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from sonexis import AudioFormat, DuplexSession
+from sonexis import AudioFormat, AudioOutputDestination, DuplexSession
 
 
 class FakeStream:
-    def __init__(self):
+    def __init__(self, destination=None):
         self.closed = 0
+        self.destination = destination
 
     async def aclose(self, **kwargs):
         self.closed += 1
@@ -18,7 +19,9 @@ class FakeStream:
 class FakeClient:
     def __init__(self, *, fail_output=False):
         self.capture_stream = FakeStream()
-        self.output_stream = FakeStream()
+        self.output_stream = FakeStream(AudioOutputDestination(
+            "default", "Default", "playback", True, True, True,
+            None, None, None, [AudioFormat.openai_realtime_output()]))
         self.fail_output = fail_output
         self.capture_call = None
         self.output_call = None
@@ -63,6 +66,17 @@ class DuplexTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(AudioFormat.gemini_live_output().sample_rate, 24_000)
         self.assertEqual(AudioFormat.openai_realtime_output().channels, 1)
         self.assertEqual(AudioFormat.gemini_live_output().channels, 1)
+
+    async def test_virtual_input_surfaces_advisory_feedback_risk(self):
+        client = FakeClient()
+        client.output_stream.destination = AudioOutputDestination(
+            "coreaudio:blackhole", "BlackHole 2ch", "virtual_input", True,
+            False, False, "coreaudio:blackhole", "BlackHole 2ch", None,
+            [AudioFormat.openai_realtime_output()])
+        duplex = DuplexSession(client, "Discord", output_destination="BlackHole 2ch")
+        async with duplex:
+            self.assertTrue(duplex.feedback_risk)
+            self.assertIn("virtual input", duplex.feedback_warning)
 
 
 if __name__ == "__main__":

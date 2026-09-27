@@ -53,7 +53,7 @@ public struct RuntimePCMFormatDTO: Codable, Equatable, Hashable, Sendable {
     public var bytesPerFrame: Int { Int(channelCount) * Int(bitsPerChannel / 8) }
 
     public static let runtimeDefault = Self(sampleRate: 16_000, channelCount: 1)
-    public static let supported: [Self] = [
+    public static let supportedCaptureFormats: [Self] = [
         .runtimeDefault,
         Self(sampleRate: 24_000, channelCount: 1),
         Self(sampleRate: 48_000, channelCount: 1),
@@ -61,7 +61,11 @@ public struct RuntimePCMFormatDTO: Codable, Equatable, Hashable, Sendable {
         Self(sampleRate: 48_000, channelCount: 1, sampleFormat: .float32LE),
         Self(sampleRate: 48_000, channelCount: 2, sampleFormat: .float32LE),
     ]
-    public var isSupported: Bool { Self.supported.contains(self) }
+    public static let supportedOutputFormats = supportedCaptureFormats
+    /// Compatibility alias for the original capture-format policy.
+    public static let supported = supportedCaptureFormats
+    public var isSupported: Bool { Self.supportedCaptureFormats.contains(self) }
+    public var isSupportedOutput: Bool { Self.supportedOutputFormats.contains(self) }
 }
 
 public struct RuntimeSourceDTO: Codable, Equatable, Sendable {
@@ -293,7 +297,8 @@ public struct RuntimeHandshakeDTO: Codable, Equatable, Sendable {
 
     public init(protocolVersion: Int, runtimeVersion: String, runtimeInstanceID: String,
                 capabilities: [String], supportedFormats: [RuntimePCMFormatDTO],
-                supportedOutputFormats: [RuntimePCMFormatDTO]? = RuntimePCMFormatDTO.supported,
+                supportedOutputFormats: [RuntimePCMFormatDTO]?
+                    = RuntimePCMFormatDTO.supportedOutputFormats,
                 limits: RuntimeResourceLimitsDTO) {
         self.protocolVersion = protocolVersion
         self.runtimeVersion = runtimeVersion
@@ -379,7 +384,8 @@ public struct RuntimeOutputDestinationDTO: Codable, Equatable, Sendable {
                 followsSystemDefault: Bool = false, activeDeviceID: String? = nil,
                 activeDeviceName: String? = nil,
                 nativeFormat: RuntimePCMFormatDTO? = nil,
-                supportedFormats: [RuntimePCMFormatDTO] = RuntimePCMFormatDTO.supported) {
+                supportedFormats: [RuntimePCMFormatDTO]
+                    = RuntimePCMFormatDTO.supportedOutputFormats) {
         self.id = id
         self.kind = kind
         self.name = name

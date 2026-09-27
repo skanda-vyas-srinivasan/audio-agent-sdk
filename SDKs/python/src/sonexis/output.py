@@ -5,7 +5,7 @@ import uuid
 from typing import Any, Optional, TYPE_CHECKING, Union
 
 from .errors import SonexisConnectionError, SonexisError
-from .models import OutputInfo, OutputMetrics
+from .models import AudioOutputDestination, OutputInfo, OutputMetrics
 from .protocol import encode_frame_header
 
 if TYPE_CHECKING:
@@ -23,9 +23,11 @@ class AudioOutput:
 
     _MAX_PACKET_MILLISECONDS = 200
 
-    def __init__(self, client: "Sonexis", info: OutputInfo) -> None:
+    def __init__(self, client: "Sonexis", info: OutputInfo,
+                 destination: Optional[AudioOutputDestination] = None) -> None:
         self.client = client
         self.info = info
+        self.destination = destination
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._stream_id = uuid.UUID(info.stream_id)

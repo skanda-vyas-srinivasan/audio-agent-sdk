@@ -528,7 +528,8 @@ class Sonexis:
             target_buffer_milliseconds=target_buffer_milliseconds,
         )
         try:
-            output = AudioOutput(self, OutputInfo.from_wire(response["output_session"]))
+            output = AudioOutput(self, OutputInfo.from_wire(response["output_session"]),
+                                 resolved_destination)
         except (KeyError, TypeError, ValueError) as error:
             raise SonexisProtocolError(
                 "invalid_output_session", "Runtime sent a malformed output session") from error

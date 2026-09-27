@@ -640,7 +640,7 @@ export class Sonexis extends EventEmitter {
         false, { cause: error instanceof Error ? error.message : String(error) });
     }
     try {
-      const output = await AudioOutput.open(this, info);
+      const output = await AudioOutput.open(this, info, destination);
       this.outputs.add(output);
       return output;
     } catch (error) {
@@ -838,15 +838,18 @@ export class AudioOutput extends EventEmitter {
   private terminalError?: Error;
   private rotatingSocket?: Socket;
 
-  private constructor(private readonly client: Sonexis, public info: OutputInfo, socket: Socket) {
+  private constructor(private readonly client: Sonexis, public info: OutputInfo,
+                      readonly destination: AudioOutputDestination, socket: Socket) {
     super();
     this.socket = socket;
     this.observeSocket(socket);
   }
 
-  static async open(client: Sonexis, info: OutputInfo): Promise<AudioOutput> {
+  static async open(client: Sonexis, info: OutputInfo,
+                    destination: AudioOutputDestination): Promise<AudioOutput> {
     uuidToBytes(info.stream_id);
-    return new AudioOutput(client, info, await openSocket(info.data_socket_path));
+    return new AudioOutput(client, info, destination,
+      await openSocket(info.data_socket_path));
   }
 
   get closed(): boolean { return this.closing; }
@@ -1555,6 +1558,15 @@ export class DuplexSession {
   private closed = false;
 
   private constructor(readonly input: CaptureStream, readonly output: AudioOutput) {}
+
+  /** Advisory only: true for an installed loopback/virtual-input destination. */
+  get feedbackRisk(): boolean { return this.output.destination.kind === "virtual_input"; }
+
+  get feedbackWarning(): string | undefined {
+    return this.feedbackRisk
+      ? "Output targets a virtual input. Prevent generated audio from feeding the capture source."
+      : undefined;
+  }
 
   static async open(client: Sonexis, source: SourceSelector,
                     options: DuplexOptions = {}): Promise<DuplexSession> {

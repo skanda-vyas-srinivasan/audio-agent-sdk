@@ -128,7 +128,7 @@ public final class RuntimeOutputCoordinator: @unchecked Sendable {
             throw RuntimeErrorDTO(code: "invalid_output_destination",
                 message: "A valid output destination ID is required")
         }
-        guard format.isSupported else {
+        guard format.isSupportedOutput else {
             throw RuntimeErrorDTO(code: "unsupported_output_format",
                 message: "Requested output format is not supported")
         }
