@@ -1,8 +1,11 @@
 """Public Sonexis Runtime Python SDK."""
 
-from .client import CaptureSession, EventSubscription, Sonexis
+from .client import (CaptureSession, EventSubscription, OutputDestinationSelector,
+                     Sonexis, SourceSelector)
 from .output import AudioOutput
-from .activity import AudioActivity, VoiceActivityDetector, measure_activity
+from .activity import (ActivityDetectionConfig, ActivityEvent, ActivityState,
+                       AudioActivity, AudioActivityDetector, VoiceActivityDetector,
+                       measure_activity)
 from .diagnostics import AudioSendReceipt, LatencySummary, LatencyTracker
 from .errors import (AmbiguousOutputDestinationError, AmbiguousSourceError,
                      CaptureFailedError, OutputDestinationNotFoundError, OutputFailedError,
@@ -18,15 +21,18 @@ from .replay import ReplayStream
 from .duplex import DuplexSession
 
 SonexisClient = Sonexis
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
-    "AmbiguousOutputDestinationError", "AmbiguousSourceError", "AudioActivity", "AudioFormat", "AudioFrame", "AudioOutput",
+    "ActivityDetectionConfig", "ActivityEvent", "ActivityState",
+    "AmbiguousOutputDestinationError", "AmbiguousSourceError", "AudioActivity",
+    "AudioActivityDetector", "AudioFormat", "AudioFrame", "AudioOutput",
     "AudioOutputDestination", "AudioSendReceipt", "AudioSource", "CaptureFailedError",
     "CaptureInfo", "CaptureSession", "DuplexSession",
     "EventSubscription", "Handshake", "ReplayStream", "RuntimeErrorInfo", "RuntimeEvent", "RuntimeStatus", "SampleFormat",
     "LabeledAudioFrame", "LatencySummary", "LatencyTracker", "MultiSourceSession",
     "OutputDestinationNotFoundError", "OutputFailedError", "OutputInfo", "OutputMetrics", "OutputUnavailableError",
+    "OutputDestinationSelector", "SourceSelector",
     "PermissionDeniedError", "ProviderError",
     "SessionLimitError", "SlowConsumerError",
     "SessionMetrics", "Sonexis", "SonexisClient", "SonexisConnectionError", "SonexisError",

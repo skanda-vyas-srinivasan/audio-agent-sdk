@@ -38,7 +38,7 @@ class Sonexis:
     """A reusable asynchronous connection to the local Sonexis Runtime."""
 
     def __init__(self, socket_path: Optional[str] = None, *, client_name: str = "sonexis-python",
-                 client_version: str = "0.6.0") -> None:
+                 client_version: str = "0.7.0") -> None:
         self.socket_path = socket_path or os.environ.get(
             "SONEXIS_RUNTIME_SOCKET", f"/tmp/sonexis-runtime-{os.getuid()}/control.sock")
         self.client_name = client_name
@@ -338,15 +338,17 @@ class Sonexis:
         self._captures.add(capture)
         return capture
 
-    def session(self, *, max_queue_frames: int = 128) -> "MultiSourceSession":
+    def session(self, *, max_queue_frames: int = 128,
+                fail_fast: bool = True) -> "MultiSourceSession":
         """Create a labeled multi-source capture session."""
         from .multi import MultiSourceSession
-        return MultiSourceSession(self, max_queue_frames=max_queue_frames)
+        return MultiSourceSession(self, max_queue_frames=max_queue_frames,
+                                  fail_fast=fail_fast)
 
     def duplex(self, input_source: SourceSelector, *,
                output_destination: Union[str, AudioOutputDestination] = "default",
                input_format: AudioFormat = AudioFormat(),
-               output_format: AudioFormat = AudioFormat.openai_realtime_output(),
+               output_format: Optional[AudioFormat] = None,
                target_buffer_milliseconds: int = 60) -> "DuplexSession":
         """Compose one independent capture and output session."""
         from .duplex import DuplexSession

@@ -1,4 +1,5 @@
 import sys
+import asyncio
 import unittest
 from pathlib import Path
 
@@ -60,6 +61,22 @@ class DuplexTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "output unavailable"):
             await duplex.__aenter__()
         self.assertEqual(client.capture_stream.closed, 1)
+
+    async def test_default_output_format_matches_input(self):
+        client = FakeClient()
+        duplex = DuplexSession(client, "Chrome", input_format=AudioFormat.speech_16k())
+        async with duplex:
+            self.assertEqual(client.output_call[1], AudioFormat.speech_16k())
+
+    async def test_double_enter_is_rejected_and_close_is_idempotent(self):
+        client = FakeClient()
+        duplex = DuplexSession(client, "Chrome")
+        await duplex.__aenter__()
+        with self.assertRaisesRegex(RuntimeError, "cannot be entered"):
+            await duplex.__aenter__()
+        await asyncio.gather(duplex.aclose(), duplex.aclose())
+        self.assertEqual(client.capture_stream.closed, 1)
+        self.assertEqual(client.output_stream.closed, 1)
 
     def test_provider_output_presets(self):
         self.assertEqual(AudioFormat.openai_realtime_output().sample_rate, 24_000)

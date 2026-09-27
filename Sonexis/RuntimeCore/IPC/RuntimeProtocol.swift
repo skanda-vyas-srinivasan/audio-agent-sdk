@@ -2,7 +2,7 @@ import Foundation
 
 public enum RuntimeProtocolInfo {
     public static let protocolVersion = 2
-    public static let runtimeVersion = "0.6.0"
+    public static let runtimeVersion = "0.7.0"
     public static let capabilities = [
         "application_sources", "capture_sessions", "event_stream", "format_negotiation",
         "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions",

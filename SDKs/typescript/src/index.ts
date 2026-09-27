@@ -473,7 +473,7 @@ export class Sonexis extends EventEmitter {
     socket.on("error", (error) => this.handleDisconnect(socket, error));
     try {
       const response = await this.request("hello", {
-        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.6.0",
+        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.7.0",
       });
       const handshake = response.handshake as Handshake;
       if (handshake?.protocol_version !== 2) {

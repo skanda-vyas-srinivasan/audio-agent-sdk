@@ -1,6 +1,7 @@
 """Optional OpenAI GPT-Live adapter using the official `openai[realtime]` SDK."""
 
 import base64
+import binascii
 import asyncio
 import os
 import sys
@@ -10,7 +11,7 @@ from typing import Any, AsyncIterator, List, Optional
 from ..diagnostics import AudioSendReceipt, send_receipt
 from ..errors import ProviderError, sanitized_provider_error
 from ..models import AudioFormat, AudioFrame
-from .base import ProviderEvent
+from .base import ProviderEvent, ProviderStreamValidator
 
 
 class OpenAIRealtimeSink:
@@ -29,8 +30,10 @@ class OpenAIRealtimeSink:
         self._close_task: Optional[asyncio.Task] = None
         self._close_timeout = close_timeout
         self._send_lock = asyncio.Lock()
-        self._stream_id: Optional[str] = None
-        self._last_sequence: Optional[int] = None
+        self._validator = ProviderStreamValidator("OpenAI", self.required_format)
+        self._terminal_send_error = False
+        self._events_active = False
+        self._response_in_progress = False
 
     @classmethod
     async def connect(
@@ -98,54 +101,43 @@ class OpenAIRealtimeSink:
     async def __aexit__(self, exc_type, exc, traceback) -> None:
         await self.aclose()
 
-    def _validate(self, frame: AudioFrame) -> None:
-        if frame.format != self.required_format:
-            raise ProviderError(
-                "unsupported_provider_format",
-                f"OpenAI GPT-Live requires {self.required_format!r}; got {frame.format!r}",
-            )
-        expected = frame.frame_count * frame.format.channels * frame.format.sample_format.bytes_per_sample
-        if frame.frame_count < 1 or len(frame.data) != expected:
-            raise ProviderError("invalid_audio", "PCM payload does not match its frame metadata")
-
     async def send_audio(self, frame: AudioFrame) -> AudioSendReceipt:
         if self._closed:
             raise ProviderError("provider_closed", "OpenAI session is closed")
-        self._validate(frame)
+        if self._terminal_send_error:
+            raise ProviderError("provider_failed", "OpenAI send stream is no longer usable")
+        self._validator.validate(frame)
         async with self._send_lock:
-            if self._stream_id is None:
-                self._stream_id = frame.stream_id
-            elif self._stream_id != frame.stream_id:
-                raise ProviderError("provider_stream_mismatch",
-                                    "Use one OpenAI sink per Sonexis stream")
-            if self._last_sequence is not None and frame.sequence <= self._last_sequence:
-                raise ProviderError("provider_sequence_error",
-                                    "Audio frames must be sent in sequence order")
             encoded = base64.b64encode(frame.data).decode("ascii")
             try:
                 await self._connection.session.input_audio.append(audio=encoded)
             except asyncio.CancelledError:
                 raise
             except BaseException as error:
+                self._terminal_send_error = True
                 raise ProviderError("provider_send_failed",
-                                    sanitized_provider_error(error), retryable=True) from error
+                                    sanitized_provider_error(error), retryable=False) from error
             if self._closed:
                 raise ProviderError("provider_closed", "OpenAI session closed during send")
-            self._last_sequence = frame.sequence
+            self._validator.commit(frame)
         return send_receipt("openai", frame, len(encoded))
 
     async def events(self) -> AsyncIterator[ProviderEvent]:
-        for value in self._prefetched_events:
-            yield self._event(value)
-        self._prefetched_events.clear()
-        iterator = getattr(self, "_event_iterator", self._connection.__aiter__())
+        if self._events_active:
+            raise ProviderError("provider_event_consumer_exists",
+                                "OpenAI events already have a consumer")
+        self._events_active = True
         try:
+            for value in self._prefetched_events:
+                yield self._event_for_sink(value)
+            self._prefetched_events.clear()
+            iterator = getattr(self, "_event_iterator", self._connection.__aiter__())
             async for value in iterator:
                 if getattr(value, "type", None) == "error":
                     message = getattr(getattr(value, "error", None), "message", None)
                     raise ProviderError("provider_error", sanitized_provider_error(
                         RuntimeError(str(message or "OpenAI session error"))))
-                yield self._event(value)
+                yield self._event_for_sink(value)
         except asyncio.CancelledError:
             raise
         except BaseException as error:
@@ -155,9 +147,32 @@ class OpenAIRealtimeSink:
                 return
             raise ProviderError("provider_receive_failed",
                                 sanitized_provider_error(error), retryable=True) from error
+        finally:
+            self._events_active = False
 
     @staticmethod
     def _event(value: Any) -> ProviderEvent:
+        """Parse one wire event without sink correlation (legacy test helper)."""
+        return OpenAIRealtimeSink._parse_event(value)
+
+    def _event_for_sink(self, value: Any) -> ProviderEvent:
+        event = self._parse_event(value)
+        starts = event.type in {
+            "response.created", "response.output_item.added", "session.output_audio.delta"
+        } and not self._response_in_progress
+        if starts:
+            self._response_in_progress = True
+        completes = event.type in {
+            "response.done", "response.output_item.done", "session.output_audio.done"
+        }
+        if completes:
+            self._response_in_progress = False
+        return ProviderEvent(
+            event.provider, event.type, event.text, event.audio, event.audio_format,
+            event.raw, starts, completes, **self._validator.event_fields())
+
+    @staticmethod
+    def _parse_event(value: Any) -> ProviderEvent:
         event_type = str(getattr(value, "type", "unknown"))
         text = getattr(value, "delta", None)
         if not isinstance(text, str):
@@ -167,13 +182,16 @@ class OpenAIRealtimeSink:
             try:
                 audio = base64.b64decode(value.delta, validate=True)
                 text = None
-            except ValueError:
-                pass
-        return ProviderEvent("openai", event_type, text=text if isinstance(text, str) else None,
-                             audio=audio,
-                             audio_format=(AudioFormat.openai_realtime_output()
-                                           if audio is not None else None),
-                             raw=value)
+            except (ValueError, binascii.Error) as error:
+                raise ProviderError("invalid_provider_audio",
+                                    "OpenAI returned malformed base64 audio") from error
+        return ProviderEvent(
+            "openai", event_type, text=text if isinstance(text, str) else None,
+            audio=audio,
+            audio_format=(AudioFormat.openai_realtime_output()
+                          if audio is not None else None),
+            raw=value,
+        )
 
     async def aclose(self) -> None:
         if self._close_task is None:

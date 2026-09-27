@@ -149,7 +149,7 @@ async def main() -> None:
         audio_format = AudioFormat.speech_16k()
         stats: Dict[str, SourceStats] = {}
         started = time.monotonic()
-        async with client.session(max_queue_frames=128) as session:
+        async with client.session(max_queue_frames=128, fail_fast=False) as session:
             conversation_capture = await session.add(
                 "conversation", conversation, format=audio_format)
             media_capture = await session.add("media", media, format=audio_format)
@@ -190,6 +190,8 @@ async def main() -> None:
         print(f"\nStopped cleanly after {time.monotonic() - started:.1f}s")
         for label in ("conversation", "media"):
             print("  " + stats[label].line(label))
+        for label, error in session.errors_by_label.items():
+            print(f"  {label} ended with {type(error).__name__}: {error}")
 
 
 if __name__ == "__main__":

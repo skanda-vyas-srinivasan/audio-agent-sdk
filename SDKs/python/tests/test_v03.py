@@ -16,7 +16,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from sonexis import (AmbiguousSourceError, AudioFormat, AudioFrame, AudioSource,
+from sonexis import (ActivityDetectionConfig, AudioActivityDetector,
+                     AmbiguousSourceError, AudioFormat, AudioFrame, AudioSource,
                      CaptureInfo, CaptureSession, EventSubscription, LatencyTracker,
                      MultiSourceSession, ReplayStream, SampleFormat, SessionMetrics,
                      SonexisProtocolError, SourceNotFoundError, measure_activity)
@@ -110,6 +111,40 @@ class V03SDKTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReplayAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    def test_provider_neutral_activity_edges_are_debounced_and_resettable(self):
+        source_value = AudioSource("app.test", "Test", "application", [1], "test",
+                                   "running", True, True, None)
+        format = AudioFormat.speech_16k()
+
+        def frame(sequence, amplitude, *, discontinuity=False):
+            sample = round(amplitude * 32767)
+            return AudioFrame(
+                "stream", sequence, sequence * 100_000_000, 1_600, format,
+                struct.pack("<h", sample) * 1_600, discontinuity=discontinuity,
+                source=source_value, session_id="session")
+
+        detector = AudioActivityDetector(ActivityDetectionConfig(
+            activity_start_threshold=0.02, activity_end_threshold=0.01,
+            minimum_activity_ms=200, silence_duration_ms=300))
+        events = [detector.observe(frame(index, amplitude))
+                  for index, amplitude in enumerate(
+                      [0.2, 0.2, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0], 1)]
+        self.assertEqual([event.type for event in events if event],
+                         ["activity_started", "activity_ended"])
+        self.assertFalse(detector.active)
+        detector.observe(frame(9, 0.2))
+        detector.observe(frame(10, 0.2, discontinuity=True))
+        self.assertFalse(detector.active)
+
+    def test_activity_configuration_rejects_nonfinite_values(self):
+        for value in (float("nan"), float("inf"), -float("inf")):
+            with self.assertRaises(ValueError):
+                ActivityDetectionConfig(activity_start_threshold=value)
+            with self.assertRaises(ValueError):
+                measure_activity(AudioFrame(
+                    "stream", 1, 0, 1, AudioFormat.speech_16k(), b"\0\0"),
+                    threshold=value)
+
     async def test_replay_wav_activity_and_latency(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.wav"
@@ -232,6 +267,40 @@ class MultiSourceRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.captures[0].closed)
         self.assertEqual(group.labels, ())
 
+    async def test_non_fail_fast_retains_member_error_and_healthy_frames(self):
+        source_value = AudioSource("app.test", "Test", "application", [1], None,
+                                   "running", True, True, None)
+        frame = AudioFrame("stream", 1, 0, 1, AudioFormat.speech_16k(), b"\0\0",
+                           source=source_value, session_id="session")
+
+        class Capture:
+            def __init__(self, *, value=None, error=None):
+                self.value, self.error, self.closed = value, error, False
+
+            def __aiter__(self):
+                async def values():
+                    if self.error:
+                        raise self.error
+                    yield self.value
+                return values()
+
+            async def aclose(self):
+                self.closed = True
+
+        class Client:
+            async def capture(self, selector, *, format):
+                if selector == "bad":
+                    return Capture(error=RuntimeError("member failed"))
+                return Capture(value=frame)
+
+        group = MultiSourceSession(Client(), fail_fast=False)
+        await group.add("bad", "bad")
+        await group.add("healthy", "healthy")
+        values = [item async for item in group.frames()]
+        self.assertEqual([item.label for item in values], ["healthy"])
+        self.assertIn("bad", group.errors_by_label)
+        await group.aclose()
+
 
 class StreamShutdownTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_close_wakes_blocked_capture_and_event_iterators(self):
@@ -335,6 +404,20 @@ class FakeGeminiSession:
             for value in self.received:
                 yield value
         return values()
+
+
+class MultiTurnGeminiSession(FakeGeminiSession):
+    def __init__(self, turns):
+        super().__init__()
+        self.turns = list(turns)
+
+    def receive(self):
+        values = self.turns.pop(0) if self.turns else []
+
+        async def iterate():
+            for value in values:
+                yield value
+        return iterate()
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -503,6 +586,38 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(debug, ["Gemini response start", "Gemini turn complete"])
         await sink.aclose()
 
+    async def test_gemini_receives_multiple_turn_bounded_iterators(self):
+        def turn(text):
+            return SimpleNamespace(server_content=SimpleNamespace(
+                output_transcription=SimpleNamespace(text=text),
+                model_turn=SimpleNamespace(parts=[]), turn_complete=True))
+
+        session = MultiTurnGeminiSession([[turn("first")], [turn("second")]])
+        sink = GeminiLiveSink(session, blob_factory=lambda **value: value)
+        events = [event async for event in sink.events()]
+        self.assertEqual([event.text for event in events], ["first", "second"])
+        self.assertTrue(all(event.response_started for event in events))
+        self.assertTrue(all(event.response_completed for event in events))
+        await sink.aclose()
+
+    async def test_provider_events_retain_stream_correlation(self):
+        connection = FakeOpenAIConnection()
+        sink = OpenAIRealtimeSink(connection)
+        await sink.send_audio(self.frame(AudioFormat.openai_realtime()))
+        event = sink._event_for_sink(SimpleNamespace(type="response.created"))
+        self.assertTrue(event.response_started)
+        self.assertEqual(event.source_id, "app.test")
+        self.assertEqual(event.session_id, "session")
+        self.assertEqual(event.stream_id, "stream")
+        await sink.aclose()
+
+    def test_openai_rejects_malformed_output_audio(self):
+        sink = OpenAIRealtimeSink(FakeOpenAIConnection())
+        with self.assertRaises(Exception) as error:
+            sink._event_for_sink(SimpleNamespace(
+                type="session.output_audio.delta", delta="not base64!!"))
+        self.assertEqual(error.exception.code, "invalid_provider_audio")
+
     async def test_provider_output_audio_declares_playback_format(self):
         gemini_session = FakeGeminiSession()
         gemini_session.received.append(SimpleNamespace(server_content=SimpleNamespace(
@@ -592,7 +707,15 @@ class FakeControlClient:
         if session_id is None:
             from sonexis import RuntimeStatus
             return RuntimeStatus("0.3.0", "instance", 1, 1, 0, 0, 0, 0, 0, 0)
-        raise AssertionError("not used")
+        from sonexis import CaptureInfo, SessionMetrics
+        return CaptureInfo(session_id, "stream", "app.test", "capturing",
+                           AudioFormat.speech_16k(), "/tmp/data", 0, SessionMetrics())
+
+    async def stop(self, session_id):
+        return await self.status(session_id)
+
+    async def output_destinations(self):
+        return []
 
     async def create_capture(self, source, format):
         self.created = (source, format)
@@ -618,6 +741,19 @@ class MCPControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.created[1], AudioFormat.openai_realtime())
         self.assertIn("binary data plane", result["audio_delivery"])
         self.assertNotIn("pcm", result["session"])
+        self.assertNotIn("data_socket_path", result["session"])
+        session = await enabled.get_session("session")
+        self.assertNotIn("data_socket_path", session["session"])
+        await enabled.stop_capture("session")
+        with self.assertRaises(Exception) as ownership:
+            await enabled.get_session("session")
+        self.assertEqual(ownership.exception.code, "mcp_session_not_owned")
+
+    async def test_mcp_rejects_conflicting_source_selectors(self):
+        tools = SonexisControlTools(FakeControlClient())
+        with self.assertRaises(Exception) as error:
+            await tools.get_source("Test", 1)
+        self.assertEqual(error.exception.code, "invalid_argument")
 
 
 class OutputSecurityTests(unittest.TestCase):
@@ -677,6 +813,20 @@ class ReferenceProviderOutputTests(unittest.IsolatedAsyncioTestCase):
             await self.module.print_provider_events(
                 Sink(), asyncio.Event(), debug=True)
         self.assertIn("received 5 audio bytes", debug_output.getvalue())
+
+    async def test_mock_provider_emits_bounded_deterministic_audio(self):
+        sink = self.module.MockRealtimeSink(AudioFormat.speech_16k())
+        source_value = AudioSource("app.test", "Test", "application", [1], None,
+                                   "running", True, True, None)
+        frame = AudioFrame(
+            "stream", 1, 0, 80_000, AudioFormat.speech_16k(), b"\0\0" * 80_000,
+            source=source_value, session_id="session")
+        await sink.send_audio(frame)
+        event = await sink.events().__anext__()
+        self.assertEqual(event.audio_format, AudioFormat.speech_16k())
+        self.assertEqual(len(event.audio), 3_200)
+        self.assertEqual(event.stream_id, "stream")
+        await sink.aclose()
 
     async def test_provider_audio_uses_public_runtime_output_and_drains(self):
         from sonexis.providers import ProviderEvent

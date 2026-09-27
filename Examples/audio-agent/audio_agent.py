@@ -3,9 +3,11 @@
 
 import argparse
 import asyncio
+import math
 import os
 import stat
 import signal
+import struct
 import sys
 import time
 import wave
@@ -46,6 +48,13 @@ class MockRealtimeSink:
         self._frames = 0
         self._next_summary = audio_format.sample_rate * 5
         self._closed = False
+        self._stream_id: Optional[str] = None
+
+    async def __aenter__(self) -> "MockRealtimeSink":
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        await self.aclose()
 
     async def send_audio(self, frame: AudioFrame) -> AudioSendReceipt:
         if self._closed:
@@ -56,11 +65,25 @@ class MockRealtimeSink:
                 f"Mock provider expected {self.required_format!r}; got {frame.format!r}",
             )
         self._frames += frame.frame_count
+        if self._stream_id is None:
+            self._stream_id = frame.stream_id
         if self._frames >= self._next_summary:
             seconds = self._frames / self.required_format.sample_rate
+            # A quiet 100 ms tone makes the credential-free reference path
+            # exercise provider output and Sonexis playback deterministically.
+            tone_frames = self.required_format.sample_rate // 10
+            tone = b"".join(struct.pack(
+                "<h", round(2_000 * math.sin(
+                    2 * math.pi * 440 * index
+                    / self.required_format.sample_rate)))
+                * self.required_format.channels for index in range(tone_frames))
             await self._events.put(ProviderEvent(
                 "mock", "mock.summary",
                 text=f"received {seconds:.1f} seconds from {frame.source_name or 'replay'}",
+                audio=tone, audio_format=self.required_format,
+                response_started=True, response_completed=True,
+                source_id=frame.source_id, session_id=frame.session_id,
+                stream_id=frame.stream_id,
             ))
             self._next_summary += self.required_format.sample_rate * 5
         return AudioSendReceipt(
@@ -252,6 +275,27 @@ async def create_sink(args: argparse.Namespace) -> RealtimeAudioSink:
         args.sample_rate, args.channels, SampleFormat.PCM_S16LE))
 
 
+def required_format(args: argparse.Namespace) -> AudioFormat:
+    if args.provider == "openai":
+        return AudioFormat.openai_realtime()
+    if args.provider == "gemini":
+        return AudioFormat.gemini_live()
+    return AudioFormat(args.sample_rate, args.channels, SampleFormat.PCM_S16LE)
+
+
+async def close_provider_session(
+    sink: RealtimeAudioSink,
+    event_task: "asyncio.Task[None]",
+) -> None:
+    """Finalize provider input, then bound the wait for trailing responses."""
+    await sink.aclose()
+    try:
+        await asyncio.wait_for(asyncio.shield(event_task), timeout=1.0)
+    except asyncio.TimeoutError:
+        event_task.cancel()
+        await asyncio.gather(event_task, return_exceptions=True)
+
+
 async def choose_source(client: Sonexis, selector: Optional[str] = None):
     if selector:
         if selector.isdecimal():
@@ -379,9 +423,9 @@ async def consume(
 
 async def run_live(
     args: argparse.Namespace,
-    sink: RealtimeAudioSink,
     output: OutputWriter,
     done: asyncio.Event,
+    response_player: Optional[RuntimeResponsePlayer],
 ) -> None:
     if args.non_interactive and not args.source:
         raise RuntimeError("--non-interactive live capture requires --source")
@@ -391,27 +435,34 @@ async def run_live(
             source = await choose_source(client, selector)
             selector = None
             stats = StreamStats()
-            async with await client.capture(source, format=sink.required_format) as stream:
-                print(f"\nListening to {source.name} ({source.id})")
-                print(f"session={stream.info.id} stream={stream.info.stream_id}")
-                tasks = {
-                    asyncio.create_task(consume(stream, sink, output, stats, done)),
-                    asyncio.create_task(watch_source(client, source.id)),
-                    asyncio.create_task(report_stats(stats, done)),
-                    asyncio.create_task(done.wait()),
-                }
-                if not args.non_interactive:
-                    tasks.add(asyncio.create_task(read_command()))
-                completed, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                result = "quit"
-                for task in completed:
-                    value = task.result()
-                    if isinstance(value, str):
-                        result = value
-                        break
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
+            sink = await create_sink(args)
+            provider_events = asyncio.create_task(print_provider_events(
+                sink, done, debug=args.debug, response_player=response_player))
+            try:
+                async with await client.capture(source, format=sink.required_format) as stream:
+                    print(f"\nListening to {source.name} ({source.id})")
+                    print(f"session={stream.info.id} stream={stream.info.stream_id}")
+                    tasks = {
+                        asyncio.create_task(consume(stream, sink, output, stats, done)),
+                        asyncio.create_task(watch_source(client, source.id)),
+                        asyncio.create_task(report_stats(stats, done)),
+                        asyncio.create_task(done.wait()),
+                    }
+                    if not args.non_interactive:
+                        tasks.add(asyncio.create_task(read_command()))
+                    completed, pending = await asyncio.wait(
+                        tasks, return_when=asyncio.FIRST_COMPLETED)
+                    result = "quit"
+                    for task in completed:
+                        value = task.result()
+                        if isinstance(value, str):
+                            result = value
+                            break
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+            finally:
+                await close_provider_session(sink, provider_events)
             print(f"Final stream stats: {stats.line()}")
             if result == "switch":
                 continue
@@ -455,7 +506,6 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, done.set)
 
-    sink = await create_sink(args)
     response_client: Optional[Sonexis] = None
     response_player: Optional[RuntimeResponsePlayer] = None
     try:
@@ -465,30 +515,28 @@ async def main() -> None:
             await response_client.connect()
             response_player = RuntimeResponsePlayer(
                 response_client, args.response_output, debug=args.debug)
-        output = OutputWriter(args.output, sink.required_format)
-        provider_events = asyncio.create_task(
-            print_provider_events(
-                sink, done, debug=args.debug, response_player=response_player))
+        output = OutputWriter(args.output, required_format(args))
         try:
             if args.replay:
-                await run_replay(args, sink, output, done)
+                sink = await create_sink(args)
+                provider_events = asyncio.create_task(print_provider_events(
+                    sink, done, debug=args.debug, response_player=response_player))
+                try:
+                    await run_replay(args, sink, output, done)
+                finally:
+                    await close_provider_session(sink, provider_events)
             else:
-                await run_live(args, sink, output, done)
+                await run_live(args, output, done, response_player)
         finally:
             done.set()
-            provider_events.cancel()
-            await asyncio.gather(provider_events, return_exceptions=True)
             output.close()
     finally:
         try:
-            await sink.aclose()
+            if response_player is not None:
+                await response_player.close()
         finally:
-            try:
-                if response_player is not None:
-                    await response_player.close()
-            finally:
-                if response_client is not None:
-                    await response_client.close()
+            if response_client is not None:
+                await response_client.close()
 
 
 if __name__ == "__main__":

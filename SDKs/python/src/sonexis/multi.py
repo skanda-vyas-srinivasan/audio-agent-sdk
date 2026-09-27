@@ -3,7 +3,7 @@
 import asyncio
 from collections import deque
 from dataclasses import dataclass
-from typing import AsyncIterator, Deque, Dict, Optional, Set
+from typing import AsyncIterator, Deque, Dict, Mapping, Optional, Set
 
 from .client import CaptureSession, Sonexis, SourceSelector
 from .models import AudioFormat, AudioFrame, AudioSource
@@ -18,11 +18,15 @@ class LabeledAudioFrame:
     local_dropped_frames_before: int = 0
 
     @property
-    def source(self) -> Optional[AudioSource]:
+    def source(self) -> AudioSource:
+        if self.frame.source is None:
+            raise RuntimeError("multi-source frame is missing source context")
         return self.frame.source
 
     @property
-    def session_id(self) -> Optional[str]:
+    def session_id(self) -> str:
+        if self.frame.session_id is None:
+            raise RuntimeError("multi-source frame is missing session context")
         return self.frame.session_id
 
     @property
@@ -47,11 +51,13 @@ class _StreamEnded:
 class MultiSourceSession:
     """Own independent captures while yielding their frames with stable labels."""
 
-    def __init__(self, client: Sonexis, *, max_queue_frames: int = 128) -> None:
+    def __init__(self, client: Sonexis, *, max_queue_frames: int = 128,
+                 fail_fast: bool = True) -> None:
         if max_queue_frames < 1:
             raise ValueError("max_queue_frames must be positive")
         self.client = client
         self.max_queue_frames = max_queue_frames
+        self.fail_fast = fail_fast
         self.dropped_frames = 0
         self.dropped_frames_by_label: Dict[str, int] = {}
         self._queues: Dict[str, Deque[LabeledAudioFrame]] = {}
@@ -64,6 +70,7 @@ class MultiSourceSession:
         self._closed = False
         self._iterator_active = False
         self._close_task: Optional[asyncio.Task] = None
+        self._errors_by_label: Dict[str, BaseException] = {}
 
     async def __aenter__(self) -> "MultiSourceSession":
         return self
@@ -74,6 +81,11 @@ class MultiSourceSession:
     @property
     def labels(self):
         return tuple(self._captures)
+
+    @property
+    def errors_by_label(self) -> Mapping[str, BaseException]:
+        """Terminal member errors retained when ``fail_fast`` is disabled."""
+        return dict(self._errors_by_label)
 
     async def add(self, label: str, source: SourceSelector, *,
                   format: AudioFormat = AudioFormat()) -> CaptureSession:
@@ -158,7 +170,9 @@ class MultiSourceSession:
                     self._queues.pop(label, None)
                     self._pending_drops.pop(label, None)
                     if terminal.error is not None:
-                        raise terminal.error
+                        self._errors_by_label[label] = terminal.error
+                        if self.fail_fast:
+                            raise terminal.error
                 if not self._tasks:
                     return
 

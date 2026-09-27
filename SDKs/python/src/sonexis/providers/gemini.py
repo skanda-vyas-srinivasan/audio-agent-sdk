@@ -7,31 +7,24 @@ import sys
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, List, Optional
 
-from ..activity import VoiceActivityDetector, measure_activity
+from ..activity import (ActivityDetectionConfig, ActivityState,
+                        AudioActivityDetector, VoiceActivityDetector)
 from ..diagnostics import AudioSendReceipt, send_receipt
 from ..errors import ProviderError, sanitized_provider_error
 from ..models import AudioFormat, AudioFrame
-from .base import ProviderEvent
+from .base import ProviderEvent, ProviderStreamValidator
 
 
 @dataclass(frozen=True)
-class GeminiTurnDetectionConfig:
+class GeminiTurnDetectionConfig(ActivityDetectionConfig):
     """Client-side end detection used alongside Gemini's automatic VAD."""
 
     enabled: bool = True
-    activity_start_threshold: float = 0.015
-    activity_end_threshold: float = 0.008
-    minimum_activity_ms: float = 250.0
-    silence_duration_ms: float = 1_200.0
 
     def __post_init__(self) -> None:
-        if not 0 <= self.activity_end_threshold <= self.activity_start_threshold <= 1:
-            raise ValueError(
-                "Gemini activity thresholds must satisfy 0 <= end <= start <= 1")
-        if not 0 < self.minimum_activity_ms <= 5_000:
-            raise ValueError("minimum_activity_ms must be in (0, 5000]")
-        if not 0 < self.silence_duration_ms <= 30_000:
-            raise ValueError("silence_duration_ms must be in (0, 30000]")
+        super().__post_init__()
+        if not isinstance(self.enabled, bool):
+            raise ValueError("enabled must be a boolean")
 
 
 class GeminiLiveSink:
@@ -86,17 +79,24 @@ class GeminiLiveSink:
         self._close_task: Optional[asyncio.Task] = None
         self._close_timeout = close_timeout
         self._send_lock = asyncio.Lock()
-        self._stream_id: Optional[str] = None
-        self._last_sequence: Optional[int] = None
+        self._validator = ProviderStreamValidator("Gemini Live", self.required_format)
         self._turn_detection = turn_detection or GeminiTurnDetectionConfig()
         self._voice_activity_detector = voice_activity_detector
+        self._activity_detector = AudioActivityDetector(
+            ActivityDetectionConfig(
+                activity_start_threshold=self._turn_detection.activity_start_threshold,
+                activity_end_threshold=self._turn_detection.activity_end_threshold,
+                minimum_activity_ms=self._turn_detection.minimum_activity_ms,
+                silence_duration_ms=self._turn_detection.silence_duration_ms,
+            ),
+            voice_activity_detector=voice_activity_detector,
+        )
         self._debug_callback = debug_callback
-        self._turn_state = "idle"
-        self._candidate_duration_ms = 0.0
         self._candidate_frames: List[AudioFrame] = []
-        self._silence_duration_ms = 0.0
         self._segment_open = False
+        self._terminal_send_error = False
         self._response_in_progress = False
+        self._events_active = False
 
     @classmethod
     async def connect(
@@ -152,16 +152,6 @@ class GeminiLiveSink:
     async def __aexit__(self, exc_type, exc, traceback) -> None:
         await self.aclose()
 
-    def _validate(self, frame: AudioFrame) -> None:
-        if frame.format != self.required_format:
-            raise ProviderError(
-                "unsupported_provider_format",
-                f"Gemini Live requires {self.required_format!r}; got {frame.format!r}",
-            )
-        expected = frame.frame_count * frame.format.channels * frame.format.sample_format.bytes_per_sample
-        if frame.frame_count < 1 or len(frame.data) != expected:
-            raise ProviderError("invalid_audio", "PCM payload does not match its frame metadata")
-
     def _debug(self, message: str) -> None:
         if self._debug_callback is not None:
             try:
@@ -169,134 +159,133 @@ class GeminiLiveSink:
             except Exception:
                 pass
 
-    def _is_active(self, frame: AudioFrame, *, starting: bool) -> bool:
-        if self._voice_activity_detector is not None:
-            return bool(self._voice_activity_detector.is_speech(frame))
-        threshold = (self._turn_detection.activity_start_threshold if starting
-                     else self._turn_detection.activity_end_threshold)
-        return measure_activity(frame, threshold=threshold).active
-
-    @staticmethod
-    def _duration_ms(frame: AudioFrame) -> float:
-        return frame.frame_count * 1_000.0 / frame.format.sample_rate
-
     async def _send_frame(self, frame: AudioFrame) -> None:
         blob = self._blob_factory(data=frame.data, mime_type="audio/pcm;rate=16000")
         await self._session.send_realtime_input(audio=blob)
+        # Set after every successful remote send so cancellation during an
+        # onset-buffer flush still leaves close() able to terminate the segment.
+        self._segment_open = True
 
     async def _send_audio_stream_end(self) -> None:
-        await self._session.send_realtime_input(audio_stream_end=True)
+        if not self._segment_open:
+            return
+        # A cancelled/failed send has ambiguous remote state. Mark this segment
+        # terminal before awaiting so close() cannot duplicate the edge.
         self._segment_open = False
+        try:
+            await self._session.send_realtime_input(audio_stream_end=True)
+        except BaseException:
+            self._terminal_send_error = True
+            raise
         self._debug("audio_stream_end sent")
 
     async def _send_with_turn_detection(self, frame: AudioFrame) -> int:
         config = self._turn_detection
         if not config.enabled:
             await self._send_frame(frame)
-            self._segment_open = True
             return len(frame.data)
 
-        duration_ms = self._duration_ms(frame)
-        if self._turn_state != "active":
-            if not self._is_active(frame, starting=True):
-                self._turn_state = "idle"
-                self._candidate_duration_ms = 0.0
+        was_active = self._activity_detector.active
+        transition = self._activity_detector.observe(frame)
+        if not was_active:
+            if (self._activity_detector.state is ActivityState.IDLE
+                    and transition is None):
                 self._candidate_frames.clear()
                 return 0
-            self._turn_state = "starting"
-            self._candidate_duration_ms += duration_ms
             self._candidate_frames.append(frame)
-            if self._candidate_duration_ms < config.minimum_activity_ms:
+            if transition is None:
                 return 0
 
             pending = self._candidate_frames
             self._candidate_frames = []
-            self._candidate_duration_ms = 0.0
             sent_bytes = 0
             for candidate in pending:
                 await self._send_frame(candidate)
                 sent_bytes += len(candidate.data)
-            self._turn_state = "active"
-            self._silence_duration_ms = 0.0
-            self._segment_open = True
             self._debug("local activity start")
             return sent_bytes
 
         await self._send_frame(frame)
-        self._segment_open = True
-        if self._is_active(frame, starting=False):
-            self._silence_duration_ms = 0.0
-            return len(frame.data)
-
-        self._silence_duration_ms += duration_ms
-        if self._silence_duration_ms >= config.silence_duration_ms:
+        if transition is not None and transition.type == "activity_ended":
             self._debug("local activity end")
             await self._send_audio_stream_end()
-            self._turn_state = "idle"
-            self._silence_duration_ms = 0.0
         return len(frame.data)
 
     async def send_audio(self, frame: AudioFrame) -> AudioSendReceipt:
         if self._closed:
             raise ProviderError("provider_closed", "Gemini session is closed")
-        self._validate(frame)
+        if self._terminal_send_error:
+            raise ProviderError("provider_failed", "Gemini send stream is no longer usable")
+        self._validator.validate(frame)
         async with self._send_lock:
-            if self._stream_id is None:
-                self._stream_id = frame.stream_id
-            elif self._stream_id != frame.stream_id:
-                raise ProviderError("provider_stream_mismatch",
-                                    "Use one Gemini sink per Sonexis stream")
-            if self._last_sequence is not None and frame.sequence <= self._last_sequence:
-                raise ProviderError("provider_sequence_error",
-                                    "Audio frames must be sent in sequence order")
             try:
                 payload_bytes = await self._send_with_turn_detection(frame)
             except asyncio.CancelledError:
                 raise
             except BaseException as error:
+                self._terminal_send_error = True
                 raise ProviderError("provider_send_failed",
-                                    sanitized_provider_error(error), retryable=True) from error
+                                    sanitized_provider_error(error), retryable=False) from error
             if self._closed:
                 raise ProviderError("provider_closed", "Gemini session closed during send")
-            self._last_sequence = frame.sequence
+            self._validator.commit(frame)
         return send_receipt("gemini", frame, payload_bytes=payload_bytes)
 
     async def events(self) -> AsyncIterator[ProviderEvent]:
+        if self._events_active:
+            raise ProviderError("provider_event_consumer_exists",
+                                "Gemini events already have a consumer")
+        self._events_active = True
         try:
-            async for value in self._session.receive():
-                server = getattr(value, "server_content", None)
-                transcription = getattr(server, "output_transcription", None)
-                text = getattr(transcription, "text", None) or getattr(value, "text", None)
-                audio_parts = []
-                audio_format = None
-                model_turn = getattr(server, "model_turn", None)
-                for part in getattr(model_turn, "parts", None) or []:
-                    inline = getattr(part, "inline_data", None)
-                    data = getattr(inline, "data", None)
-                    mime = str(getattr(inline, "mime_type", ""))
-                    if isinstance(data, bytes) and mime.startswith("audio/"):
-                        part_format = self._output_audio_format(mime)
-                        if audio_format is not None and part_format != audio_format:
-                            raise ProviderError(
-                                "unsupported_provider_audio_format",
-                                "Gemini returned mixed output audio formats in one event",
-                            )
-                        audio_format = part_format
-                        audio_parts.append(data)
-                has_response = bool(text or audio_parts or model_turn)
-                if has_response and not self._response_in_progress:
-                    self._response_in_progress = True
-                    self._debug("Gemini response start")
-                turn_complete = bool(getattr(server, "turn_complete", False))
-                if turn_complete:
-                    self._debug("Gemini turn complete")
-                    self._response_in_progress = False
-                event_type = "output_transcription" if isinstance(text, str) else "message"
-                yield ProviderEvent("gemini", event_type,
-                                    text=text if isinstance(text, str) else None,
-                                    audio=b"".join(audio_parts) or None,
-                                    audio_format=audio_format,
-                                    raw=value)
+            while not self._closed:
+                received_any = False
+                async for value in self._session.receive():
+                    received_any = True
+                    server = getattr(value, "server_content", None)
+                    transcription = getattr(server, "output_transcription", None)
+                    text = getattr(transcription, "text", None) or getattr(value, "text", None)
+                    audio_parts = []
+                    audio_format = None
+                    model_turn = getattr(server, "model_turn", None)
+                    for part in getattr(model_turn, "parts", None) or []:
+                        inline = getattr(part, "inline_data", None)
+                        data = getattr(inline, "data", None)
+                        mime = str(getattr(inline, "mime_type", ""))
+                        if isinstance(data, bytes) and mime.startswith("audio/"):
+                            part_format = self._output_audio_format(mime)
+                            if audio_format is not None and part_format != audio_format:
+                                raise ProviderError(
+                                    "unsupported_provider_audio_format",
+                                    "Gemini returned mixed output audio formats in one event",
+                                )
+                            audio_format = part_format
+                            audio_parts.append(data)
+                    has_response = bool(text or audio_parts or model_turn)
+                    response_started = has_response and not self._response_in_progress
+                    if response_started:
+                        self._response_in_progress = True
+                        self._debug("Gemini response start")
+                    turn_complete = bool(getattr(server, "turn_complete", False))
+                    if turn_complete:
+                        self._debug("Gemini turn complete")
+                        self._response_in_progress = False
+                    event_type = ("output_transcription"
+                                  if isinstance(text, str) else "message")
+                    yield ProviderEvent(
+                        "gemini", event_type,
+                        text=text if isinstance(text, str) else None,
+                        audio=b"".join(audio_parts) or None,
+                        audio_format=audio_format,
+                        raw=value,
+                        response_started=response_started,
+                        response_completed=turn_complete,
+                        **self._validator.event_fields(),
+                    )
+                # Gemini receive iterators are turn-bounded. Re-enter after a
+                # completed turn, but an immediately empty iterator means the
+                # session itself has ended and avoids a busy loop.
+                if not received_any:
+                    return
         except asyncio.CancelledError:
             raise
         except GeneratorExit:
@@ -308,6 +297,8 @@ class GeminiLiveSink:
                 return
             raise ProviderError("provider_receive_failed",
                                 sanitized_provider_error(error), retryable=True) from error
+        finally:
+            self._events_active = False
 
     async def aclose(self) -> None:
         if self._close_task is None:
@@ -342,5 +333,6 @@ class GeminiLiveSink:
     async def _finish_audio_stream(self) -> None:
         async with self._send_lock:
             self._candidate_frames.clear()
+            self._activity_detector.reset()
             if self._segment_open:
                 await self._send_audio_stream_end()
