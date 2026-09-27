@@ -528,7 +528,7 @@ sampled off the realtime callback.
   `SONEXIS_AUDIO_DEBUG=1`; normal Runtime operation does not persist device UIDs
   or per-session audio metadata.
 - `Scripts/test-runtime-release.sh` builds and executes the standalone source,
-  SDK, package, stress, TSan, metadata, provenance, and Apple Development
+  SDK, package, stress, TSan, metadata, and Apple Development
   signing gates. The development installer verifies exact managed inventory,
   hashes, stable identifiers, versions, embedded capture metadata, and matching
   Team IDs before replacement or removal. Apple Development signatures are

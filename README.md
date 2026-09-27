@@ -1,9 +1,11 @@
-# Sonexis Runtime standalone candidate
+# Sonexis Runtime
 
-This local repository candidate contains Sonexis Runtime, `sonexisctl`, the
-public SDKs/examples, and an exact snapshot of the extracted
-`SonexisAudioEngine` Swift package. It contains no Sonexis consumer App, UI,
-DSP graph, presets, recording, or workspace code.
+This repository contains Sonexis Runtime, `sonexisctl`, the public SDKs and
+examples, and Runtime's own `SonexisAudioEngine` Swift package. The engine name
+is product branding: it is ordinary source code owned by this repository, not
+a link, submodule, or dependency on the Sonexis App repository. This repository
+contains no Sonexis consumer App, UI, DSP graph, presets, recording, or
+workspace code.
 
 Build both command-line products from a clean checkout:
 
@@ -12,10 +14,9 @@ swift build -c release
 swift test --package-path SonexisAudioEngine
 ```
 
-The local engine declaration in `Package.swift` is intentional for this
-pre-hosting candidate. `ENGINE_PROVENANCE.json` pins the exact source commit
-and Git tree copied into this repository; `Scripts/check-engine-provenance.py`
-fails if the committed snapshot drifts.
+The local engine declaration in `Package.swift` is intentional. Runtime and
+its engine evolve together in this repository and build without any sibling
+checkout or external source dependency.
 
 For real Process Tap capture, configure an Apple Development identity in Xcode,
 then build/install the signed development products. The SwiftPM Runtime embeds
