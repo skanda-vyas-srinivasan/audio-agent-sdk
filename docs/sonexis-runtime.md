@@ -536,10 +536,15 @@ sampled off the realtime callback.
 - `verify-runtime-artifacts.sh` verifies bounded package inventory, hashes,
   signatures, identifiers, versions, and architectures without executing the
   candidate binaries. Bundle hashes are self-consistency evidence, not publisher
-  authenticity: for a copied bundle, set trusted
-  `SONEXIS_EXPECTED_TEAM_ID` and `SONEXIS_EXPECTED_SOURCE_COMMIT` values obtained
-  outside that bundle. Apple Development signatures are local engineering
-  identity, not a substitute for Developer ID and notarization.
+  authenticity. Before inspecting a copied bundle, obtain the manifest SHA-256
+  through a trusted channel and set `SONEXIS_EXPECTED_MANIFEST_SHA256`; that
+  digest anchors the manifest, SDK hashes, and source-commit declaration.
+  `SONEXIS_EXPECTED_TEAM_ID` and `SONEXIS_EXPECTED_SOURCE_COMMIT` are useful
+  additional assertions but cannot authenticate the SDKs by themselves. Without
+  the manifest-digest anchor, the verifier is intended only for trusted local
+  build output, not as a hostile archive parser. Apple Development signatures
+  are local engineering identity, not a substitute for Developer ID and
+  notarization.
 
 ## Troubleshooting
 

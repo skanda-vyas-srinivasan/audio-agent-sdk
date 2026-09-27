@@ -165,9 +165,13 @@ unpredictable private PID staging file.
 
 Artifact verification does not execute candidate binaries and bounds metadata,
 archive inventory, and expansion. Hashes prove bundle consistency, not
-publisher authenticity; copied artifacts should be checked against expected
-team/source values obtained out of band. Apple Development signing does not
-replace Developer ID/notarization.
+publisher authenticity. A copied bundle must be anchored with an out-of-band
+`SONEXIS_EXPECTED_MANIFEST_SHA256`; this binds the manifest, package hashes, and
+declared source revision before package metadata is inspected. Expected
+team/source values are supplemental checks and cannot authenticate SDKs alone.
+Without the digest anchor, verification is for trusted local build output rather
+than adversarial bundles. Apple Development signing does not replace Developer
+ID/notarization.
 
 ## 17. Performance
 

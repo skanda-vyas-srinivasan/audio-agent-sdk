@@ -32,11 +32,17 @@ TEAM=$(/usr/bin/python3 -c \
 COMMIT=$(/usr/bin/python3 -c \
     'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' \
     "$SOURCE/manifest.json")
+MANIFEST_SHA256=$(shasum -a 256 "$SOURCE/manifest.json" | awk '{print $1}')
 SONEXIS_EXPECTED_TEAM_ID="$TEAM" SONEXIS_EXPECTED_SOURCE_COMMIT="$COMMIT" \
+    SONEXIS_EXPECTED_MANIFEST_SHA256="$MANIFEST_SHA256" \
     "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$SOURCE" >/dev/null
 expect_failure env SONEXIS_EXPECTED_TEAM_ID=AAAAAAAAAA \
     "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$SOURCE"
 expect_failure env SONEXIS_EXPECTED_SOURCE_COMMIT=0000000000000000000000000000000000000000 \
+    "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$SOURCE"
+expect_failure env SONEXIS_EXPECTED_MANIFEST_SHA256=0000000000000000000000000000000000000000000000000000000000000000 \
+    "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$SOURCE"
+expect_failure env SONEXIS_EXPECTED_MANIFEST_SHA256=not-a-digest \
     "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$SOURCE"
 
 copy_fixture() {

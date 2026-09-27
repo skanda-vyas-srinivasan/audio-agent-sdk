@@ -43,7 +43,15 @@ grep -F 'Usage:' "$TEST_DIR/expected-failure.log" >/dev/null
 export SONEXIS_DEV_PREFIX="$PREFIX"
 export SONEXIS_RUNTIME_STATE_DIR="$STATE_DIR"
 export SONEXIS_RUNTIME_DIR="$RUNTIME_DIR"
-mkdir "$STATE_DIR"
+UNSAFE_STATE_PARENT="$TEST_DIR/unsafe-state-parent"
+mkdir "$UNSAFE_STATE_PARENT"
+chmod 777 "$UNSAFE_STATE_PARENT"
+expect_failure env SONEXIS_RUNTIME_STATE_DIR="$UNSAFE_STATE_PARENT/state" \
+    "$ROOT_DIR/Scripts/runtime-dev.sh" start
+"$ROOT_DIR/Scripts/runtime-dev.sh" start >/dev/null
+[ "$(stat -f %Lp "$STATE_DIR")" = 700 ]
+"$ROOT_DIR/Scripts/runtime-dev.sh" stop >/dev/null
+rm -f "$STATE_DIR/runtime.log" "$STATE_DIR/runtime.log.previous"
 touch "$TEST_DIR/log-target"
 ln -s "$TEST_DIR/log-target" "$STATE_DIR/runtime.log"
 expect_failure "$ROOT_DIR/Scripts/runtime-dev.sh" start

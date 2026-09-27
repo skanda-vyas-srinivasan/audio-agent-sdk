@@ -92,8 +92,8 @@ The final candidate must pass from a clean committed state:
 - signed universal Runtime/CLI Release builds and development
   install/start/status/restart/stop/uninstall;
 - reproducible artifact creation, bounded integrity verification anchored to an
-  expected team/source commit, and adversarial tamper/inventory/manifest/symlink
-  rejection;
+  out-of-band manifest digest with supplemental expected team/source checks, and
+  adversarial tamper/inventory/manifest/symlink rejection;
 - documentation link/version consistency and `git diff --check`.
 
 P0/P1 correctness or security findings block the candidate. Manual physical

@@ -162,10 +162,12 @@ PY
 chmod 755 "$STAGING" "$STAGING/$RUNTIME_NAME" "$STAGING/$CTL_NAME"
 chmod 644 "$STAGING/$WHEEL_NAME" "$STAGING/$SDIST_NAME" \
     "$STAGING/$NPM_NAME" "$STAGING/manifest.json" "$STAGING/SHA256SUMS"
+MANIFEST_SHA256=$(shasum -a 256 "$STAGING/manifest.json" | awk '{print $1}')
 
 [ ! -e "$DESTINATION" ] && [ ! -L "$DESTINATION" ] || \
     error "destination appeared during build: $DESTINATION"
 SONEXIS_EXPECTED_TEAM_ID="$TEAM" SONEXIS_EXPECTED_SOURCE_COMMIT="$COMMIT" \
+    SONEXIS_EXPECTED_MANIFEST_SHA256="$MANIFEST_SHA256" \
     "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$STAGING"
 mv "$STAGING" "$DESTINATION"
 STAGING=

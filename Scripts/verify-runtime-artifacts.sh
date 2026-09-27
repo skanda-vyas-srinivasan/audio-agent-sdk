@@ -37,10 +37,28 @@ maximum_artifact_bytes = 512 * 1024 * 1024
 def fail(message: str) -> None:
     raise SystemExit(f"runtime-artifacts: {message}")
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+manifest_path = root / "manifest.json"
 try:
-    if (root / "manifest.json").stat().st_size > maximum_metadata_bytes:
+    if manifest_path.stat().st_size > maximum_metadata_bytes:
         fail("manifest.json exceeds 1 MiB")
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+except OSError as error:
+    fail(f"cannot inspect manifest.json: {error}")
+expected_manifest_digest = os.environ.get("SONEXIS_EXPECTED_MANIFEST_SHA256")
+if expected_manifest_digest:
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_digest):
+        fail("SONEXIS_EXPECTED_MANIFEST_SHA256 must be a lowercase SHA-256 digest")
+    if sha256_file(manifest_path) != expected_manifest_digest:
+        fail("manifest.json differs from the trusted expected digest")
+
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 except (OSError, UnicodeError, json.JSONDecodeError) as error:
     fail(f"invalid manifest.json: {error}")
 
@@ -123,13 +141,6 @@ def require_regular_file(path: Path) -> None:
     mode = path.lstat().st_mode
     if not stat.S_ISREG(mode):
         fail(f"artifact is not a regular file: {path.name}")
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while block := stream.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
 
 for name, item in listed.items():
     path = root / name

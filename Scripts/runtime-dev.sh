@@ -49,6 +49,39 @@ validate_state_directory() {
     }
 }
 
+create_state_directory() {
+    [ ! -e "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || return 0
+    case "$STATE_DIR" in
+        /*) ;;
+        *)
+            echo "Runtime state path must be absolute: $STATE_DIR" >&2
+            exit 1
+            ;;
+    esac
+    STATE_PARENT=$(dirname -- "$STATE_DIR")
+    [ -d "$STATE_PARENT" ] && [ ! -L "$STATE_PARENT" ] || {
+        echo "Runtime state parent is not a real directory: $STATE_PARENT" >&2
+        exit 1
+    }
+    [ "$(stat -f %u "$STATE_PARENT")" = "$(id -u)" ] || {
+        echo "Runtime state parent belongs to another user: $STATE_PARENT" >&2
+        exit 1
+    }
+    STATE_PARENT_MODE=$(stat -f %Lp "$STATE_PARENT")
+    case "$STATE_PARENT_MODE" in
+        *[2367][0-7]|*[0-7][2367])
+            echo "Runtime state parent must not be group- or world-writable: $STATE_PARENT" >&2
+            exit 1
+            ;;
+    esac
+    umask 077
+    mkdir -m 700 "$STATE_DIR" || {
+        echo "Could not create private Runtime state directory: $STATE_DIR" >&2
+        exit 1
+    }
+    validate_state_directory
+}
+
 require_install() {
     [ -x "$RUNTIME_BIN" ] && [ ! -L "$RUNTIME_BIN" ] || {
         echo "Sonexis Runtime is not installed at $PREFIX" >&2
@@ -103,8 +136,7 @@ case "$COMMAND" in
             echo "$STATUS"
             exit 0
         fi
-        mkdir -p "$STATE_DIR"
-        chmod 700 "$STATE_DIR"
+        create_state_directory
         if read_pid && pid_is_managed_runtime; then
             echo "Managed Runtime process $MANAGED_PID exists but is not healthy." >&2
             echo "Inspect $LOG_FILE; refusing to start a second instance." >&2
