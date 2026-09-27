@@ -333,7 +333,13 @@ function openSocket(path: string): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
     socket.once("connect", () => resolve(socket));
-    socket.once("error", reject);
+    socket.once("error", (error: NodeJS.ErrnoException) => reject(new SonexisError(
+      "runtime_unavailable",
+      `Cannot connect to Sonexis Runtime at ${path}. Start it with Scripts/runtime-dev.sh start `
+        + `or verify SONEXIS_RUNTIME_SOCKET. (${error.code ?? error.message})`,
+      true,
+      { socket_path: path, cause_code: error.code ?? "socket_error" },
+    )));
   });
 }
 
@@ -385,7 +391,7 @@ export class Sonexis extends EventEmitter {
     socket.on("error", (error) => this.handleDisconnect(socket, error));
     try {
       const response = await this.request("hello", {
-        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.4.0",
+        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.5.0",
       });
       const handshake = response.handshake as Handshake;
       if (handshake?.protocol_version !== 2) {

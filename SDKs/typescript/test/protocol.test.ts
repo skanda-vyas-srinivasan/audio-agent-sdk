@@ -103,6 +103,18 @@ test("resolves exact source selectors without silently choosing ambiguous names"
   assert.throws(() => resolveSource(sources, "Stopped"), SourceNotFoundError);
 });
 
+test("missing Runtime reports an actionable structured connection error", async () => {
+  const path = `/tmp/sonexis-not-running-${process.pid}.sock`;
+  const client = new Sonexis(path);
+  await assert.rejects(client.connect(), (error: unknown) => {
+    assert.ok(error instanceof SonexisError);
+    assert.equal(error.code, "runtime_unavailable");
+    assert.match(error.message, /Scripts\/runtime-dev\.sh start/);
+    assert.equal(error.details.socket_path, path);
+    return true;
+  });
+});
+
 test("filters source snapshots and exposes safe format presets", () => {
   const sources = [
     source("app.spotify", "Spotify", "com.spotify.client", 10),

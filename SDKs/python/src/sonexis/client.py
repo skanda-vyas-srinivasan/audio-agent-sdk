@@ -33,7 +33,7 @@ class Sonexis:
     """A reusable asynchronous connection to the local Sonexis Runtime."""
 
     def __init__(self, socket_path: Optional[str] = None, *, client_name: str = "sonexis-python",
-                 client_version: str = "0.4.0") -> None:
+                 client_version: str = "0.5.0") -> None:
         self.socket_path = socket_path or os.environ.get(
             "SONEXIS_RUNTIME_SOCKET", f"/tmp/sonexis-runtime-{os.getuid()}/control.sock")
         self.client_name = client_name
@@ -99,7 +99,17 @@ class Sonexis:
                     await self.close()
                 raise
             except BaseException as error:
-                if isinstance(error, (OSError, SonexisError)):
+                if isinstance(error, OSError):
+                    reason = error.strerror or str(error)
+                    last_error = SonexisConnectionError(
+                        "runtime_unavailable",
+                        "Cannot connect to Sonexis Runtime at "
+                        f"{self.socket_path}. Start it with Scripts/runtime-dev.sh start "
+                        f"or verify SONEXIS_RUNTIME_SOCKET. ({reason})",
+                        retryable=True,
+                        details={"socket_path": self.socket_path},
+                    )
+                elif isinstance(error, SonexisError):
                     last_error = error
                 else:
                     last_error = SonexisProtocolError(

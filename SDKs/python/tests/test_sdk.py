@@ -168,6 +168,14 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
                 await client.capture("bad")
             self.assertEqual(caught.exception.code, "source_not_found")
 
+    async def test_missing_runtime_has_actionable_connection_error(self):
+        path = os.path.join(self.temp.name, "not-running.sock")
+        with self.assertRaises(SonexisConnectionError) as caught:
+            await Sonexis(path).connect()
+        self.assertEqual(caught.exception.code, "runtime_unavailable")
+        self.assertIn("Scripts/runtime-dev.sh start", caught.exception.message)
+        self.assertEqual(caught.exception.details["socket_path"], path)
+
     async def test_capture_iteration_and_eos(self):
         async with Sonexis(self.runtime.control_path) as client:
             async with await client.capture("app.test") as capture:

@@ -102,6 +102,7 @@ private struct Arguments {
         [--sample-rate Hz] [--channels 1|2] [--sample-format pcm_s16le|float32_le] [--debug]
       sonexisctl output-status <session-id> [--json]
       sonexisctl output-stop <session-id> [--json]
+      sonexisctl version
       append --socket PATH to any command
     """
 }
@@ -249,8 +250,19 @@ do {
         print(Arguments.usage)
         exit(EXIT_SUCCESS)
     }
+    if ["version", "--version"].contains(arguments.command) {
+        print("sonexisctl \(RuntimeProtocolInfo.runtimeVersion) (protocol \(RuntimeProtocolInfo.protocolVersion))")
+        exit(EXIT_SUCCESS)
+    }
     let client = SonexisRuntimeClient(controlSocketPath: arguments.socketPath)
-    try client.connect(clientName: "sonexisctl")
+    do {
+        try client.connect(clientName: "sonexisctl")
+    } catch {
+        throw RuntimeErrorDTO(code: "runtime_unavailable",
+            message: "Cannot connect to Sonexis Runtime at \(arguments.socketPath). "
+                + "Start it with Scripts/runtime-dev.sh start or pass --socket. "
+                + "(\(error.localizedDescription))", retryable: true)
+    }
 
     switch arguments.command {
     case "sources":

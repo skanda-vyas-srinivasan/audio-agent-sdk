@@ -29,6 +29,7 @@ class FakeOutputRuntime:
         self.packets = [[], []]
         self.stream_closed = []
         self.flush_count = 0
+        self.status_state = "stopped"
 
     async def start(self):
         self.stream_closed = [asyncio.Event(), asyncio.Event()]
@@ -99,7 +100,11 @@ class FakeOutputRuntime:
                 elif command == "start_output":
                     response["output_session"] = self.session()
                 elif command == "output_status":
-                    response["output_session"] = self.session(self.flush_count, "stopped")
+                    session = self.session(self.flush_count, self.status_state)
+                    if self.status_state == "failed":
+                        session["error"] = {"code": "output_device_change_failed",
+                            "message": "device vanished", "retryable": True}
+                    response["output_session"] = session
                 elif command == "flush_output":
                     self.flush_count = 1
                     response["output_session"] = self.session(1)
@@ -187,6 +192,15 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packets[-1][0][4], 0)
         self.assertEqual(self.runtime.commands.count("stop_output"), 0)
         self.assertGreaterEqual(self.runtime.commands.count("output_status"), 1)
+
+    async def test_drain_surfaces_runtime_output_failure(self):
+        self.runtime.status_state = "failed"
+        async with Sonexis(self.runtime.control_path) as client:
+            output = await client.playback()
+            with self.assertRaises(OutputFailedError) as caught:
+                await output.aclose()
+            self.assertEqual(caught.exception.code, "output_device_change_failed")
+            self.assertTrue(caught.exception.retryable)
 
     async def test_explicit_timestamp_offsets_only_within_write(self):
         async with Sonexis(self.runtime.control_path) as client:

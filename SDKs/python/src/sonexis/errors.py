@@ -50,6 +50,7 @@ class SonexisError(Exception):
             "permission_denied": PermissionDeniedError,
             "slow_consumer": SlowConsumerError,
             "capture_failed": CaptureFailedError,
+            "capture_initialization_failed": CaptureFailedError,
             "output_unavailable": OutputUnavailableError,
             "output_destination_unavailable": OutputUnavailableError,
             "output_destination_disconnected": OutputUnavailableError,

@@ -4,17 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sonexis"
-version = "0.4.0"
+version = "0.5.0"
 description = "Source-aware bidirectional Python SDK for the local Sonexis audio Runtime"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "GPL-2.0-or-later"}
+license = {file = "LICENSE"}
 authors = [{name = "Sonexis contributors"}]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: MacOS",
   "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://sonexis.ink"
+Repository = "https://github.com/skanda-vyas-srinivasan/Sonexis"
 
 [project.optional-dependencies]
 openai = ["openai[realtime]>=2; python_version >= '3.10'"]

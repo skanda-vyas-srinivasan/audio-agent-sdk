@@ -17,6 +17,7 @@ from .replay import ReplayStream
 from .duplex import DuplexSession
 
 SonexisClient = Sonexis
+__version__ = "0.5.0"
 
 __all__ = [
     "AmbiguousSourceError", "AudioActivity", "AudioFormat", "AudioFrame", "AudioOutput",
@@ -29,5 +30,5 @@ __all__ = [
     "SessionLimitError", "SlowConsumerError",
     "SessionMetrics", "Sonexis", "SonexisClient", "SonexisConnectionError", "SonexisError",
     "SonexisProtocolError", "SourceNotFoundError", "SourceUnavailableError",
-    "UnsupportedFormatError", "VoiceActivityDetector", "measure_activity",
+    "UnsupportedFormatError", "VoiceActivityDetector", "__version__", "measure_activity",
 ]

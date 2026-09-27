@@ -87,7 +87,8 @@ private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sen
         } catch {
             throw RuntimeErrorDTO(
                 code: "capture_initialization_failed",
-                message: String(describing: error)
+                message: "\(String(describing: error)). Verify Screen & System Audio "
+                    + "Recording permission for com.sonexis.runtime, then retry."
             )
         }
         session.onStateChange { state, error in
@@ -108,22 +109,62 @@ private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sen
     }
 }
 
-private func socketDirectory(arguments: [String]) throws -> URL {
-    if let index = arguments.firstIndex(of: "--socket-dir") {
-        guard arguments.indices.contains(index + 1) else {
-            throw RuntimeErrorDTO(code: "invalid_argument", message: "--socket-dir requires a path")
+private struct RuntimeArguments {
+    let socketDirectory: URL
+    let showHelp: Bool
+    let showVersion: Bool
+
+    static let usage = """
+    Usage: sonexis-runtime [--socket-dir ABSOLUTE_PATH]
+           sonexis-runtime --version
+           sonexis-runtime --help
+
+    The Runtime stays in the foreground. Use Scripts/runtime-dev.sh for an
+    explicit opt-in development background lifecycle.
+    """
+
+    init(_ values: [String]) throws {
+        var socketPath: String?
+        var help = false
+        var version = false
+        var index = 0
+        while index < values.count {
+            switch values[index] {
+            case "--socket-dir":
+                guard socketPath == nil, values.indices.contains(index + 1) else {
+                    throw RuntimeErrorDTO(code: "invalid_argument",
+                        message: "--socket-dir requires one path")
+                }
+                index += 1
+                socketPath = values[index]
+            case "--help", "-h": help = true
+            case "--version": version = true
+            default:
+                throw RuntimeErrorDTO(code: "invalid_argument",
+                    message: "Unknown option: \(values[index])\n\(Self.usage)")
+            }
+            index += 1
         }
-        return URL(fileURLWithPath: arguments[index + 1], isDirectory: true)
+        let configured = ProcessInfo.processInfo.environment["SONEXIS_RUNTIME_DIR"]
+        let path = socketPath ?? configured.flatMap { $0.isEmpty ? nil : $0 }
+        socketDirectory = path.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? RuntimeSocketPaths.userDefault.directory
+        showHelp = help
+        showVersion = version
     }
-    if let configured = ProcessInfo.processInfo.environment["SONEXIS_RUNTIME_DIR"], !configured.isEmpty {
-        return URL(fileURLWithPath: configured, isDirectory: true)
-    }
-    return RuntimeSocketPaths.userDefault.directory
 }
 
 do {
-    let directory = try socketDirectory(arguments: CommandLine.arguments)
-    let server = SonexisRuntimeServer(socketDirectory: directory,
+    let arguments = try RuntimeArguments(Array(CommandLine.arguments.dropFirst()))
+    if arguments.showHelp {
+        print(RuntimeArguments.usage)
+        exit(EXIT_SUCCESS)
+    }
+    if arguments.showVersion {
+        print("sonexis-runtime \(RuntimeProtocolInfo.runtimeVersion) (protocol \(RuntimeProtocolInfo.protocolVersion))")
+        exit(EXIT_SUCCESS)
+    }
+    let server = SonexisRuntimeServer(socketDirectory: arguments.socketDirectory,
         backend: SonexisCaptureBackend(), outputBackend: RuntimeHALPlaybackBackend())
     try server.start()
     print("Sonexis Runtime listening at \(server.paths.controlSocketPath)")

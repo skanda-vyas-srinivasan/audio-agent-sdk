@@ -222,10 +222,22 @@ class AudioOutput:
             try:
                 info = await self.client.output_status(self.info.id)
                 self.info = info
-                if info.state in ("stopped", "cancelled", "failed"):
+                if info.state == "failed":
+                    if info.error is not None:
+                        raise SonexisError.from_response({"error": {
+                            "code": info.error.code,
+                            "message": info.error.message,
+                            "retryable": info.error.retryable,
+                            "details": info.error.details or {},
+                        }})
+                    raise SonexisError("output_failed",
+                                       "Runtime output failed while draining")
+                if info.state in ("stopped", "cancelled"):
                     return
-            except SonexisError:
-                return
+            except SonexisError as error:
+                if error.code in ("output_session_not_found", "session_not_found"):
+                    return
+                raise
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 await self.client._cleanup_request(
