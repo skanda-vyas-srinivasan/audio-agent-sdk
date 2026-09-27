@@ -1,4 +1,4 @@
-# Sonexis Runtime v0.7
+# Sonexis Runtime v0.9
 
 ## Purpose
 
@@ -19,12 +19,15 @@ validation, and route changes that backpressure writers instead of terminating
 an otherwise healthy output session. v0.7 adds provider-neutral activity edges,
 source-correlated provider responses, resilient labeled multi-source
 consumption, and a safer structured MCP control surface without changing
-protocol v2 or either PCM data plane.
+protocol v2 or either PCM data plane. v0.8 hardens lifecycle, diagnostics,
+socket migration, cancellation, and long-running resource accounting. v0.9 is
+the public-beta/API-freeze candidate: it inventories the supported surface,
+documents compatibility, and produces verifiable local release artifacts.
 
 The Runtime is audio infrastructure. It does not provide transcription, models,
 cloud transport, authentication, accounts, or acoustic echo cancellation, and
 it never opens a TCP port. It can target an installed virtual loopback device;
-it does not install a Sonexis-branded driver in v0.4.
+it does not install a Sonexis-branded driver.
 
 ## Zero-to-audio development quickstart
 
@@ -42,6 +45,14 @@ cd Sonexis
 . .venv-runtime/bin/activate
 python -m pip install --no-deps --no-build-isolation -e SDKs/python
 python Examples/capture-one-source.py "Google Chrome" --frames 16000
+```
+
+Optionally add the managed commands to the current shell's `PATH`:
+
+```sh
+export PATH="$HOME/Library/Application Support/SonexisRuntime/dev/bin:$PATH"
+sonexis-runtime --version
+sonexisctl sources
 ```
 
 The installer verifies the signature, identifiers, capture usage description,
@@ -111,7 +122,20 @@ to work. Both directories must be same-UID private directories; an already-live
 legacy Runtime prevents a second default Runtime from starting. Custom socket
 directories never create this alias.
 
-The Runtime executable embeds `NSAudioCaptureUsageDescription`, uses the stable identifier `com.sonexis.runtime`, and is development-signed by Xcode. Live capture uses that identity for macOS Screen & System Audio Recording permission.
+The Runtime executable embeds `NSAudioCaptureUsageDescription`, uses the stable
+identifier `com.sonexis.runtime`, and is development-signed by Xcode. Live
+capture uses that identity for macOS Screen & System Audio Recording
+permission. The Sonexis application and Runtime have separate permission
+identities.
+
+The first `capture` may trigger the macOS prompt. If it does not, or capture
+returns `permission_denied`, open **System Settings > Privacy & Security >
+Screen & System Audio Recording**, enable the signed `sonexis-runtime` entry,
+then restart it with `Scripts/runtime-dev.sh stop` and `start`. Verify with an
+audible source and `sonexisctl capture SOURCE --debug`; `sources` alone proves
+discovery, not Process Tap permission. If a rebuilt binary is shown as another
+entry, confirm its signature and stable bundle identifier, grant that entry,
+and restart again.
 
 ## Architecture
 
@@ -197,7 +221,7 @@ A successful response includes a distinct response ID and the negotiated platfor
 }
 ```
 
-Protocol version 2 remains mandatory in v0.7. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
+Protocol version 2 remains mandatory in v0.9. Additive optional fields and capabilities may appear without a protocol bump; removing fields or changing semantics requires a later protocol version. Runtime SemVer is independent of protocol version. Request IDs must contain 1–128 UTF-8 bytes. Responses echo the request ID, have their own UUID, and carry exactly the result relevant to the command.
 
 Supported commands:
 
@@ -433,6 +457,15 @@ sonexisctl output-status SESSION [--json]
 sonexisctl output-stop SESSION [--json]
 ```
 
+`--json` emits one UTF-8 JSON value per line with lower-snake-case keys. The
+`sources` and `outputs` commands return arrays; `status`, session commands,
+`play`, and `diagnostics` return the corresponding typed object; `watch` emits
+one event object per line until stopped. Successful values are not wrapped in
+an `ok` envelope. On failure the CLI exits nonzero and emits
+`{"ok":false,"error":{"code":"...","message":"...","retryable":...}}`.
+Consumers should key on `error.code`, tolerate additive fields, and not parse
+human-readable output or error prose.
+
 Runtime status additionally reports current/peak RSS, open descriptors,
 threads, control-client/request/error totals, endpoint-monitor health,
 retained/reserved resources, data-plane attachments, capture drop categories,
@@ -442,10 +475,13 @@ legacy `total_output_frames_dropped` means all discarded frames; use
 `total_output_frames_flushed` for intentional barge-in discard.
 When `runtime_diagnostics_v2` is advertised, `exact_counters` contains decimal
 string mirrors for every `UInt64` status field so JavaScript consumers can use
-`BigInt` without losing precision. SDK consumers talking to an older Runtime
-must gate the additive v0.8 fields on that capability; Python retains legacy
-zero defaults for source compatibility. Uptime and endpoint last-success
-timestamps use the monotonic boot clock and are nanoseconds, not wall time.
+`BigInt` without losing precision. Session metrics also carry
+`exact_counters`; session start time, event timestamp/sequence/drop counts, and
+frame-drop totals have named decimal-string mirrors. SDK consumers talking to
+an older Runtime must gate these additive exact values and other v0.8 fields on
+capabilities or field presence; Python retains legacy zero defaults for source
+compatibility. Uptime and endpoint last-success timestamps use the monotonic
+boot clock and are nanoseconds, not wall time.
 Conversion nanoseconds are cumulative work duration. Accepted minus
 disconnected control clients equals active clients; rejected clients are a
 separate total.
@@ -530,7 +566,10 @@ sampled off the realtime callback.
   audio routed through the new v0.4 playback plane still requires the manual
   validation guide. The official MCP dependency was imported and its tool
   schemas were validated, but no third-party MCP host was used end to end.
-- JSON event/control nanoseconds and large counters are JavaScript `number`s and lose integer precision after `2^53`; binary PCM timestamps are `bigint`. A later protocol should encode JSON `u64` fields as decimal strings.
+- Protocol v2 retains numeric JSON values for compatibility, but every public
+  nanosecond/counter field that can exceed JavaScript's safe integer range now
+  has a decimal-string exact mirror. TypeScript uses those mirrors for
+  `bigint`; binary PCM timestamps are already `bigint`.
 - Protocol v2 is the first developer-preview contract. Fields were finalized within this milestone; future incompatible changes require a new protocol version rather than adding required v2 fields.
 - The current Runtime has generic loopback-device routing but no bundled `Sonexis Agent Input`
   driver. See [virtual device design](virtual-audio-device-design.md).

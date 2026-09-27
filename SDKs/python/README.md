@@ -1,6 +1,6 @@
 # Sonexis Python SDK
 
-The source-aware, bidirectional async SDK for Sonexis Runtime v0.7. It connects
+The source-aware, bidirectional async SDK for Sonexis Runtime v0.9. It connects
 only to the local Unix-domain Runtime and keeps Core Audio details out of
 application code. The core package has no runtime dependencies and supports
 Python 3.9+.
@@ -12,7 +12,13 @@ cd /path/to/Sonexis
 /usr/bin/python3 -m venv --system-site-packages .venv
 . .venv/bin/activate
 python -m pip install --no-deps --no-build-isolation -e SDKs/python
+python -c 'import sonexis; print(sonexis.__version__)'
 ```
+
+The editable install is the normal repository-development path. Release
+engineering also builds a wheel and source distribution locally; install the
+wheel into a clean environment with `python -m pip install PATH_TO_WHEEL`.
+Sonexis packages are not published to PyPI in v0.9.
 
 For completely offline testing, installation is unnecessary:
 
@@ -35,6 +41,27 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## Async ownership
+
+Use context managers as the canonical ownership boundary:
+
+- `async with Sonexis() as sx` owns the control connection and closes every
+  capture, output, and event subscription it created.
+- Capture and playback perform an asynchronous Runtime request first, so write
+  `async with await sx.capture(...)` and
+  `async with await sx.playback(...)`.
+- `sx.session()` and `sx.duplex(...)` return convenience context managers
+  directly, so do not add `await` after `async with` for those calls.
+- Breaking an `async for` loop does not replace explicit ownership. Keep the
+  stream inside its context, especially when cancellation or exceptions can
+  leave the loop early.
+- `reconnect()` creates only a new control connection. It never revives or
+  silently replaces resources owned by an earlier Runtime instance.
+
+Cancellation of a mutating request closes its owning control connection when
+the result is ambiguous, allowing Runtime cleanup to remain authoritative.
+Read-only request cancellation leaves an otherwise healthy connection usable.
 
 `capture` accepts a Runtime source ID, bundle identifier, PID passed as a Python
 `int`, exact application name, or `AudioSource`. A numeric string remains a
@@ -278,3 +305,8 @@ Specialized exceptions cover missing/ambiguous/unavailable sources, permission,
 formats, session limits, slow consumers, protocol failures, connection failures,
 capture failures, and provider failures. `reconnect()` creates a fresh control
 connection but never silently recreates captures or binds to a relaunched app.
+
+`PermissionDeniedError` means the signed Runtime identity lacks macOS capture
+permission. Enable `sonexis-runtime` in **System Settings > Privacy & Security
+> Screen & System Audio Recording**, restart the Runtime process, and retry a
+live capture; source enumeration by itself does not verify permission.

@@ -496,6 +496,8 @@ do {
            "handshake did not advertise output")
     expect(client.handshake?.capabilities.contains("output_destination_events") == true,
            "handshake did not advertise destination lifecycle events")
+    expect(client.handshake?.capabilities.contains("exact_uint64_mirrors") == true,
+           "handshake did not advertise exact UInt64 mirrors")
     let sources = try client.listSources()
     expect(sources.map(\.id) == ["app.test.audio"], "source enumeration failed")
 

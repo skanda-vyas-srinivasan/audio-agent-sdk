@@ -6,6 +6,7 @@ public enum RuntimeProtocolInfo {
     public static let capabilities = [
         "application_sources", "capture_sessions", "event_stream", "format_negotiation",
         "multiple_sessions", "pcm_v2", "runtime_diagnostics", "runtime_diagnostics_v2",
+        "exact_uint64_mirrors",
         "output_sessions",
         "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush",
         "default_device_playback", "output_destination_events",

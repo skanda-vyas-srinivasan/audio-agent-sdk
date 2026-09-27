@@ -1,7 +1,7 @@
 # Sonexis TypeScript SDK
 
 The dependency-free `@sonexis/runtime` client targets Node.js 18+ and Sonexis
-Runtime protocol v2. Version 0.7 is locally packageable for external consumers
+Runtime protocol v2. Version 0.9 is locally packageable for external consumers
 and includes typed, bounded client-to-Runtime audio output, source-aware capture,
 AI format presets, and labeled multi-source APIs.
 
@@ -24,7 +24,13 @@ const activity = new AudioActivityDetector(
 ```sh
 npm install
 npm run build
+npm pack
 ```
+
+For a clean external project, install the resulting `.tgz` with
+`npm install /absolute/path/to/sonexis-runtime-0.9.0.tgz`. During repository
+development, `npm install /absolute/path/to/SDKs/typescript` is also supported.
+The package is not published to npm in v0.9.
 
 ```ts
 import { Sonexis } from "@sonexis/runtime";
@@ -40,6 +46,17 @@ try {
   await sx.close();
 }
 ```
+
+## Naming and wire models
+
+Public methods and SDK-owned convenience fields use idiomatic TypeScript
+camelCase (`waitForSource`, `sessionId`, `timestampNs`). DTO snapshots that
+directly model protocol JSON intentionally retain lower snake case
+(`bundle_identifier`, `sample_rate`, `channel_count`) so their relationship to
+the documented wire contract stays visible and lossless. Do not infer that an
+underscore-prefixed member, socket, queue, or generated JavaScript method is a
+public API; the supported surface is the exported types and methods documented
+here and in the [API inventory](../../docs/runtime-api-stability.md).
 
 ## Source selection
 
@@ -203,10 +220,15 @@ npm run build
 npm test
 ```
 
-For an external local project, build first and install the repository package
-without publishing it, for example `npm install /absolute/path/to/SDKs/typescript`.
+Binary audio sequence/timestamp fields and local frame receipt timestamps are
+`bigint`. Protocol-v2 keeps numeric JSON fields for compatibility, but v0.9
+also sends decimal-string exact mirrors for session start times and metrics,
+event timestamp/sequence/drop values, frame-drop totals, and Runtime status
+counters. The SDK prefers those mirrors for `bigint` values. When connected to
+an older Runtime, feature-detect the mirror and do not use a JSON `number`
+above `Number.MAX_SAFE_INTEGER` for long-running sample-accurate arithmetic.
 
-Binary audio sequence/timestamp fields and local frame receipt timestamps are `bigint`.
-Protocol-v2 JSON nanosecond timestamps and lifetime counters remain JSON numbers, so JavaScript
-cannot preserve integer precision above `2^53`; do not use those control-plane values for
-long-running sample-accurate arithmetic.
+`PermissionDeniedError` indicates that the signed Runtime identity lacks
+capture permission. Enable `sonexis-runtime` in **System Settings > Privacy &
+Security > Screen & System Audio Recording**, restart Runtime, and retry a live
+capture; source enumeration alone does not exercise Process Tap permission.
