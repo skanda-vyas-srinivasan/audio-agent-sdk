@@ -213,12 +213,12 @@ artifact checks passed, and all 18 TypeScript tests passed.
 - `78df5d7` — add safe development install/lifecycle
 - `fc3b6e2` — package SDKs, examples, and release gates
 - `2cdfb53` — harden distribution after independent DX review
-- final documentation/checkpoint commit — the commit containing this report
+- `8779c93` — final v0.5 documentation and release checkpoint
 
 The complete implementation before this report is
-`2cdfb5382ada72d9bcef4b65c3e3d559cbf00272`. The v0.5 checkpoint is the clean
-commit containing `RUNTIME_V0_5_REPORT.md`; obtain its immutable ID with
-`git rev-parse HEAD` before beginning v0.6.
+`2cdfb5382ada72d9bcef4b65c3e3d559cbf00272`. The clean v0.5 release checkpoint
+is `8779c9367ae571072f93a4299f3c82a73ce36696`. The following documentation-only
+commit records that immutable checkpoint ID before v0.6 begins.
 
 ## Next milestone
 
