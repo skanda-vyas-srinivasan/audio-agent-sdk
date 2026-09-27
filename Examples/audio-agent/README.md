@@ -31,8 +31,29 @@ python Examples/audio-agent/audio_agent.py --provider openai --source Spotify
 
 python -m pip install -e 'SDKs/python[gemini]'
 export GEMINI_API_KEY='...'
-python Examples/audio-agent/audio_agent.py --provider gemini --source Discord
+python Examples/audio-agent/audio_agent.py --provider gemini --source 'Google Chrome' --debug
 ```
+
+Gemini mode keeps Gemini's automatic VAD enabled and adds local end detection.
+After at least 250 ms of meaningful activity, 1,200 ms below the end threshold
+sends one `audio_stream_end`; additional silence is suppressed until meaningful
+activity begins again. `--debug` reports local activity edges, stream-end sends,
+Gemini response starts/turn completion, and raw returned-audio byte counts.
+Readable output transcription is printed normally. Tune application audio with:
+
+```sh
+python Examples/audio-agent/audio_agent.py \
+  --provider gemini --source 'Google Chrome' --debug \
+  --gemini-start-threshold 0.015 \
+  --gemini-end-threshold 0.008 \
+  --gemini-min-activity-ms 250 \
+  --gemini-silence-ms 1200
+```
+
+The start/end thresholds are normalized PCM RMS values. Raise them when steady
+background audio opens turns; lower them when quiet speech is missed. Keep the
+end threshold below the start threshold. A custom `VoiceActivityDetector` can
+be supplied to `GeminiLiveSink` when energy thresholds are insufficient.
 
 Provider modes select their required Sonexis format preset automatically. No credential or captured audio is logged or stored unless `--output` is explicitly supplied. Recordings are created as private regular files (`0600`), and symbolic-link targets are refused.
 

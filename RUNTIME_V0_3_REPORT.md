@@ -103,10 +103,17 @@ No authenticated OpenAI network call was made during this milestone.
 `GeminiLiveSink` is independently optional. It requests 16 kHz mono PCM16,
 sends raw audio blobs with the declared media type, handles text/transcription
 and returned audio events, enforces stream affinity/order, and has the same
-bounded lifecycle behavior. Mocked transport and response handling are tested.
+bounded lifecycle behavior. Its hybrid VAD retains server automatic VAD while
+using configurable local activity hysteresis to send one `audio_stream_end`
+per meaningful pause. Output audio transcription is enabled. Mocked transport,
+turn segmentation, cancellation, and response handling are tested.
 
-No authenticated Gemini network call was made during this milestone; model
-availability must be selected for the developer's account.
+Authenticated live validation completed on 2026-09-26 using Google Chrome as a
+real Process Tap source. Sonexis detected local activity start and end, sent
+exactly one `audio_stream_end`, received a Gemini response that correctly
+referenced the commentary's actual content, printed its readable output
+transcription, observed Gemini turn completion, and reported zero dropped
+frames.
 
 ## 9. MCP status
 
@@ -194,6 +201,12 @@ The final validation completed on 2026-09-25:
   identifier `com.sonexis.runtime`, version `0.3.0`, and Apple Development
   authority were verified from the built executable.
 
+The Gemini hybrid-VAD follow-up completed on 2026-09-26: 39/39 Python SDK tests
+passed on both Python 3.9.6 and 3.14.7, the mocked adapter benchmark passed, the
+installed Google Gen AI SDK accepted the automatic-VAD/transcription/system
+instruction configuration, and the authenticated Chrome-to-Gemini live path
+passed with zero drops.
+
 ## 15. Independent review findings
 
 Five independent review roles examined the stable implementation.
@@ -245,8 +258,10 @@ All high- and medium-confidence findings were addressed and regressions rerun.
 - Target termination/relaunch and output-device changes during those live
   multi-source captures.
 - Permission denial/revocation transitions under current macOS TCC UI.
-- Authenticated OpenAI and Gemini sessions, including current model selection,
-  quota failure, network interruption, response audio, and cancellation.
+- Authenticated OpenAI sessions, including current model selection, response
+  audio, and cancellation.
+- Gemini quota failure, network interruption, and provider-side cancellation
+  behavior; the normal authenticated Chrome-to-Gemini path is validated.
 - End-to-end MCP host use with a real agent client.
 
 ## 18. Files and major modules added

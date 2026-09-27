@@ -97,17 +97,35 @@ official server WebSocket guide:
 python -m pip install -e 'SDKs/python[gemini]'
 export GEMINI_API_KEY='...'
 export GEMINI_LIVE_MODEL='gemini-3.8-live'  # optional/current model selection
-python Examples/audio-agent/audio_agent.py --provider gemini --source Discord
+python Examples/audio-agent/audio_agent.py \
+  --provider gemini --source 'Google Chrome' --debug
 ```
 
 `AudioFormat.gemini_live()` requests raw mono PCM16LE at 16 kHz. The adapter
 uses `send_realtime_input` with `audio/pcm;rate=16000`, matching Google's Live
 API capability guide: <https://ai.google.dev/gemini-api/docs/live-api/capabilities>.
 
+The Gemini adapter keeps server automatic VAD enabled and adds edge-triggered
+local turn finalization for application audio. A short confirmed activity onset
+opens a segment; a configurable meaningful pause sends exactly one
+`audio_stream_end`; post-finalization silence is suppressed until activity
+resumes. `GeminiTurnDetectionConfig` controls start/end RMS thresholds, minimum
+activity, and silence duration, and applications can inject a
+`VoiceActivityDetector` when energy detection is insufficient. Output audio
+transcription is enabled so the reference application prints readable model
+responses even when the response modality is audio.
+
+The authenticated live path was validated on 2026-09-26 with Google Chrome:
+local activity start/end were detected, exactly one `audio_stream_end` was
+sent, Gemini understood and referenced the captured commentary, readable output
+transcription arrived, the Gemini turn completed, and Sonexis reported zero
+dropped frames.
+
 Both adapters require Python 3.10+, accept one ordered source stream per sink,
 and accept injected sessions/transports for credential-free tests.
-Provider connection, availability, quota, response latency, and model behavior
-still require manual validation with the developer's account.
+OpenAI network behavior and provider failure cases still require manual
+validation with the developer's account. Gemini's normal authenticated path is
+validated; quota failure and network-interruption behavior remain manual.
 
 ## Reference audio agent
 

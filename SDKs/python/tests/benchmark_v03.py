@@ -14,7 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from sonexis import AudioFormat, ReplayStream
-from sonexis.providers import GeminiLiveSink, OpenAIRealtimeSink
+from sonexis.providers import (GeminiLiveSink, GeminiTurnDetectionConfig,
+                               OpenAIRealtimeSink)
 
 
 class _DiscardingOpenAIInput:
@@ -150,7 +151,9 @@ async def main():
         gemini_session = _GeminiSession()
         gemini = await _run_pipeline(
             path, AudioFormat.gemini_live(), arguments.chunk_frames,
-            GeminiLiveSink(gemini_session, blob_factory=lambda **value: value))
+            GeminiLiveSink(
+                gemini_session, blob_factory=lambda **value: value,
+                turn_detection=GeminiTurnDetectionConfig(enabled=False)))
         gemini["submitted_bytes"] = gemini_session.bytes
 
         slow = await _bounded_slow_consumer(

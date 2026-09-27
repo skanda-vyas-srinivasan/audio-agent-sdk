@@ -98,12 +98,13 @@ python -m pip install -e 'SDKs/python[gemini]'
 
 ```python
 from sonexis import AudioFormat, Sonexis
-from sonexis.providers import OpenAIRealtimeSink
+from sonexis.providers import GeminiLiveSink, GeminiTurnDetectionConfig
 
 async with Sonexis() as sx:
-    async with await OpenAIRealtimeSink.connect() as model:
+    turns = GeminiTurnDetectionConfig(silence_duration_ms=1200)
+    async with await GeminiLiveSink.connect(turn_detection=turns) as model:
         async with await sx.capture(
-            "Discord", format=AudioFormat.openai_realtime()
+            "Google Chrome", format=AudioFormat.gemini_live()
         ) as stream:
             async for frame in stream:
                 await model.send_audio(frame)
@@ -113,6 +114,13 @@ OpenAI reads `OPENAI_API_KEY`; Gemini reads `GEMINI_API_KEY` and optionally
 `GEMINI_LIVE_MODEL`. Each sink accepts one ordered Sonexis stream; create one
 sink per source label. No adapter logs or persists audio or credentials. Network
 behavior must be validated with the developer's own provider account.
+
+Gemini uses hybrid VAD by default: server automatic VAD remains enabled while
+the adapter buffers a short activity onset and sends one `audio_stream_end`
+after a debounced local pause. Silence after finalization is not transmitted,
+and new meaningful activity reopens the stream. Configure start/end RMS,
+minimum activity, and silence duration with `GeminiTurnDetectionConfig`, or
+inject the SDK's `VoiceActivityDetector` extension for speech-aware detection.
 
 ## Replay, activity, and diagnostics
 

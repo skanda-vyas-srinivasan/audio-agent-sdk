@@ -25,9 +25,15 @@ from sonexis import (
 )
 from sonexis.providers import (
     GeminiLiveSink,
+    GeminiTurnDetectionConfig,
     OpenAIRealtimeSink,
     ProviderEvent,
     RealtimeAudioSink,
+)
+
+
+GEMINI_SYSTEM_INSTRUCTION = (
+    "Respond in English. Briefly summarize or respond to the audio you just heard."
 )
 
 
@@ -162,6 +168,16 @@ def parse_args() -> argparse.Namespace:
                         help="pace replay according to recorded timestamps")
     parser.add_argument("--non-interactive", action="store_true",
                         help="disable switch/quit prompt (requires --source for live capture)")
+    parser.add_argument("--debug", action="store_true",
+                        help="show provider lifecycle and raw output-audio diagnostics")
+    parser.add_argument("--gemini-start-threshold", type=float, default=0.015,
+                        help="normalized RMS required to begin local Gemini activity")
+    parser.add_argument("--gemini-end-threshold", type=float, default=0.008,
+                        help="normalized RMS below which Gemini silence accumulates")
+    parser.add_argument("--gemini-min-activity-ms", type=float, default=250.0,
+                        help="activity required before opening a Gemini turn")
+    parser.add_argument("--gemini-silence-ms", type=float, default=1_200.0,
+                        help="continuous local silence required to finalize a Gemini turn")
     return parser.parse_args()
 
 
@@ -169,7 +185,19 @@ async def create_sink(args: argparse.Namespace) -> RealtimeAudioSink:
     if args.provider == "openai":
         return await OpenAIRealtimeSink.connect()
     if args.provider == "gemini":
-        return await GeminiLiveSink.connect()
+        turn_detection = GeminiTurnDetectionConfig(
+            activity_start_threshold=args.gemini_start_threshold,
+            activity_end_threshold=args.gemini_end_threshold,
+            minimum_activity_ms=args.gemini_min_activity_ms,
+            silence_duration_ms=args.gemini_silence_ms,
+        )
+        debug_callback = ((lambda message: print(f"\nGemini debug: {message}"))
+                          if args.debug else None)
+        return await GeminiLiveSink.connect(
+            system_instruction=GEMINI_SYSTEM_INSTRUCTION,
+            turn_detection=turn_detection,
+            debug_callback=debug_callback,
+        )
     return MockRealtimeSink(AudioFormat(
         args.sample_rate, args.channels, SampleFormat.PCM_S16LE))
 
@@ -193,14 +221,20 @@ async def choose_source(client: Sonexis, selector: Optional[str] = None):
         raise RuntimeError("Invalid source selection") from error
 
 
-async def print_provider_events(sink: RealtimeAudioSink, done: asyncio.Event) -> None:
+async def print_provider_events(
+    sink: RealtimeAudioSink,
+    done: asyncio.Event,
+    *,
+    debug: bool = False,
+) -> None:
     try:
         async for event in sink.events():
             if event.text:
                 print(f"\nAgent ({event.provider}): {event.text}")
-            elif event.audio:
+            if event.audio and debug:
                 print(f"\nAgent ({event.provider}): received {len(event.audio)} audio bytes")
-            elif event.type not in {"session.started", "session.updated"}:
+            if (debug and not event.text and not event.audio
+                    and event.type not in {"session.started", "session.updated"}):
                 print(f"\nProvider event: {event.type}")
     except ProviderError as error:
         print(f"\nProvider receive failed: {error.message} (retryable={error.retryable})")
@@ -368,7 +402,8 @@ async def main() -> None:
     sink = await create_sink(args)
     try:
         output = OutputWriter(args.output, sink.required_format)
-        provider_events = asyncio.create_task(print_provider_events(sink, done))
+        provider_events = asyncio.create_task(
+            print_provider_events(sink, done, debug=args.debug))
         try:
             if args.replay:
                 await run_replay(args, sink, output, done)

@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import importlib.util
+import io
 import os
 import struct
 import sys
@@ -19,7 +21,8 @@ from sonexis import (AmbiguousSourceError, AudioFormat, AudioFrame, AudioSource,
                      SonexisProtocolError, SourceNotFoundError, measure_activity)
 from sonexis.diagnostics import send_receipt
 from sonexis.mcp_control import SonexisControlTools
-from sonexis.providers import GeminiLiveSink, OpenAIRealtimeSink
+from sonexis.providers import (GeminiLiveSink, GeminiTurnDetectionConfig,
+                               OpenAIRealtimeSink)
 
 from test_sdk import FakeRuntime
 from sonexis import Sonexis
@@ -340,6 +343,32 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                           b"\0" * (160 * format.channels * format.sample_format.bytes_per_sample),
                           source=source_value, session_id="session")
 
+    def pcm_frame(self, sequence, amplitude, frame_count=1_600):
+        base = self.frame(AudioFormat.gemini_live())
+        sample = max(-32768, min(32767, round(amplitude * 32767)))
+        return replace(base, sequence=sequence, frame_count=frame_count,
+                       timestamp_ns=(sequence - 1) * 100_000_000,
+                       data=struct.pack("<h", sample) * frame_count)
+
+    @staticmethod
+    def turn_config(**overrides):
+        values = {
+            "activity_start_threshold": 0.02,
+            "activity_end_threshold": 0.01,
+            "minimum_activity_ms": 200,
+            "silence_duration_ms": 300,
+        }
+        values.update(overrides)
+        return GeminiTurnDetectionConfig(**values)
+
+    def test_gemini_keeps_server_vad_and_output_transcription_enabled(self):
+        instruction = "Respond in English."
+        config = GeminiLiveSink._connection_config(None, instruction)
+        self.assertFalse(config["realtime_input_config"]
+                         ["automatic_activity_detection"]["disabled"])
+        self.assertEqual(config["output_audio_transcription"], {})
+        self.assertEqual(config["system_instruction"], instruction)
+
     async def test_openai_audio_encoding_and_format_validation(self):
         connection = FakeOpenAIConnection()
         sink = OpenAIRealtimeSink(connection)
@@ -357,7 +386,9 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_gemini_blob_and_stream_end(self):
         session = FakeGeminiSession()
-        sink = GeminiLiveSink(session, blob_factory=lambda **value: value)
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value,
+            turn_detection=GeminiTurnDetectionConfig(enabled=False))
         await sink.send_audio(self.frame(AudioFormat.gemini_live()))
         self.assertEqual(session.values[0]["audio"]["mime_type"], "audio/pcm;rate=16000")
         session.received.append(SimpleNamespace(server_content=SimpleNamespace(
@@ -366,6 +397,99 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((event.type, event.text), ("output_transcription", "hello"))
         await sink.aclose()
         self.assertTrue(session.values[-1]["audio_stream_end"])
+
+    async def test_gemini_hybrid_vad_finalizes_once_per_activity_segment(self):
+        session = FakeGeminiSession()
+        debug = []
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value,
+            turn_detection=self.turn_config(), debug_callback=debug.append)
+
+        sequence = 1
+        for amplitude in [0.2, 0.2, 0.0, 0.0, 0.0] + [0.0] * 10:
+            await sink.send_audio(self.pcm_frame(sequence, amplitude))
+            sequence += 1
+
+        endings = [value for value in session.values if value.get("audio_stream_end")]
+        self.assertEqual(len(endings), 1)
+        self.assertEqual(debug.count("local activity start"), 1)
+        self.assertEqual(debug.count("local activity end"), 1)
+        self.assertEqual(debug.count("audio_stream_end sent"), 1)
+        await sink.aclose()
+        self.assertEqual(len([value for value in session.values
+                              if value.get("audio_stream_end")]), 1)
+
+    async def test_gemini_hybrid_vad_ignores_short_mid_sentence_pause(self):
+        session = FakeGeminiSession()
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value,
+            turn_detection=self.turn_config())
+        for sequence, amplitude in enumerate([0.2, 0.2, 0.0, 0.0, 0.2], 1):
+            await sink.send_audio(self.pcm_frame(sequence, amplitude))
+        self.assertFalse(any(value.get("audio_stream_end") for value in session.values))
+        await sink.aclose()
+
+    async def test_gemini_hybrid_vad_reopens_for_new_speech(self):
+        session = FakeGeminiSession()
+        debug = []
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value,
+            turn_detection=self.turn_config(), debug_callback=debug.append)
+        amplitudes = ([0.2, 0.2, 0.0, 0.0, 0.0]
+                      + [0.2, 0.2, 0.0, 0.0, 0.0])
+        for sequence, amplitude in enumerate(amplitudes, 1):
+            await sink.send_audio(self.pcm_frame(sequence, amplitude))
+        self.assertEqual(len([value for value in session.values
+                              if value.get("audio_stream_end")]), 2)
+        self.assertEqual(debug.count("local activity start"), 2)
+        await sink.aclose()
+
+    async def test_gemini_hybrid_vad_background_noise_does_not_repeat_end(self):
+        session = FakeGeminiSession()
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value,
+            turn_detection=self.turn_config())
+        for sequence in range(1, 101):
+            await sink.send_audio(self.pcm_frame(sequence, 0.012))
+        self.assertEqual(session.values, [])
+        await sink.aclose()
+        self.assertEqual(session.values, [])
+
+    async def test_gemini_hybrid_vad_cancellation_during_activity(self):
+        session = FakeGeminiSession()
+        started = asyncio.Event()
+
+        async def blocked_send(**value):
+            if "audio" in value:
+                started.set()
+                await asyncio.Event().wait()
+            session.values.append(value)
+
+        session.send_realtime_input = blocked_send
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value,
+            turn_detection=self.turn_config(minimum_activity_ms=100))
+        sending = asyncio.create_task(sink.send_audio(self.pcm_frame(1, 0.2)))
+        await started.wait()
+        sending.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await sending
+        await sink.aclose()
+        self.assertFalse(any(value.get("audio_stream_end") for value in session.values))
+
+    async def test_gemini_output_transcription_and_turn_debug_events(self):
+        session = FakeGeminiSession()
+        debug = []
+        session.received.append(SimpleNamespace(server_content=SimpleNamespace(
+            output_transcription=SimpleNamespace(text="A concise English response."),
+            model_turn=SimpleNamespace(parts=[]), turn_complete=True)))
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value, debug_callback=debug.append)
+        event = await sink.events().__anext__()
+        self.assertEqual(event.type, "output_transcription")
+        self.assertEqual(event.text, "A concise English response.")
+        self.assertEqual(debug, ["Gemini response start", "Gemini turn complete"])
+        await sink.aclose()
 
     async def test_provider_stream_affinity_and_bounded_close(self):
         connection = FakeOpenAIConnection()
@@ -474,6 +598,39 @@ class OutputSecurityTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.module.OutputWriter(link, AudioFormat.speech_16k())
             self.assertEqual(target.read_bytes(), b"private")
+
+    def test_reference_gemini_instruction_is_stable(self):
+        self.assertEqual(
+            self.module.GEMINI_SYSTEM_INSTRUCTION,
+            "Respond in English. Briefly summarize or respond to the audio you just heard.")
+
+
+class ReferenceProviderOutputTests(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).parents[3] / "Examples/audio-agent/audio_agent.py"
+        spec = importlib.util.spec_from_file_location("sonexis_audio_agent_output", path)
+        assert spec is not None and spec.loader is not None
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    async def test_raw_provider_audio_is_debug_only(self):
+        class Sink:
+            async def events(self):
+                yield self_event
+
+        from sonexis.providers import ProviderEvent
+        self_event = ProviderEvent("gemini", "message", audio=b"audio")
+        quiet_output = io.StringIO()
+        with contextlib.redirect_stdout(quiet_output):
+            await self.module.print_provider_events(Sink(), asyncio.Event())
+        self.assertEqual(quiet_output.getvalue(), "")
+
+        debug_output = io.StringIO()
+        with contextlib.redirect_stdout(debug_output):
+            await self.module.print_provider_events(
+                Sink(), asyncio.Event(), debug=True)
+        self.assertIn("received 5 audio bytes", debug_output.getvalue())
 
 
 if __name__ == "__main__":
