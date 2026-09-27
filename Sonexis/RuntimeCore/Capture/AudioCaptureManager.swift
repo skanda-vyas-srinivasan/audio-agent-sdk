@@ -24,7 +24,7 @@ final class AudioCaptureManager: @unchecked Sendable {
         do {
             try session.start()
         } catch {
-            queue.sync { sessions.removeValue(forKey: session.id) }
+            _ = queue.sync { sessions.removeValue(forKey: session.id) }
             throw error
         }
         return session
