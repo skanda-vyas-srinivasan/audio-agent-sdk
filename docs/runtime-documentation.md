@@ -32,6 +32,7 @@ here instead of reading Runtime implementation files.
 ## Operations
 
 - Diagnostics, trust model, and troubleshooting: [Runtime guide](sonexis-runtime.md)
+- Current human/device/provider checks: [1.0 manual validation](runtime-v1.0-manual-validation.md)
 - v0.6 routing validation: [manual guide](runtime-v0.6-manual-validation.md)
 - Bidirectional live validation: [v0.4 manual guide](runtime-v0.4-manual-validation.md)
 - Virtual device decision: [design record](virtual-audio-device-design.md)
@@ -39,5 +40,6 @@ here instead of reading Runtime implementation files.
 ## Release records
 
 Plans and reports record what was actually built and tested; they are not API
-specifications. Use the newest `RUNTIME_V0_*_REPORT.md` for current automated
-evidence and `CHANGELOG.md` for the concise evolution history.
+specifications. Use `RUNTIME_V1_0_REPORT.md` for current automated evidence,
+the [post-1.0 roadmap](runtime-post-1.0-roadmap.md) for deferred work, and
+`CHANGELOG.md` for the concise evolution history.
