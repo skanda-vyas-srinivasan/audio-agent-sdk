@@ -97,17 +97,40 @@ duplicating commit history.
 
 ## Testing
 
-Focused validation during implementation:
+The complete release gate was run twice from clean commits. The final run used
+source commit `fae764c268257a22f20b59c27ccfd48232054af4` and passed:
 
-- Runtime protocol v2 round-trip and malformed-frame tests;
-- Runtime capture and output core tests;
-- Runtime socket integration tests;
-- Python SDK tests;
-- TypeScript compile and test suite;
-- version-consistency and diff checks.
+- Sonexis application Debug clean build and every offline application
+  regression suite;
+- Runtime protocol, capture core, output core, socket integration, malformed
+  input, fuzz, and lifecycle suites;
+- 1,000 capture cycles, 1,000 output cycles, 100 burst cycles, 200 reconnects,
+  and 16 parallel sessions in 1.521 seconds, with two file descriptors of
+  bounded harness/runtime growth;
+- the same workload under Thread Sanitizer in 4.112 seconds, plus concurrent
+  output-ring flush/read/write validation and focused application TSan;
+- all 85 Python SDK tests and all 27 TypeScript tests;
+- public example smoke tests;
+- clean Python wheel/source-distribution and TypeScript tarball installation;
+- signed universal Runtime and CLI Release builds, stable bundle identifiers,
+  `NSAudioCaptureUsageDescription`, deployment target 14.4, and version checks;
+- development install/start/status/restart/stop/uninstall lifecycle;
+- reproducible local artifact creation and independent verification;
+- intentional hash tampering, unexpected inventory, dishonest manifest, and
+  symlink attacks were all rejected by the verifier.
 
-Release-gate results, artifact paths, and exact aggregate test counts are
-recorded here after the final clean gate rather than predicted.
+Measured non-TSan retained RSS growth was 6,242,304 bytes (peak 12,926,976
+bytes). Measured TSan retained RSS growth was 42,434,560 bytes (peak 96,108,544
+bytes). These are bounded end-of-process harness measurements, not long-lived
+production memory guarantees. The release gate ended with `Sonexis Runtime
+release gate passed`.
+
+The system Python's legacy setuptools emitted advisory `setup.py` metadata and
+old-pip in-tree-build notices. Modern `pyproject.toml` package metadata,
+artifact verification, and clean-install validation passed; no private author
+email was added merely to silence the legacy warning. Existing application
+linker duplicate-rpath/AppIntents notices are outside the Runtime changes and
+did not fail the build.
 
 ## Independent reviews
 
@@ -124,7 +147,8 @@ Three read-only v0.9 reviews were performed before the freeze work:
   security coverage.
 
 Credible findings were addressed without changing the audio data planes or
-breaking protocol v2. A final follow-up review is part of the release gate.
+breaking protocol v2. The final release gate verified the resulting public
+surface, packages, documentation, and artifacts.
 
 ## Security and privacy
 
@@ -169,8 +193,14 @@ for Developer ID signing and notarization.
 - `021c41d` — plan v0.9 public beta.
 - `f76de29` — define v0.9 public beta artifacts and policy.
 - `3b31113` — preserve exact session and event counters.
+- `c796171` — freeze v0.9 public contracts and documentation.
+- `9af3bfe` — close Python and TypeScript public API freeze gaps.
+- `e401e6c` — harden artifact creation and independent verification.
+- `4daa36c` — add the release report and integrate the release gate.
+- `fae764c` — eliminate the final Runtime capture cleanup build warning.
 
-The final checkpoint commit is recorded after the release report is complete.
+The report-only public-beta checkpoint follows these tested implementation
+commits; `fae764c` is the exact source revision exercised by the final gate.
 
 ## Next milestone
 
