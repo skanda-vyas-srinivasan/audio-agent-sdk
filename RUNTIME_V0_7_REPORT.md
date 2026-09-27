@@ -245,9 +245,10 @@ extra, set `GEMINI_API_KEY`, and replace `--provider mock` with
 - `b1ee03a` — add agent integration documentation and examples
 - `4152c52` — isolate stream activity and propagate reference failures
 - `da63d05` — close independent review gaps
+- `600b4af` — finalize the v0.7 report and release checkpoint
 
-The implementation and release-gate HEAD before this report is
-`da63d057b41b0c409d32b51ca4093ea0f6d45931`.
+The clean v0.7 release checkpoint is
+`600b4afec7ef259ef33f599c8584f7abf99f0b5b`.
 
 ## Next milestone
 
