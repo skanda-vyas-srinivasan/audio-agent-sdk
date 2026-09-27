@@ -43,7 +43,7 @@ installs copies into an explicit per-user development prefix. Default prefix:
 ~/Library/Application Support/SonexisRuntime/dev/
   bin/sonexis-runtime
   bin/sonexisctl
-  manifest.json
+  manifest.plist
 ```
 
 The script will accept an override for tests, stage into a sibling temporary
