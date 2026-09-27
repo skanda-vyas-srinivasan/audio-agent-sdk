@@ -13,6 +13,7 @@ Implementation checkpoints:
 - `3113444` — reliability diagnostics and soak infrastructure
 - `5ef9c0a` — independent-review hardening
 - `37cd98a` — cross-Python cancellation-fixture correction
+- `b34b1382e0439834d583795624c7780765757464` — v0.8 release checkpoint
 
 ## Reliability changes
 
@@ -146,4 +147,3 @@ v0.9 should inventory and classify every public protocol/SDK/CLI/MCP surface,
 align cross-language names, write the compatibility policy, organize product
 documentation, and create reproducible signed/package artifacts as the API
 freeze candidate. It should avoid new audio features.
-
