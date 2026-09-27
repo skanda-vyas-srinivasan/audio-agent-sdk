@@ -201,12 +201,16 @@ public final class RuntimeHALPlaybackBackend: RuntimeOutputBackend, @unchecked S
     public init() {}
 
     public func availableOutputDestinations() throws -> [RuntimeOutputDestinationDTO] {
-        let defaultID = try CoreAudioSupport.defaultOutputDevice()
         var destinations: [RuntimeOutputDestinationDTO] = []
-        if let value = try destination(deviceID: defaultID, id: "default",
-                                       name: "Default macOS Output", isDefault: true,
-                                       followsSystemDefault: true) {
+        if let defaultID = try? CoreAudioSupport.defaultOutputDevice(),
+           let value = try? destination(deviceID: defaultID, id: "default",
+                name: "Default macOS Output", isDefault: true,
+                followsSystemDefault: true) {
             destinations.append(value)
+        } else {
+            destinations.append(RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+                name: "Default macOS Output", isAvailable: false, isDefault: true,
+                followsSystemDefault: true))
         }
         let devices = try CoreAudioSupport.audioDeviceIDs()
         for deviceID in devices {
@@ -216,7 +220,11 @@ public final class RuntimeHALPlaybackBackend: RuntimeOutputBackend, @unchecked S
                     isDefault: false, followsSystemDefault: false) else { continue }
             destinations.append(value)
         }
-        return destinations
+        let defaultDestination = destinations.removeFirst()
+        let fixed = Dictionary(grouping: destinations, by: \.id).compactMap {
+            $0.value.first
+        }.sorted { $0.id < $1.id }
+        return [defaultDestination] + fixed
     }
 
     public func startOutput(destinationID: String, format: RuntimePCMFormatDTO,
@@ -239,28 +247,45 @@ public final class RuntimeHALPlaybackBackend: RuntimeOutputBackend, @unchecked S
         let native = try CoreAudioSupport.streamVirtualFormat(stream)
         let deviceFormat = try Self.validatedDeviceFormat(native)
         let nativeFormat = RuntimePCMFormatDTO(sampleRate: deviceFormat.sampleRate,
-            channelCount: UInt16(deviceFormat.channels), sampleFormat: .float32LE)
-        let signature = "\(summary.name) \(summary.uid)".lowercased()
-        let looksVirtual = signature.contains("sonexis") || signature.contains("blackhole")
-            || signature.contains("loopback") || signature.contains("soundflower")
+            channelCount: UInt16(deviceFormat.channels), sampleFormat: .float32LE,
+            interleaved: !native.isNonInterleaved)
         let hasInput = !(try CoreAudioSupport.inputStreamIDs(deviceID)).isEmpty
         return RuntimeOutputDestinationDTO(id: id,
-            kind: id != "default" && looksVirtual && hasInput ? .virtualInput : .playback,
+            kind: Self.classifyDestination(name: summary.name, uid: summary.uid,
+                hasInput: hasInput),
             name: name, isAvailable: true, isDefault: isDefault,
-            followsSystemDefault: followsSystemDefault, activeDeviceName: summary.name,
+            followsSystemDefault: followsSystemDefault,
+            activeDeviceID: "coreaudio:\(summary.uid)", activeDeviceName: summary.name,
             nativeFormat: nativeFormat)
+    }
+
+    static func classifyDestination(name: String, uid: String,
+                                    hasInput: Bool) -> RuntimeOutputDestinationKindDTO {
+        guard hasInput else { return .playback }
+        let signature = "\(name) \(uid)".lowercased()
+        return signature.contains("sonexis") || signature.contains("blackhole")
+            || signature.contains("loopback") || signature.contains("soundflower")
+            ? .virtualInput : .playback
     }
 
     static func validatedDeviceFormat(_ format: AudioStreamBasicDescription) throws
         -> (sampleRate: UInt32, channels: UInt32) {
-        guard format.isFloat32LinearPCM, format.mSampleRate.isFinite,
+        let channels = format.mChannelsPerFrame
+        let isNonInterleaved = format.isNonInterleaved
+        let expectedBytesPerFrame: UInt32 = isNonInterleaved ? 4 : 4 * channels
+        guard format.isFloat32LinearPCM,
+              (format.mFormatFlags & kAudioFormatFlagIsPacked) != 0,
+              format.mSampleRate.isFinite,
               (8_000...192_000).contains(format.mSampleRate),
-              (1...2).contains(format.mChannelsPerFrame) else {
+              (1...2).contains(channels),
+              format.mFramesPerPacket == 1,
+              format.mBytesPerFrame == expectedBytesPerFrame,
+              format.mBytesPerPacket == expectedBytesPerFrame else {
             throw RuntimeErrorDTO(code: "unsupported_output_device_format",
                 message: "Output device format is outside the supported realtime bounds",
                 retryable: true)
         }
-        return (UInt32(format.mSampleRate.rounded()), format.mChannelsPerFrame)
+        return (UInt32(format.mSampleRate.rounded()), channels)
     }
 }
 
@@ -330,6 +355,7 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
     private var conversionBatches: UInt64 = 0
     private var conversionNanoseconds: UInt64 = 0
     private var routeChanges: UInt64 = 0
+    private var routeChangeScheduled = false
     private var lateFrames: UInt64 = 0
     private var lastTimestamp: UInt64?
 
@@ -585,21 +611,31 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         try installDeviceFormatListeners(deviceID: deviceID, streamIDs: streams)
     }
 
-    private func teardownRoute() {
+    @discardableResult
+    private func teardownRoute() -> UInt64 {
+        ingestLock.lock()
+        defer { ingestLock.unlock() }
+        return teardownRouteWithIngestLockHeld()
+    }
+
+    /// Tears down the HAL route while the non-realtime ingest path is paused.
+    /// The realtime callback observes its retained ring until AudioDeviceStop
+    /// and IOProc destruction have quiesced it.
+    @discardableResult
+    private func teardownRouteWithIngestLockHeld() -> UInt64 {
         routeLock.lock()
-        guard let old = route else { routeLock.unlock(); return }
+        guard let old = route else { routeLock.unlock(); return 0 }
         route = nil
         routeLock.unlock()
         removeDeviceFormatListeners()
-        ingestLock.lock()
-        defer { ingestLock.unlock() }
         old.ring.setReadEnabled(false)
+        let discarded = UInt64(old.ring.fillFrames)
         _ = AudioDeviceStop(old.deviceID, old.ioProcID)
         let destroyStatus = AudioDeviceDestroyIOProcID(old.deviceID, old.ioProcID)
         routeLock.lock()
         archivedRendered &+= old.ring.renderedFrames
         archivedEnqueued &+= old.ring.writtenFrames
-        archivedDropped &+= old.ring.droppedFrames &+ UInt64(old.ring.fillFrames)
+        archivedDropped &+= old.ring.droppedFrames &+ discarded
         archivedUnderflows &+= old.ring.underflowFrames
         routeLock.unlock()
         if destroyStatus == noErr {
@@ -607,13 +643,14 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         }
         // On destroy failure the retained callback context deliberately owns
         // the ring forever. Leaking is safer than freeing HAL-visible memory.
+        return discarded
     }
 
     private func installDeviceFormatListeners(deviceID: AudioDeviceID,
                                               streamIDs: [AudioObjectID]) throws {
         removeDeviceFormatListeners()
         let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.handleRouteChange()
+            self?.scheduleRouteChange()
         }
         var registrations: [(AudioObjectID, AudioObjectPropertyAddress)] = [
             (deviceID, AudioObjectPropertyAddress(
@@ -663,7 +700,7 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.handleRouteChange()
+            self?.scheduleRouteChange()
         }
         try checkOSStatus(AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, lifecycleQueue, listener),
@@ -720,18 +757,36 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         }
     }
 
+    private func scheduleRouteChange() {
+        guard !routeChangeScheduled else { return }
+        routeChangeScheduled = true
+        lifecycleQueue.asyncAfter(deadline: .now() + .milliseconds(75)) { [weak self] in
+            guard let self else { return }
+            self.routeChangeScheduled = false
+            self.handleRouteChange()
+        }
+    }
+
     private func handleRouteChange() {
         routeLock.lock()
         let isRunning = running
         routeLock.unlock()
         guard isRunning else { return }
-        teardownRoute()
+        // Writers are briefly backpressured on the non-realtime ingest lock so
+        // they never observe the intentional nil route between HAL devices.
+        ingestLock.lock()
+        let discarded = teardownRouteWithIngestLockHeld()
         do {
             try buildRoute()
             routeLock.lock(); routeChanges &+= 1; routeLock.unlock()
+            ingestLock.unlock()
             onEvent(RuntimeOutputBackendEvent(kind: .destinationChanged,
-                message: "Playback followed the current default output device"))
+                frames: discarded,
+                message: followsSystemDefault
+                    ? "Playback followed the current default output device"
+                    : "Playback rebuilt after the selected device format changed"))
         } catch {
+            ingestLock.unlock()
             stopInternal(notify: true, error: RuntimeErrorDTO(
                 code: "output_device_change_failed", message: String(describing: error),
                 retryable: true))

@@ -25,7 +25,7 @@ def build_server(socket_path: Optional[str], allow_capture: bool):
         raise SystemExit("Install the Sonexis 'mcp' extra; MCP requires Python 3.10+") from error
 
     server = MCPServer("Sonexis Runtime")
-    client = Sonexis(socket_path, client_name="sonexis-mcp", client_version="0.5.0")
+    client = Sonexis(socket_path, client_name="sonexis-mcp", client_version="0.6.0")
     tools = SonexisControlTools(client, allow_capture=allow_capture)
 
     async def ensure_connected() -> None:

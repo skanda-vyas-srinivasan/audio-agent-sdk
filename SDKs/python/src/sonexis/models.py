@@ -165,6 +165,7 @@ class AudioOutputDestination:
     available: bool
     is_default: bool
     follows_system_default: bool
+    active_device_id: Optional[str]
     active_device_name: Optional[str]
     native_format: Optional[AudioFormat]
     supported_formats: List[AudioFormat]
@@ -184,6 +185,7 @@ class AudioOutputDestination:
             bool(value.get("is_available", value.get("available", False))),
             bool(value.get("is_default", False)),
             bool(value.get("follows_system_default", False)),
+            str(value["active_device_id"]) if value.get("active_device_id") else None,
             str(value["active_device_name"]) if value.get("active_device_name") else None,
             AudioFormat.from_wire(native) if native else None,
             [AudioFormat.from_wire(item) for item in formats],
@@ -356,6 +358,7 @@ class RuntimeEvent:
     source_id: Optional[str] = None
     session_id: Optional[str] = None
     stream_id: Optional[str] = None
+    output_destination_id: Optional[str] = None
     message: Optional[str] = None
     dropped_frames: Optional[int] = None
     sequence: Optional[int] = None
@@ -364,6 +367,7 @@ class RuntimeEvent:
     session: Optional[CaptureInfo] = None
     error: Optional[RuntimeErrorInfo] = None
     output_session: Optional[OutputInfo] = None
+    output_destination: Optional[AudioOutputDestination] = None
 
     @classmethod
     def from_wire(cls, value: Dict[str, Any]) -> "RuntimeEvent":
@@ -375,7 +379,9 @@ class RuntimeEvent:
         return cls(
             str(value["event_id"]), str(value["type"]),
             int(value["timestamp_nanoseconds"]), value.get("source_id"),
-            value.get("session_id"), value.get("stream_id"), value.get("message"),
+            value.get("session_id"), value.get("stream_id"),
+            value.get("output_destination_id"),
+            value.get("message"),
             int(value["dropped_frames"]) if value.get("dropped_frames") is not None else None,
             int(value["event_sequence"]) if value.get("event_sequence") is not None else None,
             int(value.get("dropped_events_before", 0)),
@@ -383,6 +389,8 @@ class RuntimeEvent:
             CaptureInfo.from_wire(value["session"]) if value.get("session") else None,
             RuntimeErrorInfo.from_wire(value["error"]) if value.get("error") else None,
             OutputInfo.from_wire(value["output_session"]) if value.get("output_session") else None,
+            AudioOutputDestination.from_wire(value["output_destination"])
+            if value.get("output_destination") else None,
         )
 
 

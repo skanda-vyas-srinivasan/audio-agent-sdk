@@ -6,6 +6,7 @@ import { createServer, Server, Socket } from "node:net";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import {
+  AmbiguousOutputDestinationError,
   AudioFormats,
   AudioOutput,
   AudioOutputDestination,
@@ -13,7 +14,10 @@ import {
   DuplexSession,
   encodeOutputFrame,
   OutputInfo,
+  OutputDestinationNotFoundError,
   RuntimeEventTypes,
+  filterOutputDestinations,
+  resolveOutputDestination,
   Sonexis,
   SonexisError,
 } from "../src/index.js";
@@ -21,6 +25,29 @@ import {
 test("default event set includes v0.4 output lifecycle events", () => {
   assert.ok(RuntimeEventTypes.includes("output_failed"));
   assert.ok(RuntimeEventTypes.includes("output_destination_changed"));
+  assert.ok(RuntimeEventTypes.includes("output_default_changed"));
+});
+
+test("resolves output destinations without silently choosing loopback devices", () => {
+  const format = AudioFormats.openAIRealtime();
+  const destinations: AudioOutputDestination[] = [
+    { id: "default", kind: "playback", name: "System Default", is_available: true,
+      is_default: true, follows_system_default: true,
+      active_device_id: "coreaudio:speakers", supported_formats: [format] },
+    { id: "coreaudio:a", kind: "virtual_input", name: "BlackHole 2ch",
+      is_available: true, is_default: false, follows_system_default: false,
+      supported_formats: [format] },
+    { id: "coreaudio:b", kind: "virtual_input", name: "BLACKHOLE 2CH",
+      is_available: true, is_default: false, follows_system_default: false,
+      supported_formats: [format] },
+  ];
+  assert.equal(resolveOutputDestination(destinations, "default").id, "default");
+  assert.equal(resolveOutputDestination(destinations, "BlackHole 2ch").id, "coreaudio:a");
+  assert.equal(filterOutputDestinations(destinations, { kind: "virtual_input" }).length, 2);
+  assert.throws(() => resolveOutputDestination(destinations, "loopback"),
+    AmbiguousOutputDestinationError);
+  assert.throws(() => resolveOutputDestination(destinations, "missing"),
+    OutputDestinationNotFoundError);
 });
 
 interface FakeRuntimeOptions {

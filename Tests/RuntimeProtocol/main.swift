@@ -47,6 +47,43 @@ do {
         from: RuntimeProtocolCodec.encodeLine(outputSession))
     expect(decodedOutput == outputSession, "output session did not round trip")
 
+    let oldDefault = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+        name: "Default Output", isAvailable: true, isDefault: true,
+        followsSystemDefault: true, activeDeviceID: "coreaudio:built-in",
+        activeDeviceName: "Built-in Output")
+    let newDefault = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+        name: "Default Output", isAvailable: true, isDefault: true,
+        followsSystemDefault: true, activeDeviceID: "coreaudio:headphones",
+        activeDeviceName: "Headphones")
+    let loopback = RuntimeOutputDestinationDTO(id: "coreaudio:blackhole", kind: .virtualInput,
+        name: "BlackHole 2ch", isAvailable: true)
+    let diff = RuntimeOutputDestinationDiff(
+        previous: [oldDefault.id: oldDefault],
+        current: [newDefault.id: newDefault, loopback.id: loopback])
+    expect(diff.added == [loopback], "destination addition was not detected")
+    expect(diff.removed.isEmpty, "destination removal was invented")
+    expect(diff.updated.isEmpty, "default route change also emitted a generic update")
+    expect(diff.defaultChanged == newDefault, "default route change was not detected")
+
+    let renamedLoopback = RuntimeOutputDestinationDTO(id: loopback.id, kind: .virtualInput,
+        name: "BlackHole Stereo", isAvailable: true)
+    let metadataDiff = RuntimeOutputDestinationDiff(
+        previous: [loopback.id: loopback], current: [renamedLoopback.id: renamedLoopback])
+    expect(metadataDiff.updated == [renamedLoopback] && metadataDiff.defaultChanged == nil,
+        "destination metadata update was not isolated")
+
+    let destinationEvent = RuntimeEventDTO(type: .outputDefaultChanged,
+        outputDestination: newDefault)
+    let decodedDestinationEvent = try RuntimeProtocolCodec.decodeLine(RuntimeEventDTO.self,
+        from: RuntimeProtocolCodec.encodeLine(destinationEvent))
+    expect(decodedDestinationEvent == destinationEvent,
+        "output destination event did not round trip")
+
+    let removal = RuntimeOutputDestinationDiff(
+        previous: [oldDefault.id: oldDefault, loopback.id: loopback],
+        current: [oldDefault.id: oldDefault])
+    expect(removal.removed == [loopback], "destination removal was not detected")
+
     let source = RuntimeSourceDTO(id: "app.example", processID: 42,
         bundleIdentifier: "com.example", name: "Example")
     let sourceLine = try RuntimeProtocolCodec.encodeLine(source)

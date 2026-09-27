@@ -72,7 +72,7 @@ private struct Arguments {
             case "--destination":
                 index += 1
                 guard index < values.count, !values[index].isEmpty else {
-                    throw RuntimeErrorDTO(code: "usage", message: "--destination requires an ID")
+                    throw RuntimeErrorDTO(code: "usage", message: "--destination requires an ID or exact name")
                 }
                 destination = values[index]
             case "--target-buffer-ms":
@@ -146,7 +146,7 @@ private struct Arguments {
       sonexisctl stop <session-id> [--json]
       sonexisctl watch [--json]
       sonexisctl outputs [--json]
-      sonexisctl play <file.wav|file.pcm> [--destination ID] [--target-buffer-ms 20...250] \
+      sonexisctl play <file.wav|file.pcm> [--destination ID|NAME] [--target-buffer-ms 20...250] \
         [--sample-rate Hz] [--channels 1|2] [--sample-format pcm_s16le|float32_le] [--debug]
       sonexisctl output-status <session-id> [--json]
       sonexisctl output-stop <session-id> [--json]
@@ -170,6 +170,30 @@ private func printOutputSession(_ session: RuntimeOutputSessionDTO) {
     let latency = metrics.estimatedOutputLatencyMilliseconds
         .map { String(format: "%.2f", $0) } ?? "unavailable"
     print("output_session=\(session.id) stream=\(session.streamID) state=\(session.state.rawValue) destination=\(session.destinationID) format=\(session.format.sampleFormat.rawValue)/\(session.format.sampleRate)Hz/\(session.format.channelCount)ch device_format=\(device) received=\(metrics.inputFramesReceived) enqueued=\(metrics.deviceFramesEnqueued) rendered=\(metrics.deviceFramesRendered) dropped=\(metrics.droppedFrames) late=\(metrics.lateFrames) underruns=\(metrics.underrunEvents) overruns=\(metrics.overrunEvents) queue_frames=\(metrics.queueDepthFrames) buffered_ms=\(String(format: "%.2f", metrics.bufferedMilliseconds)) estimated_output_latency_ms=\(latency) conversion_us=\(String(format: "%.2f", metrics.averageConversionMicroseconds))")
+}
+
+private func resolveOutputDestination(_ selector: String,
+                                      from values: [RuntimeOutputDestinationDTO]) throws
+    -> RuntimeOutputDestinationDTO {
+    let available = values.filter(\.isAvailable)
+    var candidates = available.filter { $0.id == selector }
+    if candidates.isEmpty { candidates = available.filter { $0.name == selector } }
+    if candidates.isEmpty {
+        candidates = available.filter { $0.name.caseInsensitiveCompare(selector) == .orderedSame }
+    }
+    if candidates.isEmpty, ["loopback", "virtual_input"].contains(selector.lowercased()) {
+        candidates = available.filter { $0.kind == .virtualInput }
+    }
+    guard !candidates.isEmpty else {
+        throw RuntimeErrorDTO(code: "output_destination_not_found",
+            message: "No available output destination matches \(selector)", retryable: true)
+    }
+    guard candidates.count == 1 else {
+        throw RuntimeErrorDTO(code: "ambiguous_output_destination",
+            message: "Output destination \(selector) is ambiguous; use one of: "
+                + candidates.map(\.id).sorted().joined(separator: ", "))
+    }
+    return candidates[0]
 }
 
 private struct AudioFilePayload {
@@ -373,16 +397,24 @@ do {
     case "outputs":
         let destinations = try client.listOutputDestinations()
         if arguments.json { try printJSON(destinations); break }
-        print("ID                          STATUS     DESTINATION")
+        print("ID                          KIND           STATUS     DESTINATION")
         for destination in destinations {
-            print("\(destination.id.padding(toLength: 27, withPad: " ", startingAt: 0)) \((destination.isAvailable ? "available" : "missing").padding(toLength: 10, withPad: " ", startingAt: 0)) \(destination.name)\(destination.activeDeviceName.map { " (\($0))" } ?? "")")
+            let resolved = destination.activeDeviceID.map { " [\($0)]" } ?? ""
+            print("\(destination.id.padding(toLength: 27, withPad: " ", startingAt: 0)) \(destination.kind.rawValue.padding(toLength: 14, withPad: " ", startingAt: 0)) \((destination.isAvailable ? "available" : "missing").padding(toLength: 10, withPad: " ", startingAt: 0)) \(destination.name)\(destination.activeDeviceName.map { " (\($0))" } ?? "")\(resolved)")
         }
     case "play":
         guard let path = arguments.value else {
             throw RuntimeErrorDTO(code: "usage", message: Arguments.usage)
         }
         let audio = try loadAudioFile(path: path, rawFormat: arguments.format)
-        let session = try client.startOutput(destinationID: arguments.destination,
+        let destination = try resolveOutputDestination(arguments.destination,
+            from: client.listOutputDestinations())
+        guard destination.supportedFormats.isEmpty
+                || destination.supportedFormats.contains(audio.format) else {
+            throw RuntimeErrorDTO(code: "unsupported_output_format",
+                message: "\(destination.name) does not advertise support for the input format")
+        }
+        let session = try client.startOutput(destinationID: destination.id,
             format: audio.format,
             targetBufferMilliseconds: arguments.targetBufferMilliseconds)
         if !arguments.json { printOutputSession(session) }

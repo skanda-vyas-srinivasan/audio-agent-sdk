@@ -8,20 +8,24 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Set, TYPE_CHECKING, Union
 
-from .errors import (AmbiguousSourceError, CaptureFailedError, SonexisConnectionError,
-                     SonexisError, SonexisProtocolError, SourceNotFoundError)
+from .errors import (AmbiguousOutputDestinationError, AmbiguousSourceError,
+                     CaptureFailedError, OutputDestinationNotFoundError,
+                     SonexisConnectionError, SonexisError, SonexisProtocolError,
+                     SourceNotFoundError, UnsupportedFormatError)
 from .models import (AudioFormat, AudioFrame, AudioOutputDestination, AudioSource,
                      CaptureInfo, Handshake, OutputInfo, RuntimeEvent, RuntimeStatus)
 from .protocol import FLAG_EOS, MAX_CONTROL_BYTES, PROTOCOL_VERSION, read_frame
 
 SourceSelector = Union[str, int, AudioSource]
+OutputDestinationSelector = Union[str, AudioOutputDestination]
 
 RUNTIME_EVENT_TYPES = (
     "source_added", "source_removed", "source_updated", "capture_started",
     "capture_stopped", "capture_failed", "client_warning", "device_changed",
     "runtime_warning", "runtime_shutting_down", "output_started", "output_stopped",
     "output_cancelled", "output_failed", "output_underrun", "output_overrun",
-    "output_dropped", "output_destination_changed",
+    "output_dropped", "output_destination_changed", "output_destination_added",
+    "output_destination_removed", "output_destination_updated", "output_default_changed",
 )
 
 if TYPE_CHECKING:
@@ -33,7 +37,7 @@ class Sonexis:
     """A reusable asynchronous connection to the local Sonexis Runtime."""
 
     def __init__(self, socket_path: Optional[str] = None, *, client_name: str = "sonexis-python",
-                 client_version: str = "0.5.0") -> None:
+                 client_version: str = "0.6.0") -> None:
         self.socket_path = socket_path or os.environ.get(
             "SONEXIS_RUNTIME_SOCKET", f"/tmp/sonexis-runtime-{os.getuid()}/control.sock")
         self.client_name = client_name
@@ -397,10 +401,110 @@ class Sonexis:
                 "Runtime sent malformed output destinations",
             ) from error
 
+    async def find_output_destinations(
+        self,
+        query: Optional[str] = None,
+        *,
+        destination_id: Optional[str] = None,
+        name: Optional[str] = None,
+        kind: Optional[str] = None,
+        available_only: bool = True,
+    ) -> List[AudioOutputDestination]:
+        """Return output destinations matching explicit fields or a text query."""
+        matches: List[AudioOutputDestination] = []
+        folded_query = query.casefold() if query is not None else None
+        for destination in await self.output_destinations():
+            if available_only and not destination.available:
+                continue
+            if destination_id is not None and destination.id != destination_id:
+                continue
+            if name is not None and destination.name != name:
+                continue
+            if kind is not None and destination.kind != kind:
+                continue
+            if folded_query is not None and not any(
+                folded_query in value.casefold()
+                for value in (destination.id, destination.name,
+                              destination.active_device_name or "")
+            ):
+                continue
+            matches.append(destination)
+        return matches
+
+    async def get_output_destination(
+        self,
+        selector: Optional[OutputDestinationSelector] = "default",
+        *,
+        kind: Optional[str] = None,
+    ) -> AudioOutputDestination:
+        """Resolve an output ID, exact name, kind alias, or typed object uniquely."""
+        available = [destination for destination in await self.output_destinations()
+                     if destination.available]
+        if selector is None:
+            candidates = available
+        elif isinstance(selector, AudioOutputDestination):
+            candidates = [destination for destination in available
+                          if destination.id == selector.id]
+        else:
+            candidates = [destination for destination in available
+                          if destination.id == selector]
+            if not candidates:
+                candidates = [destination for destination in available
+                              if destination.name == selector]
+            if not candidates:
+                folded = selector.casefold()
+                candidates = [destination for destination in available
+                              if destination.name.casefold() == folded]
+            if not candidates and selector.casefold() in ("loopback", "virtual_input"):
+                candidates = [destination for destination in available
+                              if destination.kind == "virtual_input"]
+        if kind is not None:
+            candidates = [destination for destination in candidates
+                          if destination.kind == kind]
+        if not candidates:
+            raise OutputDestinationNotFoundError(
+                "output_destination_not_found",
+                f"No available output destination matches {selector!r}", retryable=True)
+        if len(candidates) > 1:
+            details = {f"candidate_{index}": destination.id
+                       for index, destination in enumerate(candidates, 1)}
+            raise AmbiguousOutputDestinationError(
+                "ambiguous_output_destination",
+                f"Output destination selector {selector!r} is ambiguous",
+                details=details)
+        return candidates[0]
+
+    async def wait_for_output_destination(
+        self,
+        selector: Optional[OutputDestinationSelector] = None,
+        *,
+        kind: Optional[str] = None,
+        timeout: Optional[float] = None,
+        poll_interval: float = 0.25,
+    ) -> AudioOutputDestination:
+        """Wait until a fresh, uniquely resolved output destination is available."""
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be positive")
+        deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+        while True:
+            try:
+                return await self.get_output_destination(selector, kind=kind)
+            except OutputDestinationNotFoundError:
+                if deadline is not None:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise OutputDestinationNotFoundError(
+                            "output_destination_wait_timeout",
+                            f"Timed out waiting for output destination {selector!r}",
+                            retryable=True)
+                    await asyncio.sleep(min(poll_interval, remaining))
+                else:
+                    await asyncio.sleep(poll_interval)
+
     async def create_output(
         self,
         *,
-        destination: Union[str, AudioOutputDestination] = "default",
+        destination: OutputDestinationSelector = "default",
         format: AudioFormat = AudioFormat.openai_realtime_output(),
         target_buffer_milliseconds: int = 60,
     ) -> "AudioOutput":
@@ -410,11 +514,16 @@ class Sonexis:
         self._require_output_capability()
         if not 20 <= target_buffer_milliseconds <= 250:
             raise ValueError("target_buffer_milliseconds must be between 20 and 250")
-        destination_id = (
-            destination.id if isinstance(destination, AudioOutputDestination) else destination)
+        resolved_destination = await self.get_output_destination(destination)
+        if (resolved_destination.supported_formats
+                and format not in resolved_destination.supported_formats):
+            raise UnsupportedFormatError(
+                "unsupported_output_format",
+                f"{resolved_destination.name} does not advertise support for {format!r}",
+                details={"destination_id": resolved_destination.id})
         response = await self._request(
             "start_output",
-            destination_id=destination_id,
+            destination_id=resolved_destination.id,
             format=format.to_wire(),
             target_buffer_milliseconds=target_buffer_milliseconds,
         )
@@ -434,7 +543,7 @@ class Sonexis:
     async def playback(
         self,
         *,
-        destination: Union[str, AudioOutputDestination] = "default",
+        destination: OutputDestinationSelector = "default",
         format: AudioFormat = AudioFormat.openai_realtime_output(),
         target_buffer_milliseconds: int = 60,
     ) -> "AudioOutput":

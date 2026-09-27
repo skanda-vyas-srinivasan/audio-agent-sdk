@@ -40,13 +40,15 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
     private let eventHub: RuntimeEventHub
     private let acceptQueue = DispatchQueue(label: "com.sonexis.runtime.control.accept")
     private let clientQueue = DispatchQueue(label: "com.sonexis.runtime.control.clients", attributes: .concurrent)
-    private let monitorQueue = DispatchQueue(label: "com.sonexis.runtime.source-monitor")
+    private let monitorQueue = DispatchQueue(label: "com.sonexis.runtime.endpoint-monitor")
     private let stateLock = NSLock()
     private let startedAt = DispatchTime.now().uptimeNanoseconds
     private var clients: [String: UnixSocketConnection] = [:]
     private var listener: UnixSocketListener?
-    private var sourceTimer: DispatchSourceTimer?
+    private var endpointTimer: DispatchSourceTimer?
     private var sourceSnapshot: [String: RuntimeSourceDTO] = [:]
+    private var destinationSnapshot: [String: RuntimeOutputDestinationDTO] = [:]
+    private var destinationMonitorError: String?
     private var generation: UInt64 = 0
 
     public init(socketDirectory: URL = RuntimeSocketPaths.userDefault.directory,
@@ -93,10 +95,12 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
         coordinator.prepareForShutdown()
         outputCoordinator.prepareForShutdown()
         monitorQueue.sync {
-            sourceTimer?.setEventHandler {}
-            sourceTimer?.cancel()
-            sourceTimer = nil
+            endpointTimer?.setEventHandler {}
+            endpointTimer?.cancel()
+            endpointTimer = nil
             sourceSnapshot.removeAll()
+            destinationSnapshot.removeAll()
+            destinationMonitorError = nil
         }
         coordinator.stopAll()
         outputCoordinator.stopAll()
@@ -327,10 +331,14 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             self.stateLock.unlock()
             guard shouldStart else { return }
             self.refreshSources(publishChanges: false)
+            self.refreshDestinations(publishChanges: false)
             let timer = DispatchSource.makeTimerSource(queue: self.monitorQueue)
             timer.schedule(deadline: .now() + 1, repeating: .seconds(1), leeway: .milliseconds(100))
-            timer.setEventHandler { [weak self] in self?.refreshSources(publishChanges: true) }
-            self.sourceTimer = timer
+            timer.setEventHandler { [weak self] in
+                self?.refreshSources(publishChanges: true)
+                self?.refreshDestinations(publishChanges: true)
+            }
+            self.endpointTimer = timer
             timer.resume()
         }
     }
@@ -356,6 +364,51 @@ public final class SonexisRuntimeServer: @unchecked Sendable {
             eventHub.publish(RuntimeEventDTO(type: .runtimeWarning,
                 message: "Source discovery failed", error: RuntimeErrorDTO(
                     code: "source_discovery_failed", message: String(describing: error), retryable: true)))
+        }
+    }
+
+    private func refreshDestinations(publishChanges: Bool) {
+        do {
+            let destinations = try outputCoordinator.availableDestinations()
+            var next: [String: RuntimeOutputDestinationDTO] = [:]
+            for destination in destinations {
+                guard next[destination.id] == nil else {
+                    throw RuntimeErrorDTO(code: "duplicate_output_destination",
+                        message: "Output discovery returned duplicate destination ID \(destination.id)")
+                }
+                next[destination.id] = destination
+            }
+            if publishChanges {
+                let diff = RuntimeOutputDestinationDiff(
+                    previous: destinationSnapshot, current: next)
+                for destination in diff.added {
+                    eventHub.publish(RuntimeEventDTO(type: .outputDestinationAdded,
+                        outputDestinationID: destination.id, outputDestination: destination))
+                }
+                for destination in diff.removed {
+                    eventHub.publish(RuntimeEventDTO(type: .outputDestinationRemoved,
+                        outputDestinationID: destination.id, outputDestination: destination))
+                }
+                for destination in diff.updated {
+                    eventHub.publish(RuntimeEventDTO(type: .outputDestinationUpdated,
+                        outputDestinationID: destination.id, outputDestination: destination))
+                }
+                if let destination = diff.defaultChanged {
+                    eventHub.publish(RuntimeEventDTO(type: .outputDefaultChanged,
+                        outputDestinationID: destination.id, outputDestination: destination))
+                }
+            }
+            destinationSnapshot = next
+            destinationMonitorError = nil
+        } catch {
+            let description = String(describing: error)
+            guard publishChanges else { return }
+            guard destinationMonitorError != description else { return }
+            destinationMonitorError = description
+            eventHub.publish(RuntimeEventDTO(type: .runtimeWarning,
+                message: "Output destination discovery failed", error: RuntimeErrorDTO(
+                    code: "output_destination_discovery_failed", message: description,
+                    retryable: true)))
         }
     }
 }

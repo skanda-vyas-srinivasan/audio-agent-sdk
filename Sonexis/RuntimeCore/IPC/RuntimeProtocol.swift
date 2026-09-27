@@ -2,12 +2,12 @@ import Foundation
 
 public enum RuntimeProtocolInfo {
     public static let protocolVersion = 2
-    public static let runtimeVersion = "0.5.0"
+    public static let runtimeVersion = "0.6.0"
     public static let capabilities = [
         "application_sources", "capture_sessions", "event_stream", "format_negotiation",
         "multiple_sessions", "pcm_v2", "runtime_diagnostics", "output_sessions",
         "output_destinations", "output_pcm_v2", "output_backpressure", "output_flush",
-        "default_device_playback",
+        "default_device_playback", "output_destination_events",
     ]
 }
 
@@ -367,13 +367,17 @@ public struct RuntimeOutputDestinationDTO: Codable, Equatable, Sendable {
     public let isAvailable: Bool
     public let isDefault: Bool
     public let followsSystemDefault: Bool
+    /// Stable semantic endpoint ID for the device currently backing an alias.
+    /// This deliberately never exposes an AudioObjectID.
+    public let activeDeviceID: String?
     public let activeDeviceName: String?
     public let nativeFormat: RuntimePCMFormatDTO?
     public let supportedFormats: [RuntimePCMFormatDTO]
 
     public init(id: String, kind: RuntimeOutputDestinationKindDTO, name: String,
                 isAvailable: Bool, isDefault: Bool = false,
-                followsSystemDefault: Bool = false, activeDeviceName: String? = nil,
+                followsSystemDefault: Bool = false, activeDeviceID: String? = nil,
+                activeDeviceName: String? = nil,
                 nativeFormat: RuntimePCMFormatDTO? = nil,
                 supportedFormats: [RuntimePCMFormatDTO] = RuntimePCMFormatDTO.supported) {
         self.id = id
@@ -382,9 +386,38 @@ public struct RuntimeOutputDestinationDTO: Codable, Equatable, Sendable {
         self.isAvailable = isAvailable
         self.isDefault = isDefault
         self.followsSystemDefault = followsSystemDefault
+        self.activeDeviceID = activeDeviceID
         self.activeDeviceName = activeDeviceName
         self.nativeFormat = nativeFormat
         self.supportedFormats = supportedFormats
+    }
+}
+
+/// A deterministic, non-realtime diff used by the Runtime's endpoint monitor.
+/// Removed destinations retain their last known snapshot so clients can present
+/// useful context while evicting them from their current registry.
+struct RuntimeOutputDestinationDiff: Equatable, Sendable {
+    let added: [RuntimeOutputDestinationDTO]
+    let removed: [RuntimeOutputDestinationDTO]
+    let updated: [RuntimeOutputDestinationDTO]
+    let defaultChanged: RuntimeOutputDestinationDTO?
+
+    init(previous: [String: RuntimeOutputDestinationDTO],
+         current: [String: RuntimeOutputDestinationDTO]) {
+        added = current.values.filter { previous[$0.id] == nil }.sorted { $0.id < $1.id }
+        removed = previous.values.filter { current[$0.id] == nil }.sorted { $0.id < $1.id }
+        let oldDefault = previous["default"]
+        let newDefault = current["default"]
+        let routeChanged = oldDefault?.activeDeviceID != newDefault?.activeDeviceID
+            && oldDefault != nil && newDefault != nil
+        updated = current.values.filter {
+            guard let old = previous[$0.id] else { return false }
+            return old != $0 && !($0.id == "default" && routeChanged)
+        }.sorted { $0.id < $1.id }
+
+        defaultChanged = routeChanged
+            ? newDefault
+            : nil
     }
 }
 
@@ -516,6 +549,10 @@ public enum RuntimeEventTypeDTO: String, Codable, CaseIterable, Sendable {
     case outputOverrun = "output_overrun"
     case outputDropped = "output_dropped"
     case outputDestinationChanged = "output_destination_changed"
+    case outputDestinationAdded = "output_destination_added"
+    case outputDestinationRemoved = "output_destination_removed"
+    case outputDestinationUpdated = "output_destination_updated"
+    case outputDefaultChanged = "output_default_changed"
 }
 
 public struct RuntimeEventDTO: Codable, Equatable, Sendable {
@@ -530,22 +567,26 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
     public let sourceID: String?
     public let sessionID: String?
     public let streamID: String?
+    public let outputDestinationID: String?
     public let source: RuntimeSourceDTO?
     public let session: RuntimeSessionDTO?
     public let message: String?
     public let error: RuntimeErrorDTO?
     public let droppedFrames: UInt64?
     public let outputSession: RuntimeOutputSessionDTO?
+    public let outputDestination: RuntimeOutputDestinationDTO?
 
     public init(type: RuntimeEventTypeDTO,
                 eventID: String = UUID().uuidString.lowercased(),
                 eventSequence: UInt64? = nil, droppedEventsBefore: UInt64? = nil,
                 timestampNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds,
                 sourceID: String? = nil, sessionID: String? = nil, streamID: String? = nil,
+                outputDestinationID: String? = nil,
                 source: RuntimeSourceDTO? = nil, session: RuntimeSessionDTO? = nil,
                 message: String? = nil, error: RuntimeErrorDTO? = nil,
                 droppedFrames: UInt64? = nil,
-                outputSession: RuntimeOutputSessionDTO? = nil) {
+                outputSession: RuntimeOutputSessionDTO? = nil,
+                outputDestination: RuntimeOutputDestinationDTO? = nil) {
         protocolVersion = RuntimeProtocolInfo.protocolVersion
         self.eventID = eventID
         self.eventSequence = eventSequence
@@ -555,21 +596,25 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
         self.sourceID = sourceID
         self.sessionID = sessionID
         self.streamID = streamID
+        self.outputDestinationID = outputDestinationID
         self.source = source
         self.session = session
         self.message = message
         self.error = error
         self.droppedFrames = droppedFrames
         self.outputSession = outputSession
+        self.outputDestination = outputDestination
     }
 
     public func delivered(sequence: UInt64, droppedEventsBefore: UInt64) -> Self {
         Self(type: type, eventID: eventID, eventSequence: sequence,
             droppedEventsBefore: droppedEventsBefore == 0 ? nil : droppedEventsBefore,
             timestampNanoseconds: timestampNanoseconds, sourceID: sourceID,
-            sessionID: sessionID, streamID: streamID, source: source, session: session,
+            sessionID: sessionID, streamID: streamID,
+            outputDestinationID: outputDestinationID,
+            source: source, session: session,
             message: message, error: error, droppedFrames: droppedFrames,
-            outputSession: outputSession)
+            outputSession: outputSession, outputDestination: outputDestination)
     }
 }
 

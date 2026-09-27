@@ -6,6 +6,58 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 do {
+    func deviceFormat(rate: Double, channels: UInt32,
+                      nonInterleaved: Bool = false) -> AudioStreamBasicDescription {
+        let bytes = nonInterleaved ? UInt32(4) : UInt32(4 * channels)
+        return AudioStreamBasicDescription(mSampleRate: rate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+                | (nonInterleaved ? kAudioFormatFlagIsNonInterleaved : 0),
+            mBytesPerPacket: bytes, mFramesPerPacket: 1,
+            mBytesPerFrame: bytes, mChannelsPerFrame: channels,
+            mBitsPerChannel: 32, mReserved: 0)
+    }
+
+    for rate in [8_000.0, 44_100.0, 48_000.0, 96_000.0, 192_000.0] {
+        for channels: UInt32 in [1, 2] {
+            for planar in [false, true] {
+                let validated = try RuntimeHALPlaybackBackend.validatedDeviceFormat(
+                    deviceFormat(rate: rate, channels: channels, nonInterleaved: planar))
+                expect(validated.sampleRate == UInt32(rate) && validated.channels == channels,
+                       "valid HAL layout was rejected")
+            }
+        }
+    }
+    for invalid in [7_999.0, 192_001.0] {
+        do {
+            _ = try RuntimeHALPlaybackBackend.validatedDeviceFormat(
+                deviceFormat(rate: invalid, channels: 1))
+            fatalError("out-of-range HAL sample rate was accepted")
+        } catch is RuntimeErrorDTO {}
+    }
+    var malformedStride = deviceFormat(rate: 48_000, channels: 2)
+    malformedStride.mBytesPerFrame = 4
+    do {
+        _ = try RuntimeHALPlaybackBackend.validatedDeviceFormat(malformedStride)
+        fatalError("malformed interleaved HAL stride was accepted")
+    } catch is RuntimeErrorDTO {}
+    var malformedPacket = deviceFormat(rate: 48_000, channels: 1)
+    malformedPacket.mFramesPerPacket = 2
+    do {
+        _ = try RuntimeHALPlaybackBackend.validatedDeviceFormat(malformedPacket)
+        fatalError("malformed HAL packet layout was accepted")
+    } catch is RuntimeErrorDTO {}
+
+    expect(RuntimeHALPlaybackBackend.classifyDestination(
+        name: "BlackHole 2ch", uid: "BlackHole2ch_UID", hasInput: true) == .virtualInput,
+        "BlackHole was not classified as a virtual input")
+    expect(RuntimeHALPlaybackBackend.classifyDestination(
+        name: "BlackHole 2ch", uid: "BlackHole2ch_UID", hasInput: false) == .playback,
+        "output-only device was classified as a virtual input")
+    expect(RuntimeHALPlaybackBackend.classifyDestination(
+        name: "USB Headset", uid: "usb-headset", hasInput: true) == .playback,
+        "ordinary duplex hardware was classified as loopback")
+
     var invalidDeviceFormat = AudioStreamBasicDescription()
     invalidDeviceFormat.mFormatID = kAudioFormatLinearPCM
     invalidDeviceFormat.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
@@ -161,6 +213,20 @@ do {
     let safeSamples = UnsafeBufferPointer(start: safeOutput.0, count: Int(safeOutput.1))
     expect(safeSamples.allSatisfy { $0.isFinite && (-1...1).contains($0) },
            "non-finite or out-of-range Float32 samples reached the playback ring")
+
+    let stereoFormat = RuntimePCMFormatDTO(sampleRate: 48_000, channelCount: 2)
+    let stereoPayload = [Int16(16_384), Int16(-16_384)].withUnsafeBytes { Data($0) }
+    let stereoHeader = RuntimePCMFrameHeader(payloadByteCount: UInt32(stereoPayload.count),
+        streamID: UUID(), sequence: 0, timestampNanoseconds: 0,
+        sampleRate: 48_000, frameCount: 1, channelCount: 2)
+    let stereoFrame = RuntimePCMFrame(header: stereoHeader, payload: stereoPayload)
+    let downmix = try RuntimePlaybackConverter(input: stereoFormat,
+        deviceSampleRate: 48_000, deviceChannels: 1).convert(stereoFrame)
+    expect(abs(downmix.0[0]) < 0.0001, "stereo downmix did not average left and right")
+    let preserve = try RuntimePlaybackConverter(input: stereoFormat,
+        deviceSampleRate: 48_000, deviceChannels: 2).convert(stereoFrame)
+    expect(preserve.0[0] > 0.49 && preserve.0[1] < -0.49,
+        "stereo conversion did not preserve channel identity")
 
     print("Runtime output core tests passed")
 } catch {

@@ -10,10 +10,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from sonexis import (AudioFormat, AudioOutput, AudioOutputDestination, OutputInfo,
+from sonexis import (AmbiguousOutputDestinationError, AudioFormat, AudioOutput,
+                     AudioOutputDestination, OutputDestinationNotFoundError, OutputInfo,
                      OutputFailedError, OutputMetrics, RuntimeEvent, SampleFormat,
-                     Sonexis, SonexisError)
+                     Sonexis, SonexisError, UnsupportedFormatError)
 from sonexis.protocol import FLAG_DISCONTINUITY, FLAG_EOS, PCM_HEADER, PCM_MAGIC
+
+
+OUTPUT_FORMATS = [
+    AudioFormat(), AudioFormat(24_000, 1), AudioFormat(48_000, 1),
+    AudioFormat(48_000, 2), AudioFormat(48_000, 1, SampleFormat.FLOAT32_LE),
+    AudioFormat(48_000, 2, SampleFormat.FLOAT32_LE),
+]
 
 
 class FakeOutputRuntime:
@@ -88,14 +96,14 @@ class FakeOutputRuntime:
                         "runtime_version": "0.4.0" if self.output_capability else "0.3.0",
                         "runtime_instance_id": "instance",
                         "capabilities": capabilities,
-                        "supported_formats": [AudioFormat.openai_realtime().to_wire()],
+                        "supported_formats": [value.to_wire() for value in OUTPUT_FORMATS],
                         "limits": {"maximum_output_sessions": 8},
                     }
                 elif command == "list_output_destinations":
                     response["output_destinations"] = [{
                         "id": "default", "name": "System Default", "kind": "default_device",
                         "is_available": True, "is_default": True,
-                        "supported_formats": [AudioFormat.openai_realtime().to_wire()],
+                        "supported_formats": [value.to_wire() for value in OUTPUT_FORMATS],
                     }]
                 elif command == "start_output":
                     response["output_session"] = self.session()
@@ -157,7 +165,7 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
             destination = destinations[0]
             self.assertIsInstance(destination, AudioOutputDestination)
             self.assertTrue(destination.is_default)
-            self.assertEqual(destination.supported_formats, [AudioFormat.openai_realtime()])
+            self.assertEqual(destination.supported_formats, OUTPUT_FORMATS)
 
             output = await client.playback(destination=destination)
             self.assertIn("output-session", repr(output))
@@ -281,6 +289,74 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 self.runtime.stream_paths[0] = original_path
             self.assertIn("stop_output", self.runtime.commands)
+
+    async def test_destination_resolution_ambiguity_wait_and_format_validation(self):
+        original_control = self.runtime._control
+
+        async def destinations_control(reader, writer):
+            try:
+                while line := await reader.readline():
+                    request = json.loads(line)
+                    self.runtime.commands.append(request["command"])
+                    response = {"message_type": "response", "protocol_version": 2,
+                        "response_id": str(uuid.uuid4()), "request_id": request["request_id"],
+                        "ok": True}
+                    if request["command"] == "hello":
+                        response["handshake"] = {"protocol_version": 2,
+                            "runtime_version": "0.6.0", "runtime_instance_id": "instance",
+                            "capabilities": ["output_sessions", "output_destination_events"],
+                            "supported_formats": [AudioFormat().to_wire()], "limits": {}}
+                    elif request["command"] == "list_output_destinations":
+                        response["output_destinations"] = [
+                            {"id": "default", "name": "System Default", "kind": "playback",
+                             "is_available": True, "is_default": True,
+                             "supported_formats": [AudioFormat.openai_realtime().to_wire()]},
+                            {"id": "coreaudio:a", "name": "BlackHole 2ch",
+                             "kind": "virtual_input", "is_available": True,
+                             "supported_formats": [AudioFormat().to_wire()]},
+                            {"id": "coreaudio:b", "name": "BLACKHOLE 2CH",
+                             "kind": "virtual_input", "is_available": True,
+                             "supported_formats": [AudioFormat().to_wire()]},
+                        ]
+                    else:
+                        response.update(ok=False, error={"code": "unexpected",
+                            "message": request["command"]})
+                    writer.write(json.dumps(response).encode() + b"\n")
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        await self.runtime.close()
+        self.runtime._control = destinations_control
+        self.runtime.control_server = await asyncio.start_unix_server(
+            self.runtime._control, self.runtime.control_path)
+        async with Sonexis(self.runtime.control_path) as client:
+            default = await client.get_output_destination("default")
+            self.assertEqual(default.name, "System Default")
+            exact = await client.get_output_destination("BlackHole 2ch")
+            self.assertEqual(exact.id, "coreaudio:a")
+            matches = await client.find_output_destinations(kind="virtual_input")
+            self.assertEqual([value.id for value in matches], ["coreaudio:a", "coreaudio:b"])
+            with self.assertRaises(AmbiguousOutputDestinationError):
+                await client.get_output_destination("loopback")
+            with self.assertRaises(OutputDestinationNotFoundError):
+                await client.wait_for_output_destination("missing", timeout=0.01,
+                                                         poll_interval=0.005)
+            with self.assertRaises(UnsupportedFormatError):
+                await client.playback(destination="default", format=AudioFormat())
+        self.runtime._control = original_control
+
+    def test_output_destination_event_retains_typed_destination(self):
+        event = RuntimeEvent.from_wire({
+            "protocol_version": 2, "event_id": "destination-event",
+            "type": "output_destination_added", "timestamp_nanoseconds": 123,
+            "output_destination": {"id": "coreaudio:a", "name": "BlackHole 2ch",
+                "kind": "virtual_input", "is_available": True,
+                "supported_formats": [AudioFormat().to_wire()]},
+        })
+        self.assertIsNotNone(event.output_destination)
+        self.assertEqual(event.output_destination.id, "coreaudio:a")
 
 
 class OutputHeaderTests(unittest.TestCase):

@@ -34,7 +34,8 @@ export const RuntimeEventTypes = Object.freeze([
   "capture_stopped", "capture_failed", "client_warning", "device_changed",
   "runtime_warning", "runtime_shutting_down", "output_started", "output_stopped",
   "output_cancelled", "output_failed", "output_underrun", "output_overrun",
-  "output_dropped", "output_destination_changed",
+  "output_dropped", "output_destination_changed", "output_destination_added",
+  "output_destination_removed", "output_destination_updated", "output_default_changed",
 ] as const);
 
 export interface AudioSource {
@@ -96,6 +97,7 @@ export interface AudioOutputDestination {
   is_available: boolean;
   is_default: boolean;
   follows_system_default: boolean;
+  active_device_id?: string;
   active_device_name?: string;
   native_format?: AudioFormat;
   supported_formats: AudioFormat[];
@@ -144,6 +146,15 @@ export interface OutputOptions {
   format?: AudioFormat;
   targetBufferMilliseconds?: number;
 }
+export type OutputDestinationSelector = string | AudioOutputDestination;
+export interface OutputDestinationFilter {
+  /** Case-insensitive substring matched against ID, name, and active device name. */
+  query?: string;
+  destinationId?: string;
+  name?: string;
+  kind?: OutputDestinationKind;
+  availableOnly?: boolean;
+}
 export interface OutputWriteOptions {
   timestampNs?: bigint | number;
   discontinuity?: boolean;
@@ -189,6 +200,7 @@ export interface RuntimeEvent {
   source_id?: string;
   session_id?: string;
   stream_id?: string;
+  output_destination_id?: string;
   message?: string;
   dropped_frames?: number;
   event_sequence?: number;
@@ -196,6 +208,7 @@ export interface RuntimeEvent {
   source?: AudioSource;
   session?: CaptureInfo;
   output_session?: OutputInfo;
+  output_destination?: AudioOutputDestination;
   error?: RuntimeErrorInfo;
 }
 export interface RuntimeStatus {
@@ -249,6 +262,21 @@ export class AmbiguousSourceError extends SonexisError {
   constructor(message: string, details: Record<string, string>) {
     super("ambiguous_source", message, false, details);
     this.name = "AmbiguousSourceError";
+  }
+}
+
+export class OutputDestinationNotFoundError extends SonexisError {
+  constructor(message: string, code = "output_destination_not_found",
+              details: Record<string, string> = {}) {
+    super(code, message, true, details);
+    this.name = "OutputDestinationNotFoundError";
+  }
+}
+
+export class AmbiguousOutputDestinationError extends SonexisError {
+  constructor(message: string, details: Record<string, string>) {
+    super("ambiguous_output_destination", message, false, details);
+    this.name = "AmbiguousOutputDestinationError";
   }
 }
 
@@ -314,6 +342,60 @@ export function resolveSource(sources: readonly AudioSource[], selector: SourceS
       [`candidate_${index + 1}`, source.id]));
     throw new AmbiguousSourceError(
       `Audio source selector ${formatSelector(selector)} is ambiguous`, details);
+  }
+  return candidates[0];
+}
+
+/** Filter an already-fetched output-destination snapshot. */
+export function filterOutputDestinations(destinations: readonly AudioOutputDestination[],
+                                         filter: OutputDestinationFilter = {})
+  : AudioOutputDestination[] {
+  const availableOnly = filter.availableOnly ?? true;
+  const query = filter.query?.toLowerCase();
+  return destinations.filter((destination) => {
+    if (availableOnly && !destination.is_available) return false;
+    if (filter.destinationId !== undefined && destination.id !== filter.destinationId) return false;
+    if (filter.name !== undefined && destination.name !== filter.name) return false;
+    if (filter.kind !== undefined && destination.kind !== filter.kind) return false;
+    if (query !== undefined && ![destination.id, destination.name,
+      destination.active_device_name ?? ""].some((value) => value.toLowerCase().includes(query))) {
+      return false;
+    }
+    return true;
+  });
+}
+
+/** Resolve an exact ID, exact name, kind alias, or typed destination uniquely. */
+export function resolveOutputDestination(destinations: readonly AudioOutputDestination[],
+                                         selector: OutputDestinationSelector | undefined = "default",
+                                         kind?: OutputDestinationKind): AudioOutputDestination {
+  const available = destinations.filter((destination) => destination.is_available);
+  let candidates: AudioOutputDestination[];
+  if (selector === undefined) {
+    candidates = available;
+  } else if (typeof selector !== "string") {
+    candidates = available.filter((destination) => destination.id === selector.id);
+  } else {
+    candidates = available.filter((destination) => destination.id === selector);
+    if (!candidates.length) candidates = available.filter((destination) => destination.name === selector);
+    if (!candidates.length) {
+      const folded = selector.toLowerCase();
+      candidates = available.filter((destination) => destination.name.toLowerCase() === folded);
+    }
+    if (!candidates.length && ["loopback", "virtual_input"].includes(selector.toLowerCase())) {
+      candidates = available.filter((destination) => destination.kind === "virtual_input");
+    }
+  }
+  if (kind !== undefined) candidates = candidates.filter((destination) => destination.kind === kind);
+  if (!candidates.length) {
+    throw new OutputDestinationNotFoundError(
+      `No available output destination matches ${JSON.stringify(selector)}`);
+  }
+  if (candidates.length > 1) {
+    const details = Object.fromEntries(candidates.map((destination, index) =>
+      [`candidate_${index + 1}`, destination.id]));
+    throw new AmbiguousOutputDestinationError(
+      `Output destination selector ${JSON.stringify(selector)} is ambiguous`, details);
   }
   return candidates[0];
 }
@@ -391,7 +473,7 @@ export class Sonexis extends EventEmitter {
     socket.on("error", (error) => this.handleDisconnect(socket, error));
     try {
       const response = await this.request("hello", {
-        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.5.0",
+        supported_protocol_versions: [2], client_name: "sonexis-typescript", client_version: "0.6.0",
       });
       const handshake = response.handshake as Handshake;
       if (handshake?.protocol_version !== 2) {
@@ -497,6 +579,39 @@ export class Sonexis extends EventEmitter {
     return response.output_destinations.map(parseOutputDestination);
   }
 
+  async findOutputDestinations(filter: OutputDestinationFilter = {})
+    : Promise<AudioOutputDestination[]> {
+    return filterOutputDestinations(await this.outputDestinations(), filter);
+  }
+
+  async getOutputDestination(selector: OutputDestinationSelector | undefined = "default",
+                             kind?: OutputDestinationKind): Promise<AudioOutputDestination> {
+    return resolveOutputDestination(await this.outputDestinations(), selector, kind);
+  }
+
+  async waitForOutputDestination(selector?: OutputDestinationSelector,
+                                 options: { kind?: OutputDestinationKind; timeoutMs?: number;
+                                   pollIntervalMs?: number; signal?: AbortSignal } = {})
+    : Promise<AudioOutputDestination> {
+    const pollIntervalMs = options.pollIntervalMs ?? 250;
+    if (!(pollIntervalMs > 0)) throw new RangeError("pollIntervalMs must be positive");
+    const deadline = options.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs;
+    while (true) {
+      try { return await this.getOutputDestination(selector, options.kind); }
+      catch (error) {
+        if (!(error instanceof OutputDestinationNotFoundError)) throw error;
+        const remaining = deadline === undefined ? undefined : deadline - Date.now();
+        if (remaining !== undefined && remaining <= 0) {
+          throw new OutputDestinationNotFoundError(
+            `Timed out waiting for output destination ${JSON.stringify(selector)}`,
+            "output_destination_wait_timeout");
+        }
+        await delay(remaining === undefined ? pollIntervalMs : Math.min(pollIntervalMs, remaining),
+          options.signal);
+      }
+    }
+  }
+
   /** Create and attach a bounded client-to-Runtime PCM output stream. */
   async createOutput(options: OutputOptions = {}): Promise<AudioOutput> {
     this.requireOutputCapability();
@@ -505,11 +620,17 @@ export class Sonexis extends EventEmitter {
         || targetBufferMilliseconds < 20 || targetBufferMilliseconds > 250) {
       throw new RangeError("targetBufferMilliseconds must be an integer between 20 and 250");
     }
-    const destinationId = typeof options.destination === "string"
-      ? options.destination : options.destination?.id ?? "default";
+    const destination = await this.getOutputDestination(options.destination ?? "default");
+    const format = options.format ?? AudioFormats.openAIRealtimeOutput();
+    if (destination.supported_formats.length
+        && !destination.supported_formats.some((candidate) => sameAudioFormat(candidate, format))) {
+      throw new SonexisError("unsupported_output_format",
+        `${destination.name} does not advertise support for the requested format`, false,
+        { destination_id: destination.id });
+    }
     const response = await this.request("start_output", {
-      destination_id: destinationId,
-      format: options.format ?? AudioFormats.openAIRealtimeOutput(),
+      destination_id: destination.id,
+      format,
       target_buffer_milliseconds: targetBufferMilliseconds,
     });
     let info: OutputInfo;
@@ -1047,11 +1168,19 @@ function parseOutputDestination(value: unknown): AudioOutputDestination {
     is_available: booleanField(record, "is_available"),
     is_default: booleanField(record, "is_default"),
     follows_system_default: booleanField(record, "follows_system_default"),
+    active_device_id: optionalStringField(record, "active_device_id"),
     active_device_name: optionalStringField(record, "active_device_name"),
     native_format: record.native_format === undefined || record.native_format === null
       ? undefined : parseAudioFormat(record.native_format),
     supported_formats: formats.map(parseAudioFormat),
   };
+}
+
+function sameAudioFormat(left: AudioFormat, right: AudioFormat): boolean {
+  return left.sample_rate === right.sample_rate
+    && left.channel_count === right.channel_count
+    && left.sample_format === right.sample_format
+    && left.interleaved === right.interleaved;
 }
 
 function parseOutputInfo(value: unknown): OutputInfo {

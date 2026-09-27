@@ -117,10 +117,19 @@ private final class FakeOutputSession: RuntimeBackendOutputSession, @unchecked S
 }
 
 private final class FakeOutputBackend: RuntimeOutputBackend, @unchecked Sendable {
+    private let lock = NSLock()
+    private var destinations = [RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+        name: "Synthetic Output", isAvailable: true, isDefault: true,
+        followsSystemDefault: true, activeDeviceID: "coreaudio:synthetic-a",
+        activeDeviceName: "Synthetic A")]
+
     func availableOutputDestinations() throws -> [RuntimeOutputDestinationDTO] {
-        [RuntimeOutputDestinationDTO(id: "default", kind: .playback,
-            name: "Synthetic Output", isAvailable: true, isDefault: true,
-            followsSystemDefault: true)]
+        lock.lock(); defer { lock.unlock() }
+        return destinations
+    }
+
+    func replaceDestinations(_ next: [RuntimeOutputDestinationDTO]) {
+        lock.lock(); destinations = next; lock.unlock()
     }
 
     func startOutput(destinationID: String, format: RuntimePCMFormatDTO,
@@ -137,8 +146,9 @@ private final class FakeOutputBackend: RuntimeOutputBackend, @unchecked Sendable
 }
 
 let directory = URL(fileURLWithPath: "/tmp/sxr-\(UUID().uuidString)", isDirectory: true)
+private let outputBackend = FakeOutputBackend()
 let server = SonexisRuntimeServer(socketDirectory: directory, backend: FakeBackend(),
-    outputBackend: FakeOutputBackend())
+    outputBackend: outputBackend)
 
 do {
     try server.start()
@@ -153,6 +163,8 @@ do {
            "handshake did not advertise events")
     expect(client.handshake?.capabilities.contains("output_sessions") == true,
            "handshake did not advertise output")
+    expect(client.handshake?.capabilities.contains("output_destination_events") == true,
+           "handshake did not advertise destination lifecycle events")
     let sources = try client.listSources()
     expect(sources.map(\.id) == ["app.test.audio"], "source enumeration failed")
 
@@ -382,6 +394,44 @@ do {
 
     let destinations = try client.listOutputDestinations()
     expect(destinations.map(\.id) == ["default"], "output destinations were not listed")
+
+    let destinationSubscription = try client.subscribeEvents([
+        .outputDestinationAdded, .outputDestinationRemoved, .outputDestinationUpdated,
+        .outputDefaultChanged,
+    ])
+    let destinationEvents = try UnixSocketSystem.connect(
+        path: destinationSubscription.eventSocketPath)
+    usleep(20_000)
+    let changedDefault = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
+        name: "Synthetic Output", isAvailable: true, isDefault: true,
+        followsSystemDefault: true, activeDeviceID: "coreaudio:synthetic-b",
+        activeDeviceName: "Synthetic B")
+    let loopback = RuntimeOutputDestinationDTO(id: "coreaudio:loopback",
+        kind: .virtualInput, name: "Synthetic Loopback", isAvailable: true,
+        activeDeviceID: "coreaudio:loopback", activeDeviceName: "Synthetic Loopback")
+    outputBackend.replaceDestinations([changedDefault, loopback])
+    let firstDestinationEvent = try RuntimeProtocolCodec.decodeLine(RuntimeEventDTO.self,
+        from: destinationEvents.read())
+    let secondDestinationEvent = try RuntimeProtocolCodec.decodeLine(RuntimeEventDTO.self,
+        from: destinationEvents.read())
+    expect([firstDestinationEvent.type, secondDestinationEvent.type]
+        == [.outputDestinationAdded, .outputDefaultChanged],
+        "destination add/default events were not deterministic")
+    expect(firstDestinationEvent.outputDestinationID == loopback.id
+            && firstDestinationEvent.outputDestination == loopback,
+           "destination add event omitted typed identity")
+    expect(secondDestinationEvent.outputDestination?.activeDeviceID
+            == "coreaudio:synthetic-b",
+           "default change event omitted stable resolved device ID")
+    outputBackend.replaceDestinations([changedDefault])
+    let removedDestinationEvent = try RuntimeProtocolCodec.decodeLine(RuntimeEventDTO.self,
+        from: destinationEvents.read())
+    expect(removedDestinationEvent.type == .outputDestinationRemoved
+            && removedDestinationEvent.outputDestinationID == loopback.id,
+           "destination removal event was not delivered")
+    destinationEvents.close()
+    try client.unsubscribeEvents(id: destinationSubscription.id)
+
     let output = try client.startOutput(destinationID: "default",
         format: RuntimePCMFormatDTO(sampleRate: 24_000, channelCount: 1),
         targetBufferMilliseconds: 80)

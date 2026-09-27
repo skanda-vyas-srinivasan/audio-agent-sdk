@@ -94,6 +94,14 @@ class AmbiguousSourceError(SonexisError):
     """A selector matched more than one source and must be made explicit."""
 
 
+class OutputDestinationNotFoundError(SonexisError):
+    """No currently available output destination matched a selector."""
+
+
+class AmbiguousOutputDestinationError(SonexisError):
+    """An output selector matched more than one destination."""
+
+
 class ProviderError(SonexisError):
     """An optional realtime provider adapter failed."""
 
