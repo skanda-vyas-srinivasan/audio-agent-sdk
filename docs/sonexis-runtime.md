@@ -32,12 +32,10 @@ it does not install a Sonexis-branded driver.
 
 ## Zero-to-audio development quickstart
 
-Configure an Apple Development team for the `sonexis-runtime` and `sonexisctl`
-Xcode targets, then run:
+Configure an Apple Development signing identity in Xcode, then run from this
+standalone repository:
 
 ```sh
-git clone https://github.com/skanda-vyas-srinivasan/Sonexis.git
-cd Sonexis
 ./Scripts/setup-runtime-dev.sh
 ./Scripts/runtime-dev.sh start
 "$HOME/Library/Application Support/SonexisRuntime/dev/bin/sonexisctl" sources
@@ -60,14 +58,15 @@ The installer verifies the signature, identifiers, capture usage description,
 versions, and hashes before replacing its exact managed prefix. It never uses
 `sudo` or installs a launch agent. `Scripts/runtime-dev.sh` supports
 `start|status|stop|foreground|logs`; background start is opt-in. Override the
-install location with `SONEXIS_DEV_PREFIX`, and another developer team with
-`SONEXIS_DEVELOPMENT_TEAM`.
+install location with `SONEXIS_DEV_PREFIX`, and select another trusted identity
+with `SONEXIS_SIGNING_IDENTITY`.
 
 To confirm Xcode can sign locally and use a different team:
 
 ```sh
 security find-identity -v -p codesigning
-SONEXIS_DEVELOPMENT_TEAM=YOUR10CHARTEAM ./Scripts/setup-runtime-dev.sh
+SONEXIS_SIGNING_IDENTITY='Apple Development: Your Name (TEAMID)' \
+  ./Scripts/setup-runtime-dev.sh
 ```
 
 The value is the Apple Developer team configured under Xcode Settings >
@@ -87,26 +86,20 @@ so diagnostics survive an uninstall. No PCM is written there. Startup rotates
 a log once it exceeds 1 MiB; a single unusually noisy Runtime process may grow
 beyond that threshold until restarted.
 
-To build and run directly from the repository instead:
+To build signed products and run directly from the repository instead:
 
 ```sh
-xcodebuild -project Sonexis.xcodeproj -scheme sonexis-runtime \
-  -configuration Debug -destination 'platform=macOS' \
-  -derivedDataPath .build/RuntimeSigning build
-xcodebuild -project Sonexis.xcodeproj -scheme sonexisctl \
-  -configuration Debug -destination 'platform=macOS' \
-  -derivedDataPath .build/RuntimeSigning build
-
-.build/RuntimeSigning/Build/Products/Debug/sonexis-runtime
+./Scripts/build-signed-runtime-dev.sh
+.build/signed-dev/bin/sonexis-runtime
 ```
 
 In another terminal:
 
 ```sh
-.build/RuntimeSigning/Build/Products/Debug/sonexisctl sources
-.build/RuntimeSigning/Build/Products/Debug/sonexisctl status
-.build/RuntimeSigning/Build/Products/Debug/sonexisctl watch
-.build/RuntimeSigning/Build/Products/Debug/sonexisctl capture app.com.example.audio \
+.build/signed-dev/bin/sonexisctl sources
+.build/signed-dev/bin/sonexisctl status
+.build/signed-dev/bin/sonexisctl watch
+.build/signed-dev/bin/sonexisctl capture app.com.example.audio \
   --sample-rate 24000 --channels 1 --sample-format pcm_s16le \
   --output /tmp/example.pcm --debug
 ```
@@ -124,7 +117,8 @@ legacy Runtime prevents a second default Runtime from starting. Custom socket
 directories never create this alias.
 
 The Runtime executable embeds `NSAudioCaptureUsageDescription`, uses the stable
-identifier `com.sonexis.runtime`, and is development-signed by Xcode. Live
+identifier `com.sonexis.runtime`, and is development-signed using the identity
+configured in Xcode and selected by the build script. Live
 capture uses that identity for macOS Screen & System Audio Recording
 permission. The Sonexis application and Runtime have separate permission
 identities.

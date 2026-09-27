@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "source_repository": "Sonexis",
+  "source_commit": "54872c0041929928bedc24e0b75523985a6dc9db",
+  "source_path": "SonexisAudioEngine",
+  "git_tree": "f92d1c7bac93006ab154a926c9c5d9be8eb72033",
+  "strategy": "committed snapshot pending a separately versioned engine repository"
+}

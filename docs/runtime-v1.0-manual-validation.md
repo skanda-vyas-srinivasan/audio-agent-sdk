@@ -28,10 +28,9 @@ results establish architecture evidence, not validation of the 1.0 binary.
 
 ## Prepare the exact candidate
 
-From the isolated Runtime worktree:
+From the standalone Runtime repository:
 
 ```sh
-cd /Users/skandavyas/Sonexis-runtime-v04
 git status --short
 cat RUNTIME_VERSION
 ./Scripts/setup-runtime-dev.sh
@@ -43,9 +42,9 @@ sonexisctl status --json
 ```
 
 Expected Runtime/CLI version is `1.0.0`, protocol is `2`, Runtime signing ID is
-`com.sonexis.runtime`, and CLI signing ID is `com.sonexis.ctl`. If Xcode uses a
-different local team, set `SONEXIS_DEVELOPMENT_TEAM=YOUR10CHARTEAM` only for the
-setup command.
+`com.sonexis.runtime`, and CLI signing ID is `com.sonexis.ctl`. To choose among
+multiple local identities, set `SONEXIS_SIGNING_IDENTITY` to the complete
+`Apple Development: ...` identity for the setup command.
 
 ## 1. Grant Process Tap permission
 

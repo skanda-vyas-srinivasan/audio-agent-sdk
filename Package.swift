@@ -17,6 +17,17 @@ let package = Package(
             name: "SonexisRuntime",
             dependencies: [
                 .product(name: "SonexisAudioEngine", package: "SonexisAudioEngine")
+            ],
+            linkerSettings: [
+                // A command-line executable needs an embedded Info.plist for
+                // macOS application-audio TCC attribution.  Keep this stable
+                // across clean SwiftPM builds and development installs.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Distribution/Runtime-Embedded-Info.plist"
+                ], .when(platforms: [.macOS]))
             ]
         ),
         .executableTarget(name: "Sonexisctl")
