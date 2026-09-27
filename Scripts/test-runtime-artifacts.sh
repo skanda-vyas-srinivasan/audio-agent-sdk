@@ -45,6 +45,14 @@ expect_failure env SONEXIS_EXPECTED_MANIFEST_SHA256=0000000000000000000000000000
 expect_failure env SONEXIS_EXPECTED_MANIFEST_SHA256=not-a-digest \
     "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$SOURCE"
 
+INSECURE_PARENT="$TEST_DIR/insecure-parent"
+mkdir "$INSECURE_PARENT"
+chmod 777 "$INSECURE_PARENT"
+mkdir "$INSECURE_PARENT/candidate"
+cp "$SOURCE"/* "$INSECURE_PARENT/candidate/"
+expect_failure "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" \
+    "$INSECURE_PARENT/candidate"
+
 copy_fixture() {
     [ ! -L "$TEST_DIR/candidate" ] || {
         echo "artifact-test: refusing symlink candidate cleanup" >&2
@@ -58,6 +66,11 @@ copy_fixture() {
 # Payload tampering must fail the manifest digest before a package is unpacked.
 copy_fixture
 printf '\000' >>"$TEST_DIR/candidate/sonexis-runtime-$VERSION.tgz"
+expect_failure "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$TEST_DIR/candidate"
+
+# Writable package files are outside the verifier's immutable-input contract.
+copy_fixture
+chmod 666 "$TEST_DIR/candidate/sonexis-runtime-$VERSION.tgz"
 expect_failure "$ROOT_DIR/Scripts/verify-runtime-artifacts.sh" "$TEST_DIR/candidate"
 
 # An exact inventory prevents unsigned/unreviewed files from riding beside a

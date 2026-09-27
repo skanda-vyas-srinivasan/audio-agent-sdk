@@ -542,9 +542,12 @@ sampled off the realtime callback.
   `SONEXIS_EXPECTED_TEAM_ID` and `SONEXIS_EXPECTED_SOURCE_COMMIT` are useful
   additional assertions but cannot authenticate the SDKs by themselves. Without
   the manifest-digest anchor, the verifier is intended only for trusted local
-  build output, not as a hostile archive parser. Apple Development signatures
-  are local engineering identity, not a substitute for Developer ID and
-  notarization.
+  build output, not as a hostile archive parser. Verification also requires the
+  artifact directory, its parent, and every input file to be current-user-owned
+  and non-writable by group/other; copy a bundle out of shared writable storage
+  before checking it. Other same-UID processes remain inside the documented
+  local-account trust boundary. Apple Development signatures are local
+  engineering identity, not a substitute for Developer ID and notarization.
 
 ## Troubleshooting
 

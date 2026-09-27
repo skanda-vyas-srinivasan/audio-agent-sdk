@@ -13,6 +13,19 @@ error() {
 [ -d "$ARTIFACT_DIR" ] && [ ! -L "$ARTIFACT_DIR" ] || \
     error "missing regular artifact directory: $ARTIFACT_DIR"
 ARTIFACT_DIR=$(CDPATH= cd -- "$ARTIFACT_DIR" && pwd -P)
+ARTIFACT_PARENT=$(dirname -- "$ARTIFACT_DIR")
+[ -d "$ARTIFACT_PARENT" ] && [ ! -L "$ARTIFACT_PARENT" ] || \
+    error "artifact parent is not a regular directory: $ARTIFACT_PARENT"
+for directory in "$ARTIFACT_PARENT" "$ARTIFACT_DIR"; do
+    [ "$(stat -f '%u' "$directory")" = "$(id -u)" ] || \
+        error "artifact path is not owned by the current user: $directory"
+    mode=$(stat -f '%Lp' "$directory")
+    case "$mode" in
+        *[2367][0-7]|*[0-7][2367])
+            error "artifact path must not be group- or world-writable: $directory"
+            ;;
+    esac
+done
 [ -f "$ARTIFACT_DIR/manifest.json" ] && [ ! -L "$ARTIFACT_DIR/manifest.json" ] || \
     error "missing regular manifest.json"
 [ -f "$ARTIFACT_DIR/SHA256SUMS" ] && [ ! -L "$ARTIFACT_DIR/SHA256SUMS" ] || \
@@ -37,6 +50,16 @@ maximum_artifact_bytes = 512 * 1024 * 1024
 def fail(message: str) -> None:
     raise SystemExit(f"runtime-artifacts: {message}")
 
+def require_regular_file(path: Path) -> os.stat_result:
+    status = path.lstat()
+    if not stat.S_ISREG(status.st_mode):
+        fail(f"artifact is not a regular file: {path.name}")
+    if status.st_uid != os.getuid():
+        fail(f"artifact is not owned by the current user: {path.name}")
+    if status.st_mode & 0o022:
+        fail(f"artifact must not be group- or world-writable: {path.name}")
+    return status
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -46,20 +69,23 @@ def sha256_file(path: Path) -> str:
 
 manifest_path = root / "manifest.json"
 try:
-    if manifest_path.stat().st_size > maximum_metadata_bytes:
+    manifest_status = require_regular_file(manifest_path)
+    if manifest_status.st_size > maximum_metadata_bytes:
         fail("manifest.json exceeds 1 MiB")
+    manifest_bytes = manifest_path.read_bytes()
 except OSError as error:
     fail(f"cannot inspect manifest.json: {error}")
+manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
 expected_manifest_digest = os.environ.get("SONEXIS_EXPECTED_MANIFEST_SHA256")
 if expected_manifest_digest:
     if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_digest):
         fail("SONEXIS_EXPECTED_MANIFEST_SHA256 must be a lowercase SHA-256 digest")
-    if sha256_file(manifest_path) != expected_manifest_digest:
+    if manifest_digest != expected_manifest_digest:
         fail("manifest.json differs from the trusted expected digest")
 
 try:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    manifest = json.loads(manifest_bytes)
+except (UnicodeError, json.JSONDecodeError) as error:
     fail(f"invalid manifest.json: {error}")
 
 required_keys = {
@@ -137,11 +163,6 @@ expected_names = expected_artifacts | {"manifest.json", "SHA256SUMS"}
 if actual_names != expected_names:
     fail(f"artifact directory inventory differs: {sorted(actual_names ^ expected_names)}")
 
-def require_regular_file(path: Path) -> None:
-    mode = path.lstat().st_mode
-    if not stat.S_ISREG(mode):
-        fail(f"artifact is not a regular file: {path.name}")
-
 for name, item in listed.items():
     path = root / name
     require_regular_file(path)
@@ -172,18 +193,19 @@ if sorted(checksums) != expected_checksum_names:
 for name, expected in checksums.items():
     path = root / name
     require_regular_file(path)
-    if sha256_file(path) != expected:
+    actual = manifest_digest if name == "manifest.json" else sha256_file(path)
+    if actual != expected:
         fail(f"SHA256SUMS digest differs: {name}")
 
-print(version)
+print(f"{version} {signing['team_identifier']}")
 PY
 )
 
+MANIFEST_METADATA=$VERSION
+VERSION=${MANIFEST_METADATA%% *}
+MANIFEST_TEAM=${MANIFEST_METADATA#* }
 RUNTIME="$ARTIFACT_DIR/sonexis-runtime-$VERSION-macos-universal"
 CTL="$ARTIFACT_DIR/sonexisctl-$VERSION-macos-universal"
-MANIFEST_TEAM=$(/usr/bin/python3 -c \
-    'import json,sys; print(json.load(open(sys.argv[1]))["signing"]["team_identifier"])' \
-    "$ARTIFACT_DIR/manifest.json")
 EXPECTED_TEAM=${SONEXIS_EXPECTED_TEAM_ID:-}
 if [ -n "$EXPECTED_TEAM" ] && [ "$MANIFEST_TEAM" != "$EXPECTED_TEAM" ]; then
     error "signing team differs from trusted SONEXIS_EXPECTED_TEAM_ID"

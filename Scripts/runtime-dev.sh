@@ -22,8 +22,12 @@ usage() {
 }
 
 validate_state_directory() {
+    [ ! -L "$STATE_DIR" ] || {
+        echo "Runtime state path must not be a symbolic link: $STATE_DIR" >&2
+        exit 1
+    }
     if [ -e "$STATE_DIR" ]; then
-        [ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || {
+        [ -d "$STATE_DIR" ] || {
             echo "Runtime state path is not a real directory: $STATE_DIR" >&2
             exit 1
         }
@@ -49,8 +53,7 @@ validate_state_directory() {
     }
 }
 
-create_state_directory() {
-    [ ! -e "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || return 0
+validate_state_parent() {
     case "$STATE_DIR" in
         /*) ;;
         *)
@@ -74,11 +77,23 @@ create_state_directory() {
             exit 1
             ;;
     esac
+}
+
+create_state_directory() {
+    validate_state_parent
+    if [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; then
+        validate_state_directory
+        return
+    fi
     umask 077
-    mkdir -m 700 "$STATE_DIR" || {
-        echo "Could not create private Runtime state directory: $STATE_DIR" >&2
-        exit 1
-    }
+    if ! mkdir -m 700 "$STATE_DIR" 2>/dev/null; then
+        # A concurrent launcher may have created the directory. Accept it only
+        # after applying the complete symlink, ownership, and mode validation.
+        [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ] || {
+            echo "Could not create private Runtime state directory: $STATE_DIR" >&2
+            exit 1
+        }
+    fi
     validate_state_directory
 }
 

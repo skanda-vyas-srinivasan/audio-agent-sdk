@@ -48,6 +48,13 @@ mkdir "$UNSAFE_STATE_PARENT"
 chmod 777 "$UNSAFE_STATE_PARENT"
 expect_failure env SONEXIS_RUNTIME_STATE_DIR="$UNSAFE_STATE_PARENT/state" \
     "$ROOT_DIR/Scripts/runtime-dev.sh" start
+mkdir -m 700 "$UNSAFE_STATE_PARENT/existing-state"
+expect_failure env SONEXIS_RUNTIME_STATE_DIR="$UNSAFE_STATE_PARENT/existing-state" \
+    "$ROOT_DIR/Scripts/runtime-dev.sh" start
+DANGLING_STATE="$TEST_DIR/dangling-state"
+ln -s "$TEST_DIR/missing-state-target" "$DANGLING_STATE"
+expect_failure env SONEXIS_RUNTIME_STATE_DIR="$DANGLING_STATE" \
+    "$ROOT_DIR/Scripts/runtime-dev.sh" start
 "$ROOT_DIR/Scripts/runtime-dev.sh" start >/dev/null
 [ "$(stat -f %Lp "$STATE_DIR")" = 700 ]
 "$ROOT_DIR/Scripts/runtime-dev.sh" stop >/dev/null

@@ -170,8 +170,11 @@ publisher authenticity. A copied bundle must be anchored with an out-of-band
 declared source revision before package metadata is inspected. Expected
 team/source values are supplemental checks and cannot authenticate SDKs alone.
 Without the digest anchor, verification is for trusted local build output rather
-than adversarial bundles. Apple Development signing does not replace Developer
-ID/notarization.
+than adversarial bundles. The verifier requires a current-user-owned,
+non-group/world-writable artifact directory and parent plus non-writable regular
+inputs; bundles must be copied out of shared writable storage first. Other
+same-UID processes remain in the local-account trust boundary. Apple Development
+signing does not replace Developer ID/notarization.
 
 ## 17. Performance
 
