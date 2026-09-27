@@ -162,6 +162,8 @@ public struct RuntimeSessionMetricsDTO: Codable, Equatable, Sendable {
     public let bytesTransmitted: UInt64
     public let connectedSubscribers: Int
     public let dataQueueHighWaterMark: Int
+    /// Decimal mirrors for counters that may exceed JavaScript's safe integer range.
+    public let exactCounters: [String: String]?
 
     public init(captureCallbacks: UInt64 = 0, nativeFramesReceived: UInt64 = 0,
                 normalizedFramesDelivered: UInt64 = 0, ringDroppedFrames: UInt64 = 0,
@@ -170,7 +172,8 @@ public struct RuntimeSessionMetricsDTO: Codable, Equatable, Sendable {
                 framesForwarded: UInt64 = 0, queueDroppedFrames: UInt64 = 0,
                 noSubscriberFrames: UInt64 = 0, slowConsumerDisconnects: UInt64 = 0,
                 bytesTransmitted: UInt64 = 0, connectedSubscribers: Int = 0,
-                dataQueueHighWaterMark: Int = 0) {
+                dataQueueHighWaterMark: Int = 0,
+                exactCounters: [String: String]? = nil) {
         self.captureCallbacks = captureCallbacks
         self.nativeFramesReceived = nativeFramesReceived
         self.normalizedFramesDelivered = normalizedFramesDelivered
@@ -186,6 +189,20 @@ public struct RuntimeSessionMetricsDTO: Codable, Equatable, Sendable {
         self.bytesTransmitted = bytesTransmitted
         self.connectedSubscribers = connectedSubscribers
         self.dataQueueHighWaterMark = dataQueueHighWaterMark
+        self.exactCounters = exactCounters ?? [
+            "capture_callbacks": String(captureCallbacks),
+            "native_frames_received": String(nativeFramesReceived),
+            "normalized_frames_delivered": String(normalizedFramesDelivered),
+            "ring_dropped_frames": String(ringDroppedFrames),
+            "delivery_dropped_frames": String(deliveryDroppedFrames),
+            "conversion_batches": String(conversionBatches),
+            "conversion_nanoseconds": String(conversionNanoseconds),
+            "frames_forwarded": String(framesForwarded),
+            "queue_dropped_frames": String(queueDroppedFrames),
+            "no_subscriber_frames": String(noSubscriberFrames),
+            "slow_consumer_disconnects": String(slowConsumerDisconnects),
+            "bytes_transmitted": String(bytesTransmitted),
+        ]
     }
 
     public var droppedFrames: UInt64 {
@@ -230,13 +247,15 @@ public struct RuntimeSessionDTO: Codable, Equatable, Sendable {
     public let format: RuntimePCMFormatDTO
     public let dataSocketPath: String
     public let startedAtNanoseconds: UInt64
+    public let startedAtNanosecondsExact: String?
     public let metrics: RuntimeSessionMetricsDTO
     public let error: RuntimeErrorDTO?
 
     public init(id: String, streamID: String, sourceID: String, state: RuntimeSessionStateDTO,
                 format: RuntimePCMFormatDTO, dataSocketPath: String,
                 startedAtNanoseconds: UInt64, metrics: RuntimeSessionMetricsDTO = .init(),
-                error: RuntimeErrorDTO? = nil) {
+                error: RuntimeErrorDTO? = nil,
+                startedAtNanosecondsExact: String? = nil) {
         self.id = id
         self.streamID = streamID
         self.sourceID = sourceID
@@ -244,6 +263,7 @@ public struct RuntimeSessionDTO: Codable, Equatable, Sendable {
         self.format = format
         self.dataSocketPath = dataSocketPath
         self.startedAtNanoseconds = startedAtNanoseconds
+        self.startedAtNanosecondsExact = startedAtNanosecondsExact ?? String(startedAtNanoseconds)
         self.metrics = metrics
         self.error = error
     }
@@ -587,6 +607,8 @@ public struct RuntimeOutputMetricsDTO: Codable, Equatable, Sendable {
     public let deviceChannelCount: UInt16?
     public let estimatedOutputLatencyMilliseconds: Double?
     public let uptimeNanoseconds: UInt64?
+    /// Decimal mirrors for counters that may exceed JavaScript's safe integer range.
+    public let exactCounters: [String: String]?
 
     public init(packetsReceived: UInt64 = 0, inputFramesReceived: UInt64 = 0,
                 inputBytesReceived: UInt64 = 0, deviceFramesEnqueued: UInt64 = 0,
@@ -600,7 +622,8 @@ public struct RuntimeOutputMetricsDTO: Codable, Equatable, Sendable {
                 producerConnected: Bool = false, deviceSampleRate: UInt32? = nil,
                 deviceChannelCount: UInt16? = nil,
                 estimatedOutputLatencyMilliseconds: Double? = nil,
-                uptimeNanoseconds: UInt64? = nil) {
+                uptimeNanoseconds: UInt64? = nil,
+                exactCounters: [String: String]? = nil) {
         self.packetsReceived = packetsReceived
         self.inputFramesReceived = inputFramesReceived
         self.inputBytesReceived = inputBytesReceived
@@ -624,6 +647,26 @@ public struct RuntimeOutputMetricsDTO: Codable, Equatable, Sendable {
         self.deviceChannelCount = deviceChannelCount
         self.estimatedOutputLatencyMilliseconds = estimatedOutputLatencyMilliseconds
         self.uptimeNanoseconds = uptimeNanoseconds
+        var derivedExactCounters = [
+            "packets_received": String(packetsReceived),
+            "input_frames_received": String(inputFramesReceived),
+            "input_bytes_received": String(inputBytesReceived),
+            "device_frames_enqueued": String(deviceFramesEnqueued),
+            "device_frames_rendered": String(deviceFramesRendered),
+            "dropped_frames": String(droppedFrames),
+            "flushed_frames": String(flushedFrames),
+            "late_frames": String(lateFrames),
+            "underrun_frames": String(underrunFrames),
+            "underrun_events": String(underrunEvents),
+            "overrun_events": String(overrunEvents),
+            "conversion_batches": String(conversionBatches),
+            "conversion_nanoseconds": String(conversionNanoseconds),
+            "route_changes": String(routeChanges),
+        ]
+        if let uptimeNanoseconds {
+            derivedExactCounters["uptime_nanoseconds"] = String(uptimeNanoseconds)
+        }
+        self.exactCounters = exactCounters ?? derivedExactCounters
     }
 
     public var averageConversionMicroseconds: Double {
@@ -641,6 +684,7 @@ public struct RuntimeOutputSessionDTO: Codable, Equatable, Sendable {
     public let format: RuntimePCMFormatDTO
     public let dataSocketPath: String
     public let startedAtNanoseconds: UInt64
+    public let startedAtNanosecondsExact: String?
     public let targetBufferMilliseconds: UInt32
     public let metrics: RuntimeOutputMetricsDTO
     public let error: RuntimeErrorDTO?
@@ -649,7 +693,8 @@ public struct RuntimeOutputSessionDTO: Codable, Equatable, Sendable {
                 state: RuntimeOutputSessionStateDTO, format: RuntimePCMFormatDTO,
                 dataSocketPath: String, startedAtNanoseconds: UInt64,
                 targetBufferMilliseconds: UInt32,
-                metrics: RuntimeOutputMetricsDTO = .init(), error: RuntimeErrorDTO? = nil) {
+                metrics: RuntimeOutputMetricsDTO = .init(), error: RuntimeErrorDTO? = nil,
+                startedAtNanosecondsExact: String? = nil) {
         self.id = id
         self.streamID = streamID
         self.destinationID = destinationID
@@ -657,6 +702,7 @@ public struct RuntimeOutputSessionDTO: Codable, Equatable, Sendable {
         self.format = format
         self.dataSocketPath = dataSocketPath
         self.startedAtNanoseconds = startedAtNanoseconds
+        self.startedAtNanosecondsExact = startedAtNanosecondsExact ?? String(startedAtNanoseconds)
         self.targetBufferMilliseconds = targetBufferMilliseconds
         self.metrics = metrics
         self.error = error
@@ -693,10 +739,13 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
     public let eventID: String
     /// Monotonic per-subscription sequence for successfully delivered events.
     public let eventSequence: UInt64?
+    public let eventSequenceExact: String?
     /// Events discarded for this subscription immediately before this event.
     public let droppedEventsBefore: UInt64?
+    public let droppedEventsBeforeExact: String?
     public let type: RuntimeEventTypeDTO
     public let timestampNanoseconds: UInt64
+    public let timestampNanosecondsExact: String?
     public let sourceID: String?
     public let sessionID: String?
     public let streamID: String?
@@ -706,6 +755,7 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
     public let message: String?
     public let error: RuntimeErrorDTO?
     public let droppedFrames: UInt64?
+    public let droppedFramesExact: String?
     public let outputSession: RuntimeOutputSessionDTO?
     public let outputDestination: RuntimeOutputDestinationDTO?
 
@@ -719,13 +769,20 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
                 message: String? = nil, error: RuntimeErrorDTO? = nil,
                 droppedFrames: UInt64? = nil,
                 outputSession: RuntimeOutputSessionDTO? = nil,
-                outputDestination: RuntimeOutputDestinationDTO? = nil) {
+                outputDestination: RuntimeOutputDestinationDTO? = nil,
+                eventSequenceExact: String? = nil,
+                droppedEventsBeforeExact: String? = nil,
+                timestampNanosecondsExact: String? = nil,
+                droppedFramesExact: String? = nil) {
         protocolVersion = RuntimeProtocolInfo.protocolVersion
         self.eventID = eventID
         self.eventSequence = eventSequence
+        self.eventSequenceExact = eventSequenceExact ?? eventSequence.map(String.init)
         self.droppedEventsBefore = droppedEventsBefore
+        self.droppedEventsBeforeExact = droppedEventsBeforeExact ?? droppedEventsBefore.map(String.init)
         self.type = type
         self.timestampNanoseconds = timestampNanoseconds
+        self.timestampNanosecondsExact = timestampNanosecondsExact ?? String(timestampNanoseconds)
         self.sourceID = sourceID
         self.sessionID = sessionID
         self.streamID = streamID
@@ -735,6 +792,7 @@ public struct RuntimeEventDTO: Codable, Equatable, Sendable {
         self.message = message
         self.error = error
         self.droppedFrames = droppedFrames
+        self.droppedFramesExact = droppedFramesExact ?? droppedFrames.map(String.init)
         self.outputSession = outputSession
         self.outputDestination = outputDestination
     }

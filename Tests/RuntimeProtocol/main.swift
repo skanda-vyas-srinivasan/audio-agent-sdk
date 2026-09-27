@@ -46,6 +46,10 @@ do {
     let decodedOutput = try RuntimeProtocolCodec.decodeLine(RuntimeOutputSessionDTO.self,
         from: RuntimeProtocolCodec.encodeLine(outputSession))
     expect(decodedOutput == outputSession, "output session did not round trip")
+    expect(decodedOutput.startedAtNanosecondsExact == "1",
+           "output session omitted exact start timestamp")
+    expect(decodedOutput.metrics.exactCounters?["input_frames_received"] == "480",
+           "output metrics omitted exact counter")
 
     let largeCounter = UInt64(9_007_199_254_740_993)
     let preciseStatus = RuntimeStatusDTO(runtimeVersion: "0.9.0",
@@ -60,6 +64,30 @@ do {
     expect(decodedPreciseStatus.exactCounters?["total_sessions_started"]
             == "9007199254740993",
            "exact diagnostic counter did not survive protocol round trip")
+
+    let preciseSession = RuntimeSessionDTO(id: "session", streamID: UUID().uuidString,
+        sourceID: "app.example", state: .capturing,
+        format: RuntimePCMFormatDTO(sampleRate: 16_000, channelCount: 1),
+        dataSocketPath: "/tmp/capture.sock", startedAtNanoseconds: largeCounter,
+        metrics: RuntimeSessionMetricsDTO(framesForwarded: largeCounter))
+    let decodedPreciseSession = try RuntimeProtocolCodec.decodeLine(RuntimeSessionDTO.self,
+        from: RuntimeProtocolCodec.encodeLine(preciseSession))
+    expect(decodedPreciseSession.startedAtNanosecondsExact == "9007199254740993",
+           "capture session omitted exact start timestamp")
+    expect(decodedPreciseSession.metrics.exactCounters?["frames_forwarded"]
+            == "9007199254740993",
+           "capture metrics omitted exact counter")
+
+    let preciseEvent = RuntimeEventDTO(type: .clientWarning,
+        eventSequence: largeCounter, droppedEventsBefore: largeCounter,
+        timestampNanoseconds: largeCounter, droppedFrames: largeCounter)
+    let decodedPreciseEvent = try RuntimeProtocolCodec.decodeLine(RuntimeEventDTO.self,
+        from: RuntimeProtocolCodec.encodeLine(preciseEvent))
+    expect(decodedPreciseEvent.eventSequenceExact == "9007199254740993"
+            && decodedPreciseEvent.droppedEventsBeforeExact == "9007199254740993"
+            && decodedPreciseEvent.timestampNanosecondsExact == "9007199254740993"
+            && decodedPreciseEvent.droppedFramesExact == "9007199254740993",
+           "event omitted exact integer mirrors")
 
     let oldDefault = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
         name: "Default Output", isAvailable: true, isDefault: true,
