@@ -1,9 +1,11 @@
 import asyncio
 import json
+import os
 import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,8 +15,8 @@ from audioplane.agent import (LiveValidationTracker, RuntimeResponsePlayer,
                               StreamStats)
 from audioplane.cli import _parser
 from sonexis import AudioFormat, AudioFrame
-from sonexis.providers import (GeminiLiveSink, GeminiTurnDetectionConfig,
-                               ProviderEvent, ProviderLifecycleEvent)
+from audioplane.providers import (GeminiLiveSink, GeminiTurnDetectionConfig,
+                                  ProviderEvent, ProviderLifecycleEvent)
 
 
 class AgentCLIAndDiagnosticsTests(unittest.TestCase):
@@ -77,6 +79,43 @@ class AgentCLIAndDiagnosticsTests(unittest.TestCase):
         self.assertIn("duplicate activity start", report["warnings"])
         self.assertTrue(any("received no response" in value
                             for value in report["warnings"]))
+
+    def test_validation_json_is_private_and_refuses_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "validation.json"
+            tracker = LiveValidationTracker(enabled=False, output_path=output)
+            tracker.final_report()
+            self.assertEqual(os.stat(output).st_mode & 0o777, 0o600)
+
+            target = Path(directory) / "private.txt"
+            target.write_text("do not replace")
+            link = Path(directory) / "linked.json"
+            link.symlink_to(target)
+            tracker = LiveValidationTracker(enabled=False, output_path=link)
+            with self.assertRaises(OSError):
+                tracker.final_report()
+            self.assertEqual(target.read_text(), "do not replace")
+
+    def test_slow_provider_warning_is_preserved_in_final_report(self):
+        tracker = LiveValidationTracker(enabled=False)
+        tracker.lifecycle(ProviderLifecycleEvent(
+            "gemini", "activity_started", timestamp_ns=1_000_000))
+        tracker.lifecycle(ProviderLifecycleEvent(
+            "gemini", "activity_ended", timestamp_ns=2_000_000))
+        tracker.lifecycle(ProviderLifecycleEvent(
+            "gemini", "input_finalized", timestamp_ns=3_000_000))
+        original_clock = __import__("audioplane.agent", fromlist=["time"]).time
+        with mock.patch.object(
+                original_clock, "monotonic_ns", return_value=6_003_000_000):
+            event = ProviderEvent("gemini", "message", response_started=True,
+                                  response_completed=True)
+            tracker.provider_event(event)
+            tracker.finish_provider_event(event)
+        report = tracker.final_report()
+        self.assertIn(
+            "provider response start exceeded 5000 ms",
+            report["turns"][0]["warnings"],
+        )
 
 
 class AgentPlaybackLifecycleTests(unittest.IsolatedAsyncioTestCase):

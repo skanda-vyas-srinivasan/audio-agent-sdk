@@ -27,7 +27,7 @@ from sonexis import (
     Sonexis,
     SonexisError,
 )
-from sonexis.providers import (
+from .providers import (
     GeminiLiveSink,
     GeminiTurnDetectionConfig,
     OpenAIRealtimeSink,

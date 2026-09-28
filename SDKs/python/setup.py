@@ -7,6 +7,7 @@ setup(
     version="1.0.0",
     description="Source-aware bidirectional audio I/O SDK for macOS",
     author="AudioPlane contributors",
+    author_email="133609115+skanda-vyas-srinivasan@users.noreply.github.com",
     url="https://github.com/skanda-vyas-srinivasan/audioplane",
     project_urls={
         "Repository": "https://github.com/skanda-vyas-srinivasan/audioplane",

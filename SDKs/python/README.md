@@ -298,10 +298,10 @@ python -m pip install -e 'SDKs/python[gemini]'
 ```
 
 ```python
-from sonexis import AudioFormat, Sonexis
-from sonexis.providers import GeminiLiveSink, GeminiTurnDetectionConfig
+from audioplane import AudioFormat, AudioPlane
+from audioplane.providers import GeminiLiveSink, GeminiTurnDetectionConfig
 
-async with Sonexis() as sx:
+async with AudioPlane() as sx:
     turns = GeminiTurnDetectionConfig(silence_duration_ms=1200)
     async with await GeminiLiveSink.connect(turn_detection=turns) as model:
         async with await sx.capture(

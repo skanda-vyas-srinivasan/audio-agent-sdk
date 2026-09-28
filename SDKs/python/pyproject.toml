@@ -9,7 +9,7 @@ description = "Source-aware bidirectional audio I/O SDK for macOS"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
-authors = [{name = "AudioPlane contributors"}]
+authors = [{name = "AudioPlane contributors", email = "133609115+skanda-vyas-srinivasan@users.noreply.github.com"}]
 keywords = ["audio", "coreaudio", "macos", "realtime", "sdk"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
