@@ -10,6 +10,7 @@
 enum {
     kAudioPlaneDeviceObject = 3,
     kAudioPlaneInputStreamObject = 4,
+    kAudioPlaneInputDataSourceObject = 7,
     kAudioPlaneOutputStreamObject = 8,
 };
 
@@ -114,6 +115,19 @@ int main(int argc, char **argv)
     assert((*driver)->GetPropertyData(driver, kAudioPlaneDeviceObject, 0,
         &uidAddress, 0, NULL, sizeof(uid), &outputSize, &uid) == noErr);
     expectCFString(uid, CFSTR("com.audioplane.input.device"));
+
+    AudioObjectPropertyAddress dataSourceNameAddress = {
+        kAudioSelectorControlPropertyItemName,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain,
+    };
+    UInt32 dataSourceItem = 0;
+    CFStringRef dataSourceName = NULL;
+    assert((*driver)->GetPropertyData(driver, kAudioPlaneInputDataSourceObject, 0,
+        &dataSourceNameAddress, sizeof(dataSourceItem), &dataSourceItem,
+        sizeof(dataSourceName), &outputSize, &dataSourceName) == noErr);
+    expectCFString(dataSourceName, CFSTR("AudioPlane Input"));
+    CFRelease(dataSourceName);
 
     AudioObjectPropertyAddress formatAddress = {
         kAudioStreamPropertyVirtualFormat,

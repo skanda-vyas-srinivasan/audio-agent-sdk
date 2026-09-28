@@ -168,8 +168,7 @@ static Float32								gVolume_Output_Master_Value		= 0.0;
 static bool									gMute_Input_Master_Value		= false;
 static bool									gMute_Output_Master_Value		= false;
 
-static const UInt32							kDataSource_NumberItems			= 4;
-#define										kDataSource_ItemNamePattern		"Data Source Item %d"
+static const UInt32							kDataSource_NumberItems			= 1;
 static UInt32								gDataSource_Input_Master_Value	= 0;
 static UInt32								gDataSource_Output_Master_Value	= 0;
 static UInt32								gDataDestination_PlayThru_Master_Value	= 0;
@@ -3727,7 +3726,20 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: not enough space for the return value of kAudioSelectorControlPropertyItemName for the data source control");
 					FailWithAction(inQualifierDataSize != sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: wrong size for the qualifier of kAudioSelectorControlPropertyItemName for the data source control");
 					FailWithAction(*((const UInt32*)inQualifierData) >= kDataSource_NumberItems, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetControlPropertyData: the item in the qualifier is not valid for kAudioSelectorControlPropertyItemName for the data source control");
-					*((CFStringRef*)outData) = CFStringCreateWithFormat(NULL, NULL, CFSTR(kDataSource_ItemNamePattern), *((const UInt32*)inQualifierData));
+					switch(inObjectID)
+					{
+						case kObjectID_DataSource_Input_Master:
+							*((CFStringRef*)outData) = CFStringCreateCopy(NULL, CFSTR("AudioPlane Input"));
+							break;
+
+						case kObjectID_DataSource_Output_Master:
+							*((CFStringRef*)outData) = CFStringCreateCopy(NULL, CFSTR("AudioPlane Injection"));
+							break;
+
+						case kObjectID_DataDestination_PlayThru_Master:
+							*((CFStringRef*)outData) = CFStringCreateCopy(NULL, CFSTR("AudioPlane Loopback"));
+							break;
+					}
 					*outDataSize = sizeof(CFStringRef);
 					break;
 
