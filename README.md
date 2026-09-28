@@ -1,4 +1,4 @@
-# Sonexis Runtime
+# audioplane SDK
 
 This repository contains Sonexis Runtime, `sonexisctl`, the public SDKs and
 examples, and Runtime's own `SonexisAudioEngine` Swift package. The engine name
