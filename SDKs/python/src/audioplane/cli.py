@@ -6,13 +6,45 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 import json
 import os
+from pathlib import Path
+import shutil
+import subprocess
 import sys
-from typing import Any, Optional, Sequence
+import tempfile
+from typing import Any, Callable, Optional, Sequence
+import wave
 
-from sonexis import AudioOutputDestination, AudioSource, RuntimeStatus, Sonexis
+from sonexis import (AudioFormat, AudioOutputDestination, AudioSource, RuntimeStatus,
+                     SampleFormat, Sonexis)
 from sonexis.errors import SonexisError
 
 from . import __version__
+
+
+_AUDIOPLANE_INPUT_ID = "coreaudio:com.audioplane.input.device"
+_SPEAK_FORMAT = AudioFormat(
+    sample_rate=48_000,
+    channels=1,
+    sample_format=SampleFormat.PCM_S16LE,
+)
+
+
+class SpeechSynthesisError(RuntimeError):
+    """Raised when the local macOS speech synthesizer cannot produce PCM."""
+
+
+def _positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _buffer_milliseconds(value: str) -> int:
+    parsed = int(value)
+    if not 20 <= parsed <= 250:
+        raise argparse.ArgumentTypeError("must be between 20 and 250")
+    return parsed
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,7 +67,102 @@ def _parser() -> argparse.ArgumentParser:
     ):
         child = subcommands.add_parser(command, help=help_text)
         child.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
+    speak = subcommands.add_parser(
+        "speak",
+        help="type text interactively and send macOS speech to an audio destination",
+    )
+    speak.add_argument(
+        "--destination",
+        default=_AUDIOPLANE_INPUT_ID,
+        help="output destination ID or name (default: AudioPlane Input)",
+    )
+    speak.add_argument("--voice", help="macOS voice name passed to say")
+    speak.add_argument(
+        "--rate",
+        type=_positive_integer,
+        help="speech rate in words per minute",
+    )
+    speak.add_argument(
+        "--buffer-ms",
+        type=_buffer_milliseconds,
+        default=60,
+        help="Runtime target buffer in milliseconds (20-250; default: 60)",
+    )
     return parser
+
+
+def _command_failure(tool: str, result: subprocess.CompletedProcess) -> SpeechSynthesisError:
+    message = (result.stderr or result.stdout or "unknown error").strip()
+    return SpeechSynthesisError(f"{tool} failed: {message}")
+
+
+def _synthesize_speech(text: str, voice: Optional[str], rate: Optional[int]) -> bytes:
+    """Render one line with macOS ``say`` as PCM16 mono at 48 kHz."""
+    say = shutil.which("say")
+    afconvert = shutil.which("afconvert")
+    if say is None or afconvert is None:
+        missing = "say" if say is None else "afconvert"
+        raise SpeechSynthesisError(
+            f"macOS speech tool {missing!r} is unavailable; speak requires macOS")
+
+    with tempfile.TemporaryDirectory(prefix="audioplane-speak-") as directory:
+        source = Path(directory) / "speech.aiff"
+        converted = Path(directory) / "speech.wav"
+        say_command = [say]
+        if voice:
+            say_command.extend(["-v", voice])
+        if rate is not None:
+            say_command.extend(["-r", str(rate)])
+        say_command.extend(["-o", str(source), text])
+
+        try:
+            result = subprocess.run(
+                say_command, capture_output=True, text=True, check=False)
+        except OSError as error:
+            raise SpeechSynthesisError(f"could not run say: {error}") from error
+        if result.returncode != 0:
+            raise _command_failure("say", result)
+
+        try:
+            result = subprocess.run(
+                [
+                    afconvert,
+                    "-f", "WAVE",
+                    "-d", "LEI16@48000",
+                    "-c", "1",
+                    str(source),
+                    str(converted),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as error:
+            raise SpeechSynthesisError(f"could not run afconvert: {error}") from error
+        if result.returncode != 0:
+            raise _command_failure("afconvert", result)
+
+        try:
+            with wave.open(str(converted), "rb") as stream:
+                actual = (
+                    stream.getframerate(),
+                    stream.getnchannels(),
+                    stream.getsampwidth(),
+                    stream.getcomptype(),
+                )
+                expected = (48_000, 1, 2, "NONE")
+                if actual != expected:
+                    raise SpeechSynthesisError(
+                        "speech conversion produced an unexpected audio format "
+                        f"(rate={actual[0]}, channels={actual[1]}, bytes={actual[2]}, "
+                        f"compression={actual[3]})")
+                pcm = stream.readframes(stream.getnframes())
+        except (OSError, EOFError, wave.Error) as error:
+            raise SpeechSynthesisError(f"could not read synthesized speech: {error}") from error
+        if not pcm:
+            raise SpeechSynthesisError("macOS speech synthesis produced no audio")
+        return pcm
 
 
 def _jsonable(value: Any) -> Any:
@@ -97,7 +224,48 @@ def _print_status(status: RuntimeStatus) -> None:
           f"output_dropped={status.total_output_frames_dropped}")
 
 
-async def _run(arguments: argparse.Namespace, client_type: Any = Sonexis) -> int:
+async def _run_speak(
+    client: Any,
+    arguments: argparse.Namespace,
+    line_reader: Callable[[str], str],
+    synthesizer: Callable[[str, Optional[str], Optional[int]], bytes],
+) -> int:
+    output = await client.playback(
+        destination=arguments.destination,
+        format=_SPEAK_FORMAT,
+        target_buffer_milliseconds=arguments.buffer_ms,
+    )
+    async with output:
+        destination = getattr(output, "destination", None)
+        destination_name = getattr(destination, "name", arguments.destination)
+        print(f"{_safe(destination_name)} ready. Type text and press Enter; /quit exits.")
+        while True:
+            try:
+                line = line_reader("> ")
+            except EOFError:
+                print()
+                break
+            text = line.strip()
+            if text.lower() in {"/quit", "/exit"}:
+                break
+            if not text:
+                continue
+            try:
+                pcm = synthesizer(text, arguments.voice, arguments.rate)
+            except SpeechSynthesisError as error:
+                print(f"audioplane: speak: {_safe(error)}", file=sys.stderr)
+                continue
+            await output.write(pcm)
+    return 0
+
+
+async def _run(
+    arguments: argparse.Namespace,
+    client_type: Any = Sonexis,
+    *,
+    line_reader: Callable[[str], str] = input,
+    synthesizer: Callable[[str, Optional[str], Optional[int]], bytes] = _synthesize_speech,
+) -> int:
     if arguments.command == "version":
         payload = {"name": "AudioPlane", "sdk_version": __version__}
         _print_json(payload) if arguments.json else print(f"AudioPlane {__version__}")
@@ -145,6 +313,9 @@ async def _run(arguments: argparse.Namespace, client_type: Any = Sonexis) -> int
             assert isinstance(value, RuntimeStatus)
             _print_json(value) if arguments.json else _print_status(value)
             return 0
+
+        if arguments.command == "speak":
+            return await _run_speak(client, arguments, line_reader, synthesizer)
 
     raise AssertionError(f"unhandled command: {arguments.command}")
 

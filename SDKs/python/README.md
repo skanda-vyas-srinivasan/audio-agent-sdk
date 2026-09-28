@@ -25,6 +25,16 @@ Runtime; Process Tap permission belongs to that native executable. Build and
 start the signed Runtime using the repository quickstart before running commands
 that connect to it.
 
+With the first-party `AudioPlane Input` device installed, the CLI can keep one
+virtual-microphone session open and speak each line entered at the prompt:
+
+```sh
+audioplane speak
+```
+
+Type `/quit` to stop. The command uses the local macOS `say` voice by default;
+`audioplane speak --voice Samantha --rate 190` selects a voice and speech rate.
+
 For local development against a checkout:
 
 ```sh

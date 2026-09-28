@@ -3,22 +3,46 @@ import io
 import json
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from audioplane import AudioPlane, AudioPlaneClient, Sonexis
-from audioplane.cli import _run
-from sonexis import AudioOutputDestination, AudioSource, Handshake, RuntimeStatus
+from audioplane.cli import SpeechSynthesisError, _parser, _run
+from sonexis import (AudioFormat, AudioOutputDestination, AudioSource, Handshake,
+                     RuntimeStatus, SampleFormat)
+
+
+class FakeOutput:
+    def __init__(self, destination):
+        self.destination = destination
+        self.writes = []
+        self.exited = False
+        self.drained = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self.exited = True
+        self.drained = exc_type is None
+
+    async def write(self, value):
+        self.writes.append(value)
 
 
 class FakeClient:
+    last_instance = None
+
     def __init__(self, socket_path, *, client_name, client_version):
+        type(self).last_instance = self
         self.socket_path = socket_path or "/tmp/audio-plane-test.sock"
         self.client_name = client_name
         self.client_version = client_version
         self.handshake = None
+        self.output = None
+        self.playback_call = None
 
     async def __aenter__(self):
         self.handshake = Handshake(
@@ -78,9 +102,26 @@ class FakeClient:
             total_output_frames_rendered=240,
         )
 
+    async def playback(self, *, destination, format, target_buffer_milliseconds):
+        resolved = AudioOutputDestination(
+            id=destination,
+            name="AudioPlane Input",
+            kind="virtual_input",
+            available=True,
+            is_default=False,
+            follows_system_default=False,
+            active_device_id="com.audioplane.input.device",
+            active_device_name="AudioPlane Input",
+            native_format=None,
+            supported_formats=[],
+        )
+        self.playback_call = (destination, format, target_buffer_milliseconds)
+        self.output = FakeOutput(resolved)
+        return self.output
 
-def arguments(command, *, json_output=False, socket=None):
-    return argparse.Namespace(command=command, json=json_output, socket=socket)
+
+def arguments(command, *, json_output=False, socket=None, **values):
+    return argparse.Namespace(command=command, json=json_output, socket=socket, **values)
 
 
 class AudioPlaneCLITests(unittest.IsolatedAsyncioTestCase):
@@ -127,6 +168,87 @@ class AudioPlaneCLITests(unittest.IsolatedAsyncioTestCase):
             result = await _run(arguments("version"), MustNotConstruct)
         self.assertEqual(result, 0)
         self.assertEqual(output.getvalue().strip(), "AudioPlane 1.0.0")
+
+    async def test_speak_reuses_one_output_until_quit(self):
+        lines = iter(["hello everyone", "", "another line", "/quit"])
+        synthesized = []
+
+        def synthesize(text, voice, rate):
+            synthesized.append((text, voice, rate))
+            return text.encode("utf-8")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = await _run(
+                arguments(
+                    "speak",
+                    destination="coreaudio:com.audioplane.input.device",
+                    voice="Samantha",
+                    rate=190,
+                    buffer_ms=80,
+                ),
+                FakeClient,
+                line_reader=lambda prompt: next(lines),
+                synthesizer=synthesize,
+            )
+
+        self.assertEqual(result, 0)
+        client = FakeClient.last_instance
+        self.assertIsNotNone(client)
+        self.assertEqual(
+            client.playback_call,
+            (
+                "coreaudio:com.audioplane.input.device",
+                AudioFormat(48_000, 1, SampleFormat.PCM_S16LE),
+                80,
+            ),
+        )
+        self.assertEqual(
+            synthesized,
+            [("hello everyone", "Samantha", 190), ("another line", "Samantha", 190)],
+        )
+        self.assertEqual(client.output.writes, [b"hello everyone", b"another line"])
+        self.assertTrue(client.output.exited)
+        self.assertTrue(client.output.drained)
+        self.assertIn("AudioPlane Input ready", output.getvalue())
+
+    async def test_speak_reports_one_synthesis_failure_and_keeps_reading(self):
+        lines = iter(["bad voice", "works", "/quit"])
+        calls = []
+
+        def synthesize(text, voice, rate):
+            calls.append(text)
+            if text == "bad voice":
+                raise SpeechSynthesisError("voice unavailable")
+            return b"pcm"
+
+        error_output = io.StringIO()
+        standard_output = io.StringIO()
+        with redirect_stderr(error_output), redirect_stdout(standard_output):
+            result = await _run(
+                arguments(
+                    "speak",
+                    destination="virtual_input",
+                    voice=None,
+                    rate=None,
+                    buffer_ms=60,
+                ),
+                FakeClient,
+                line_reader=lambda prompt: next(lines),
+                synthesizer=synthesize,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["bad voice", "works"])
+        self.assertEqual(FakeClient.last_instance.output.writes, [b"pcm"])
+        self.assertIn("voice unavailable", error_output.getvalue())
+
+    async def test_speak_parser_defaults_to_first_party_virtual_input(self):
+        parsed = _parser().parse_args(["speak"])
+        self.assertEqual(parsed.destination, "coreaudio:com.audioplane.input.device")
+        self.assertEqual(parsed.buffer_ms, 60)
+        self.assertIsNone(parsed.voice)
+        self.assertIsNone(parsed.rate)
 
 
 if __name__ == "__main__":

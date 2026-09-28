@@ -189,6 +189,22 @@ sonexisctl play /path/to/audio.wav \
   --destination coreaudio:com.audioplane.input.device --debug
 ```
 
+For a quick interactive text-to-microphone test, keep the Runtime running and
+use the Python CLI. It opens one output session and speaks every submitted line
+until `/quit`, `/exit`, `Ctrl-D`, or `Ctrl-C`:
+
+```text
+$ audioplane speak
+AudioPlane Input ready. Type text and press Enter; /quit exits.
+> hello everyone
+> this is another line
+> /quit
+```
+
+macOS `say` performs local speech synthesis; no text or audio is sent to a
+cloud service. Use `--voice NAME`, `--rate WORDS_PER_MINUTE`, or
+`--destination ID_OR_NAME` to override the defaults.
+
 BlackHole remains supported as a fallback. The first-party driver is currently
 a source-built developer preview and still requires the documented manual
 end-to-end validation before a packaged release.
