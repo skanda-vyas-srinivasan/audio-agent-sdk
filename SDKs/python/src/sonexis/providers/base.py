@@ -25,6 +25,7 @@ class ProviderEvent:
     raw: Any = None
     response_started: bool = False
     response_completed: bool = False
+    response_interrupted: bool = False
     source_id: Optional[str] = None
     session_id: Optional[str] = None
     stream_id: Optional[str] = None

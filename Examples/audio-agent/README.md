@@ -70,8 +70,10 @@ replaces stale audio and the next delivered frame carries a discontinuity plus
 the exact dropped-frame count. While a non-interruptible Gemini response is
 active, new input is intentionally discarded so turns cannot accumulate tens
 of seconds behind the response. `--gemini-barge-in` disables that suppression
-and allows new activity to interrupt the active response. Stream diagnostics
-report this separately as `provider_dropped` and `provider_queue_hwm`.
+and allows new activity to interrupt the active response. An interruption also
+discards queued model speech and flushes Runtime's render buffer, so stale bot
+audio does not continue playing after the barge-in. Stream diagnostics report
+input shedding separately as `provider_dropped` and `provider_queue_hwm`.
 
 `--response-output DESTINATION` routes returned provider PCM through Sonexis
 Runtime's bounded output plane. `--play-response` is shorthand for destination

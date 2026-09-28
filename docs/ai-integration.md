@@ -145,7 +145,9 @@ audio into seconds-old audio. By default the reference application also drops
 new source audio while a non-interruptible Gemini response is active, avoiding
 an unbounded sequence of stale turns. `--gemini-barge-in` opts into overlapping
 input and Gemini's interruption behavior when that conversational policy is
-preferred.
+preferred. On a server interruption event, the reference application discards
+queued response PCM and flushes Runtime's output stream before playing the next
+response.
 
 The authenticated live path was validated on 2026-09-26 with Google Chrome:
 local activity start/end were detected, exactly one `audio_stream_end` was

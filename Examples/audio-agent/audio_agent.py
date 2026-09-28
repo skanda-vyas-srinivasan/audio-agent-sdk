@@ -322,6 +322,8 @@ class _QueuedProviderAudio:
     data: bytes
     audio_format: AudioFormat
     finish_response: bool = False
+    interrupt_response: bool = False
+    epoch: int = 0
 
 
 class RuntimeResponsePlayer:
@@ -361,6 +363,7 @@ class RuntimeResponsePlayer:
         self._output = None
         self._format: Optional[AudioFormat] = None
         self._playback_cursor: Optional[float] = None
+        self._response_epoch = 0
         self._pending_bytes = 0
         self._queue: "asyncio.Queue[Optional[_QueuedProviderAudio]]" = (
             asyncio.Queue(maxsize=max_pending_chunks))
@@ -392,7 +395,8 @@ class RuntimeResponsePlayer:
             raise RuntimeError(
                 f"{event.provider} returned a partial interleaved PCM frame")
         await self._enqueue(_QueuedProviderAudio(
-            event.provider, data, event.audio_format))
+            event.provider, data, event.audio_format,
+            epoch=self._response_epoch))
         if self._debug:
             print(
                 f"\nOutput debug: buffered {len(data)} provider audio bytes "
@@ -403,7 +407,25 @@ class RuntimeResponsePlayer:
         if self._format is None:
             return
         await self._enqueue(_QueuedProviderAudio(
-            "provider", b"", self._format, finish_response=True))
+            "provider", b"", self._format, finish_response=True,
+            epoch=self._response_epoch))
+
+    async def interrupt_response(self) -> None:
+        """Discard queued/generated speech after a provider barge-in event."""
+        if self._format is None:
+            return
+        self._response_epoch += 1
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item is not None:
+                self._pending_bytes -= len(item.data)
+            self._queue.task_done()
+        await self._enqueue(_QueuedProviderAudio(
+            "provider", b"", self._format, interrupt_response=True,
+            epoch=self._response_epoch))
 
     async def _enqueue(self, item: _QueuedProviderAudio) -> None:
         if self._closed:
@@ -441,8 +463,10 @@ class RuntimeResponsePlayer:
             f"(output session {self._output.info.id})")
 
     async def _write_paced(
-        self, provider: str, data: bytes, audio_format: AudioFormat,
-    ) -> None:
+        self, provider: str, data: bytes, audio_format: AudioFormat, epoch: int,
+    ) -> bool:
+        if epoch != self._response_epoch:
+            return False
         await self._open_output(provider, audio_format)
         frame_size = (audio_format.channels
                       * audio_format.sample_format.bytes_per_sample)
@@ -458,14 +482,18 @@ class RuntimeResponsePlayer:
             now = self._clock()
             if self._playback_cursor < now:
                 self._playback_cursor = now
+        if epoch != self._response_epoch:
+            return False
         await self._output.write(data)
         self._playback_cursor += duration
+        return True
 
     async def _flush_audio(
         self,
         pending: bytearray,
         provider: str,
         audio_format: AudioFormat,
+        epoch: int,
         *,
         final: bool,
     ) -> None:
@@ -478,15 +506,24 @@ class RuntimeResponsePlayer:
         )
         chunk_bytes = chunk_frames * frame_size
         while len(pending) >= chunk_bytes:
+            if epoch != self._response_epoch:
+                pending.clear()
+                return
             chunk = bytes(pending[:chunk_bytes])
             del pending[:chunk_bytes]
-            await self._write_paced(provider, chunk, audio_format)
+            if not await self._write_paced(
+                    provider, chunk, audio_format, epoch):
+                pending.clear()
+                return
         if final and pending:
+            if epoch != self._response_epoch:
+                pending.clear()
+                return
             if len(pending) < minimum_bytes:
                 pending.extend(b"\0" * (minimum_bytes - len(pending)))
             chunk = bytes(pending)
             pending.clear()
-            await self._write_paced(provider, chunk, audio_format)
+            await self._write_paced(provider, chunk, audio_format, epoch)
 
     async def _run(self) -> None:
         pending = bytearray()
@@ -498,8 +535,17 @@ class RuntimeResponsePlayer:
                     if item is None:
                         if self._format is not None:
                             await self._flush_audio(
-                                pending, pending_provider, self._format, final=True)
+                                pending, pending_provider, self._format,
+                                self._response_epoch, final=True)
                         return
+                    if item.interrupt_response:
+                        pending.clear()
+                        self._playback_cursor = None
+                        if self._output is not None:
+                            await self._output.flush()
+                        continue
+                    if item.epoch != self._response_epoch:
+                        continue
                     if item.data:
                         pending_provider = item.provider
                         pending.extend(item.data)
@@ -507,6 +553,7 @@ class RuntimeResponsePlayer:
                         pending,
                         pending_provider,
                         item.audio_format,
+                        item.epoch,
                         final=item.finish_response,
                     )
                 finally:
@@ -680,7 +727,10 @@ async def print_provider_events(
                 print(f"\nAgent ({event.provider}): received {len(event.audio)} audio bytes")
             if event.response_completed and response_player is not None:
                 await response_player.finish_response()
-            if event.response_completed and input_forwarder is not None:
+            if event.response_interrupted and response_player is not None:
+                await response_player.interrupt_response()
+            if ((event.response_completed or event.response_interrupted)
+                    and input_forwarder is not None):
                 input_forwarder.resume()
             if (debug and not event.text and not event.audio
                     and event.type not in {"session.started", "session.updated"}):

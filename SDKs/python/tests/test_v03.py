@@ -682,6 +682,20 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(debug, ["Gemini hearing: still listening"])
         await sink.aclose()
 
+    async def test_gemini_surfaces_response_interruption(self):
+        session = FakeGeminiSession()
+        debug = []
+        session.received.append(SimpleNamespace(server_content=SimpleNamespace(
+            input_transcription=None, output_transcription=None,
+            model_turn=None, turn_complete=False, interrupted=True)))
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value, debug_callback=debug.append)
+        event = await sink.events().__anext__()
+        self.assertTrue(event.response_interrupted)
+        self.assertFalse(event.response_completed)
+        self.assertEqual(debug, ["Gemini response interrupted"])
+        await sink.aclose()
+
     async def test_gemini_receives_multiple_turn_bounded_iterators(self):
         def turn(text):
             return SimpleNamespace(server_content=SimpleNamespace(
@@ -1239,6 +1253,67 @@ class ReferenceProviderOutputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(player.finishes, 1)
         self.assertEqual(forwarder.pauses, 1)
         self.assertEqual(forwarder.resumes, 1)
+
+    async def test_barge_in_discards_queued_and_runtime_buffered_speech(self):
+        from sonexis.providers import ProviderEvent
+
+        class ControlledSleep:
+            def __init__(self):
+                self.now = 100.0
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            def clock(self):
+                return self.now
+
+            async def sleep(self, duration):
+                self.started.set()
+                await self.release.wait()
+                self.now += duration
+
+        class Output:
+            info = SimpleNamespace(id="output", destination_id="virtual")
+            metrics = SimpleNamespace(frames_rendered=0)
+
+            def __init__(self):
+                self.writes = []
+                self.flushed = asyncio.Event()
+
+            async def write(self, value):
+                self.writes.append(bytes(value))
+
+            async def flush(self):
+                self.flushed.set()
+
+            async def aclose(self, *, drain):
+                pass
+
+        class Client:
+            def __init__(self):
+                self.output = Output()
+
+            async def playback(self, *, destination, format):
+                return self.output
+
+        timing = ControlledSleep()
+        client = Client()
+        player = self.module.RuntimeResponsePlayer(
+            client,
+            "virtual",
+            debug=False,
+            max_playback_lead_milliseconds=50,
+            clock=timing.clock,
+            sleep=timing.sleep,
+        )
+        await player.write(ProviderEvent(
+            "gemini", "audio", audio=b"\x01\x02" * 12_000,
+            audio_format=AudioFormat.gemini_live_output()))
+        await timing.started.wait()
+        await asyncio.wait_for(player.interrupt_response(), timeout=0.05)
+        timing.release.set()
+        await asyncio.wait_for(client.output.flushed.wait(), timeout=0.1)
+        await player.close()
+        self.assertEqual(len(client.output.writes), 1)
 
     async def test_provider_input_queue_drops_oldest_without_blocking_capture(self):
         audio_format = AudioFormat.gemini_live()

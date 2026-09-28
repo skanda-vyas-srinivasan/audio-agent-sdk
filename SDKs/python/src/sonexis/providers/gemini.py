@@ -344,8 +344,10 @@ class GeminiLiveSink:
                             timing = f" ({latency_ms:.0f} ms after turn end)"
                             self._last_turn_finalized_at = None
                         self._debug(f"Gemini response start{timing}")
-                    if bool(getattr(server, "interrupted", False)):
+                    interrupted = bool(getattr(server, "interrupted", False))
+                    if interrupted:
                         self._debug("Gemini response interrupted")
+                        self._response_in_progress = False
                     turn_complete = bool(getattr(server, "turn_complete", False))
                     if turn_complete:
                         self._debug("Gemini turn complete")
@@ -360,6 +362,7 @@ class GeminiLiveSink:
                         raw=value,
                         response_started=response_started,
                         response_completed=turn_complete,
+                        response_interrupted=interrupted,
                         **self._validator.event_fields(),
                     )
                 # Gemini receive iterators are turn-bounded. Re-enter after a
