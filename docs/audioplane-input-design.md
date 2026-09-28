@@ -133,3 +133,12 @@ Physical microphone passthrough can later be implemented above this stable
 device boundary by capturing the chosen microphone, mixing it with generated
 audio outside the HAL callback, and writing the result to `AudioPlane Input`.
 That work must not make the virtual device itself dependent on Runtime state.
+
+## Security boundary
+
+The injection stream is discoverable through Core Audio; “injection” is a role,
+not an access-control boundary. Any local process permitted to open the device
+can write audio that a process reading `AudioPlane Input` receives. The driver
+does not listen on a network socket, create shared-memory names, read files, or
+persist samples. Runtime's same-user socket policy remains separate from Core
+Audio's device access policy.

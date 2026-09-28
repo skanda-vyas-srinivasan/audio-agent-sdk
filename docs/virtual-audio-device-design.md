@@ -1,124 +1,124 @@
 # Virtual audio input design
 
-## v0.6 decision for the 1.0 line
+## Current decision
 
-Runtime v0.6 supports installed Core Audio loopback devices as first-class
+AudioPlane supports installed Core Audio loopback devices as first-class
 `virtual_input` output destinations when they expose both output and input
-streams and their name/UID identifies a loopback/virtual device. It was live-tested with `BlackHole 2ch`:
-Sonexis accepted 24 kHz mono PCM, converted it to the device's 48 kHz stereo
-format, rendered the exact expected device-frame count, and reported zero
-drops. This validates Runtime's output half of the loopback path. Selecting the
-device as a microphone and confirming receipt in another application remains a
-separate manual validation.
+streams and their name or UID identifies a loopback device. This was
+live-tested with `BlackHole 2ch`: Runtime accepted 24 kHz mono PCM, converted it
+to the device's 48 kHz stereo format, rendered the exact expected frame count,
+and reported zero drops.
 
-The `virtual_input` label is an advisory name/UID plus input-stream heuristic,
+The repository now also includes a source-built developer preview of the
+first-party `AudioPlane Input` HAL driver. It starts from Apple's complete
+minimal AudioServerPlugIn property model and adds a bounded lock-free loopback
+transport. Runtime discovers and writes to it through normal Core Audio, using
+the same output path as BlackHole. There is no private Runtime/driver protocol.
+
+The driver builds and passes bundle, factory, property, realtime ring, loopback,
+and Thread Sanitizer tests without installation. System installation, Audio
+MIDI Setup enumeration, and receipt by Discord or Zoom remain manual tests and
+are not claimed as passed. BlackHole remains the live-validated fallback.
+
+The `virtual_input` kind is an advisory name/UID plus input-stream heuristic,
 not an authorization or connectivity guarantee. Any local process able to open
-the loopback device's input stream can read audio injected there. v0.4 supports
-only single-output-stream, one- or two-channel devices; more complex aggregate
-or multi-stream layouts are rejected.
-
-Sonexis Runtime 1.0 will **not** install a first-party Sonexis HAL driver.
-Shipping an unreviewed
-driver merely to claim completion would put the system audio service at risk.
-Apple's supported sample is a 4,000-plus-line AudioServerPlugIn with a large HAL
-property surface; its null device does not provide Sonexis's required loopback
-transport. Installation requires administrator authorization, placement in
-`/Library/Audio/Plug-Ins/HAL`, and a reboot. Production distribution also
-requires a driver-specific signing/notarization/installer lifecycle that is not
-covered by the Runtime's executable signing identity.
-
-This is a deliberate 1.0 product boundary, not a claim that macOS cannot implement
-the device. Generic destination support ships and validates the
-Runtime-to-installed-loopback output path without coupling Runtime to a
-particular driver. It does not by itself prove receipt by Discord, Zoom, or a
-browser.
-
-The v0.6 endpoint APIs remove the main usability penalty of this decision:
-installed loopback devices have stable IDs, exact-name/kind resolution,
-add/remove/update events, wait helpers, native-format metadata, and advisory
-duplex feedback warnings. Owning a driver would still require a separate
-installer/signing/recovery program and would increase the blast radius from one
-user process to system audio. That trade is not responsible before the Runtime
-API, distribution, and long-soak behavior reach 1.0.
+a loopback device's input can read injected audio, and any process able to open
+its output can inject audio. Runtime supports single-output-stream, one- or
+two-channel destinations; more complex aggregate or multistream layouts are
+rejected.
 
 ## Mechanisms considered
 
 ### Normal HAL playback
 
-The Runtime can render to the default or a fixed output device with
-`AudioDeviceCreateIOProcID`. It is the correct mechanism for speakers,
+Runtime renders to the default or a fixed output device with
+`AudioDeviceCreateIOProcID`. This is the correct mechanism for speakers,
 headphones, and the output side of a loopback driver. It cannot make a new
 microphone device appear by itself.
 
 ### Aggregate device
 
 `AudioHardwareCreateAggregateDevice` combines streams from existing devices.
-It does not create a new transport and therefore cannot replace a loopback
-driver. Wrapping an installed loopback only changes presentation and adds
-lifecycle complexity.
+It does not create a transport and therefore cannot replace a loopback driver.
+Wrapping an installed loopback only changes presentation and adds lifecycle
+complexity.
 
 ### AudioServerPlugIn HAL driver
 
 Apple's supported virtual-device sample publishes a `.driver` plug-in with
-Float32 two-channel input/output at 44.1/48 kHz. This is the appropriate basis
-for a future `Sonexis Agent Input`. The safe architecture is:
+Float32 two-channel input/output at 44.1 and 48 kHz. AudioPlane uses this
+architecture:
 
 ```text
-Runtime --HAL writes--> hidden/injection output stream
-                              │
+Runtime --HAL writes--> AudioPlane injection output
+                              |
                     driver-owned bounded ring
-                              │
-application <--HAL reads-- visible Sonexis Agent Input
+                              |
+application <--HAL reads-- AudioPlane Input
 ```
 
-Using the normal HAL write path avoids custom Runtime-to-driver socket or
-shared-memory IPC. The driver's realtime callbacks index a preallocated ring by
-HAL sample time, return silence on underrun, never block, and never allocate or
-log. The device can remain loaded while Runtime is absent.
+Using the normal HAL write path avoids custom Runtime-to-driver sockets or
+shared-memory IPC. The driver's realtime callbacks use a preallocated SPSC
+ring, return silence on underrun, drop newest frames on overflow, never block,
+and never allocate or log. The device remains safe and silent when Runtime is
+absent.
 
 ### DriverKit audio extension
 
-Apple's AudioServerPlugIn + DriverKit sample targets hardware-backed drivers and
-requires DriverKit entitlements/provisioning (or disabling SIP for ad-hoc local
-testing). That is disproportionate for a virtual-only loopback. A conventional
-AudioServerPlugIn is the narrower design for the first Sonexis virtual device.
+Apple recommends AudioServerPlugIn for virtual devices. Its AudioDriverKit
+sample targets hardware-backed drivers and adds DriverKit entitlements,
+provisioning, an app host, and an activation lifecycle. That is disproportionate
+for this virtual-only loopback.
 
-## Required branded-driver work
+## Implemented developer-preview boundary
 
-A production-quality future driver must implement and independently validate:
+The repository includes:
 
-- a complete HAL object/property model and correct stream formats;
-- a visible input and private injection output with stable UIDs;
-- an allocation-free, lock-free, sample-time-indexed ring;
-- multi-client StartIO/StopIO ownership and zero timestamps;
-- format/rate changes, device unload, Runtime absence/restart, and stale audio;
-- underrun/overrun counters without realtime logging;
-- signed Debug and Developer ID distribution identities;
-- an idempotent privileged installer and target-specific uninstaller;
-- reboot/coreaudiod lifecycle instructions and recovery from a bad install;
-- Apple Silicon and Intel testing plus Audio MIDI Setup, Discord, Zoom, and
-  browser validation.
+- Apple's complete sample HAL object/property model, branded stable UIDs, and
+  two-channel Float32 input/output at 44.1/48 kHz;
+- a fixed-capacity, allocation-free SPSC ring;
+- multi-client StartIO/StopIO ownership and lock-free zero timestamps;
+- silence on underrun and bounded drop-newest overflow;
+- universal arm64/x86_64 builds and Apple Development signing discovery;
+- explicit target-specific install/uninstall scripts with bundle and symlink
+  validation;
+- contract tests that load the built bundle and verify write-to-read sample
+  identity;
+- standalone ring tests and Thread Sanitizer coverage.
 
-If a future driver exposes a private injection output alongside the public
-microphone input, that output also needs an explicit access-control and
-discoverability design. A hidden-looking Core Audio stream is not a security
-boundary.
+Production work still includes Developer ID/notarized packaging, installed
+Intel validation, exposed driver metrics, deeper device unload/restart stress,
+and interactive Audio MIDI Setup, Discord, Zoom, and browser validation.
 
-The installer must print its exact target, require an explicit confirmation or
-administrator invocation, verify bundle ID/signature before copying, never
-delete wildcard paths, and leave unrelated HAL plug-ins untouched.
+The injection output is discoverable. Its name is not a security boundary.
+Physical microphone passthrough, automatic device switching, and acoustic echo
+cancellation are separate higher-level features and are not implemented in the
+driver.
 
-## Current development flow
+## Installation safety
 
-Install a trusted, signed loopback driver using that driver's own installer.
-Do not copy third-party bundles with a Sonexis script. Start Runtime, run
-`sonexisctl outputs --json`, and select the returned `virtual_input` ID. The
-Runtime does not need to restart when it enumerates a device, but a newly
-installed HAL driver normally requires the vendor/Apple-prescribed reboot.
+The installer prints its exact target, invokes administrator authorization
+explicitly, verifies the bundle ID and signature before copying, rejects
+symlinks, never deletes wildcard paths, and leaves unrelated HAL plug-ins
+untouched. The uninstaller only removes the exact AudioPlane bundle after
+revalidating its identifier.
 
-No Sonexis install/uninstall script is included because there is no Sonexis
-driver artifact to install. Exact current validation is in
-`runtime-v0.4-manual-validation.md`.
+Build and test without changing system state:
+
+```bash
+./Scripts/build-audioplane-input-dev.sh
+```
+
+Installation is a separate explicit step:
+
+```bash
+./Scripts/install-audioplane-input.sh
+```
+
+The script does not restart Core Audio or change any default device. After a
+reboot, use `audioplane outputs` or `sonexisctl outputs --json` and select
+`coreaudio:com.audioplane.input.device`. Exact steps and unrun test status are
+in [AudioPlane Input manual validation](audioplane-input-manual-validation.md).
 
 ## References
 
@@ -127,4 +127,4 @@ driver artifact to install. Exact current validation is in
 - Apple, [AudioHardwareAggregateDevice](https://developer.apple.com/documentation/coreaudio/audiohardwareaggregatedevice)
 - Apple, [AudioHardwareCreateAggregateDevice](https://developer.apple.com/documentation/coreaudio/audiohardwarecreateaggregatedevice(_:_:))
 - [BlackHole](https://github.com/ExistentialAudio/BlackHole), used only as an
-  installed compatibility target; no BlackHole code is copied into Sonexis.
+  installed compatibility target; no BlackHole code is copied into AudioPlane.

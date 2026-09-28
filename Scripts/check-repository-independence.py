@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove Runtime is self-contained and carries no Sonexis App dependency."""
+"""Prove AudioPlane is self-contained and carries no Sonexis App dependency."""
 
 from pathlib import Path
 import subprocess
@@ -21,8 +21,14 @@ def fail(message: str) -> None:
 
 
 def main() -> None:
-    if git("remote"):
-        fail("standalone source must not inherit a Sonexis App remote")
+    for remote in git("remote").splitlines():
+        urls = git("remote", "get-url", "--all", remote).splitlines()
+        for url in urls:
+            repository_name = url.rstrip("/").rsplit("/", 1)[-1]
+            if repository_name.endswith(".git"):
+                repository_name = repository_name[:-4]
+            if repository_name.lower() != "audioplane":
+                fail(f"unexpected remote repository for {remote}: {url}")
 
     package = (ROOT / "Package.swift").read_text(encoding="utf-8")
     if '.package(path: "SonexisAudioEngine")' not in package:

@@ -4,6 +4,7 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 "$ROOT_DIR/Scripts/test-standalone.sh"
 "$ROOT_DIR/Scripts/build-signed-runtime-dev.sh"
+"$ROOT_DIR/Scripts/build-audioplane-input-dev.sh"
 
 RUNTIME="$ROOT_DIR/.build/signed-dev/bin/sonexis-runtime"
 CLI="$ROOT_DIR/.build/signed-dev/bin/sonexisctl"
@@ -16,4 +17,4 @@ strings "$RUNTIME" | grep -F '<key>NSAudioCaptureUsageDescription</key>' >/dev/n
     "com.sonexis.runtime" ]
 "$ROOT_DIR/Scripts/test-runtime-install.sh"
 
-echo "Standalone Sonexis Runtime release gate passed"
+echo "Standalone AudioPlane Runtime and virtual-input release gate passed"
