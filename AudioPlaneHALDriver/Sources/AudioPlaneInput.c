@@ -4245,8 +4245,10 @@ static OSStatus	AudioPlaneInput_DoIOOperation(AudioServerPlugInDriverRef inDrive
 	}
 	else if((inOperationID == kAudioServerPlugInIOOperationReadInput) && (inStreamObjectID == kObjectID_Stream_Input))
 	{
-		(void)AudioPlaneRingBufferRead(&gAudioPlaneTransport, (Float32*)ioMainBuffer,
-										inIOBufferFrameSize);
+		const UInt32 primeFrames = inIOBufferFrameSize > (UINT32_MAX / 2)
+			? UINT32_MAX : inIOBufferFrameSize * 2;
+		(void)AudioPlaneRingBufferReadPrimed(&gAudioPlaneTransport, (Float32*)ioMainBuffer,
+										inIOBufferFrameSize, primeFrames);
 	}
 
 	return theAnswer;

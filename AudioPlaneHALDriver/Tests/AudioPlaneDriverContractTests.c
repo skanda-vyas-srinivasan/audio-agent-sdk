@@ -164,9 +164,11 @@ int main(int argc, char **argv)
 
     enum { frameCount = 128, sampleCount = frameCount * 2 };
     float injected[sampleCount];
+    float injectedNext[sampleCount];
     float captured[sampleCount];
     for(size_t index = 0; index < sampleCount; ++index) {
         injected[index] = sinf((float)index * 0.07f) * 0.5f;
+        injectedNext[index] = cosf((float)index * 0.05f) * 0.25f;
         captured[index] = 99.0f;
     }
     AudioServerPlugInIOCycleInfo cycle = {0};
@@ -176,7 +178,23 @@ int main(int argc, char **argv)
     assert((*driver)->DoIOOperation(driver, kAudioPlaneDeviceObject,
         kAudioPlaneInputStreamObject, 7, kAudioServerPlugInIOOperationReadInput,
         frameCount, &cycle, captured, NULL) == noErr);
+    for(size_t index = 0; index < sampleCount; ++index) {
+        assert(captured[index] == 0.0f);
+    }
+
+    assert((*driver)->DoIOOperation(driver, kAudioPlaneDeviceObject,
+        kAudioPlaneOutputStreamObject, 7, kAudioServerPlugInIOOperationWriteMix,
+        frameCount, &cycle, injectedNext, NULL) == noErr);
+    assert((*driver)->DoIOOperation(driver, kAudioPlaneDeviceObject,
+        kAudioPlaneInputStreamObject, 7, kAudioServerPlugInIOOperationReadInput,
+        frameCount, &cycle, captured, NULL) == noErr);
     assert(memcmp(injected, captured, sizeof(injected)) == 0);
+
+    memset(captured, 0x7f, sizeof(captured));
+    assert((*driver)->DoIOOperation(driver, kAudioPlaneDeviceObject,
+        kAudioPlaneInputStreamObject, 7, kAudioServerPlugInIOOperationReadInput,
+        frameCount, &cycle, captured, NULL) == noErr);
+    assert(memcmp(injectedNext, captured, sizeof(injectedNext)) == 0);
 
     memset(captured, 0x7f, sizeof(captured));
     assert((*driver)->DoIOOperation(driver, kAudioPlaneDeviceObject,

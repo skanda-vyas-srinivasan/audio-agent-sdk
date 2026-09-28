@@ -17,6 +17,7 @@ typedef struct AudioPlaneRingBuffer {
     _Atomic uint64_t writeFrame;
     _Atomic uint64_t droppedFrames;
     _Atomic uint64_t underrunFrames;
+    _Atomic bool readPrimed;
 } AudioPlaneRingBuffer;
 
 bool AudioPlaneRingBufferInitialize(AudioPlaneRingBuffer *ring, float *storage,
@@ -26,6 +27,8 @@ uint32_t AudioPlaneRingBufferWrite(AudioPlaneRingBuffer *ring, const float *sour
                                    uint32_t frameCount);
 uint32_t AudioPlaneRingBufferRead(AudioPlaneRingBuffer *ring, float *destination,
                                   uint32_t frameCount);
+uint32_t AudioPlaneRingBufferReadPrimed(AudioPlaneRingBuffer *ring, float *destination,
+                                        uint32_t frameCount, uint32_t primeFrameCount);
 uint32_t AudioPlaneRingBufferQueuedFrames(const AudioPlaneRingBuffer *ring);
 uint64_t AudioPlaneRingBufferDroppedFrames(const AudioPlaneRingBuffer *ring);
 uint64_t AudioPlaneRingBufferUnderrunFrames(const AudioPlaneRingBuffer *ring);

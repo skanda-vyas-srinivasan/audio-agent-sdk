@@ -374,12 +374,11 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         lifecycleQueue.setSpecific(key: lifecycleKey, value: 1)
         let deviceID = try Self.resolveDevice(destinationID)
         let summary = try CoreAudioSupport.deviceSummary(deviceID)
-        let signature = "\(summary.name) \(summary.uid)".lowercased()
-        let looksVirtual = signature.contains("sonexis") || signature.contains("blackhole")
-            || signature.contains("loopback") || signature.contains("soundflower")
         let hasInput = !(try CoreAudioSupport.inputStreamIDs(deviceID)).isEmpty
         destination = RuntimeOutputDestinationDTO(id: destinationID,
-            kind: destinationID != "default" && looksVirtual && hasInput ? .virtualInput : .playback,
+            kind: destinationID == "default" ? .playback
+                : RuntimeHALPlaybackBackend.classifyDestination(
+                    name: summary.name, uid: summary.uid, hasInput: hasInput),
             name: destinationID == "default" ? "Default macOS Output" : summary.name,
             isAvailable: true, isDefault: destinationID == "default",
             followsSystemDefault: destinationID == "default", activeDeviceName: summary.name)

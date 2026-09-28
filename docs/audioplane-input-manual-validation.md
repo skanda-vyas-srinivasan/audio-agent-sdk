@@ -13,6 +13,7 @@ microphone inside third-party applications is interactive.
 - lock-free ring tests and Thread Sanitizer: **PASSED**
 - initial system installation and Core Audio enumeration: **PASSED**
 - corrected `AudioPlane Input` data-source label after reinstall: **NOT RUN**
+- v0.1.2 callback-jitter cushion after reinstall: **NOT RUN**
 - Discord/Zoom microphone reception: **NOT RUN**
 - uninstall/reboot recovery: **NOT RUN**
 
@@ -20,7 +21,9 @@ The first installed build loaded successfully and appeared as a virtual
 microphone in an application device picker. That validation exposed the Apple
 sample placeholder label `Data Source Item 0 (Virtual)`. Driver version 0.1.1
 replaces the placeholder with the stable `AudioPlane Input` data-source name;
-the corrected label still requires reinstall/reboot confirmation.
+driver version 0.1.2 also adds bounded two-callback priming to prevent scheduling
+jitter from splicing silence into active audio. Both changes still require
+reinstall/reboot confirmation.
 
 ## 1. Build without installing
 

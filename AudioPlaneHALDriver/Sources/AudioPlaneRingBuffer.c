@@ -63,6 +63,7 @@ void AudioPlaneRingBufferReset(AudioPlaneRingBuffer *ring)
     atomic_store_explicit(&ring->writeFrame, 0, memory_order_relaxed);
     atomic_store_explicit(&ring->droppedFrames, 0, memory_order_relaxed);
     atomic_store_explicit(&ring->underrunFrames, 0, memory_order_relaxed);
+    atomic_store_explicit(&ring->readPrimed, false, memory_order_relaxed);
 }
 
 uint32_t AudioPlaneRingBufferWrite(AudioPlaneRingBuffer *ring, const float *source,
@@ -120,6 +121,39 @@ uint32_t AudioPlaneRingBufferRead(AudioPlaneRingBuffer *ring, float *destination
                (size_t)missing * ring->channels * sizeof(float));
         atomic_fetch_add_explicit(&ring->underrunFrames, missing,
                                   memory_order_relaxed);
+    }
+    return copied;
+}
+
+uint32_t AudioPlaneRingBufferReadPrimed(AudioPlaneRingBuffer *ring, float *destination,
+                                        uint32_t frameCount, uint32_t primeFrameCount)
+{
+    if(ring == NULL || destination == NULL || frameCount == 0) {
+        return 0;
+    }
+
+    uint32_t threshold = primeFrameCount;
+    if(threshold < frameCount) {
+        threshold = frameCount;
+    }
+    if(threshold > ring->capacityFrames) {
+        threshold = ring->capacityFrames;
+    }
+    if(!atomic_load_explicit(&ring->readPrimed, memory_order_acquire)) {
+        if(AudioPlaneRingBufferQueuedFrames(ring) < threshold) {
+            memset(destination, 0,
+                   (size_t)frameCount * ring->channels * sizeof(float));
+            return 0;
+        }
+        atomic_store_explicit(&ring->readPrimed, true, memory_order_release);
+    }
+
+    const uint32_t copied = AudioPlaneRingBufferRead(ring, destination, frameCount);
+    if(copied < frameCount) {
+        // A real transport gap occurred. Require the bounded safety cushion to
+        // refill before exposing more samples so callback scheduling jitter
+        // cannot alternate tiny audio fragments with silence.
+        atomic_store_explicit(&ring->readPrimed, false, memory_order_release);
     }
     return copied;
 }

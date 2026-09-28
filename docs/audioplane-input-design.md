@@ -76,7 +76,11 @@ considered after the 48 kHz path is live-tested.
 
 The output callback copies interleaved Float32 frames into a fixed-capacity
 single-producer/single-consumer ring. The input callback removes available
-frames and fills any shortage with silence.
+frames and fills any shortage with silence. Before initial delivery—and again
+after a real underrun—the reader waits for two Core Audio callback blocks. This
+small bounded cushion prevents independent input/output callback scheduling
+from alternating short audio fragments with silence. It adds one callback of
+steady-state latency rather than growing the queue dynamically.
 
 The callback path must not:
 

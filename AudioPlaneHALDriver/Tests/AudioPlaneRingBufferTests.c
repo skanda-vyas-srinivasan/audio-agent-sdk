@@ -73,6 +73,55 @@ static void testUnderrunFillsSilence(void)
     assert(AudioPlaneRingBufferUnderrunFrames(&ring) == 2);
 }
 
+static void testPrimedReadKeepsCallbackSafetyCushion(void)
+{
+    float storage[24] = {0};
+    AudioPlaneRingBuffer ring;
+    assert(AudioPlaneRingBufferInitialize(&ring, storage, 12, 1));
+    const float first[] = {1, 2, 3, 4};
+    const float second[] = {5, 6, 7, 8};
+    const float third[] = {9, 10, 11, 12};
+    float output[4] = {99, 99, 99, 99};
+
+    assert(AudioPlaneRingBufferWrite(&ring, first, 4) == 4);
+    assert(AudioPlaneRingBufferReadPrimed(&ring, output, 4, 8) == 0);
+    for(size_t index = 0; index < 4; ++index) {
+        expectSample(output[index], 0);
+    }
+    assert(AudioPlaneRingBufferQueuedFrames(&ring) == 4);
+
+    assert(AudioPlaneRingBufferWrite(&ring, second, 4) == 4);
+    assert(AudioPlaneRingBufferReadPrimed(&ring, output, 4, 8) == 4);
+    assert(memcmp(output, first, sizeof(first)) == 0);
+    assert(AudioPlaneRingBufferWrite(&ring, third, 4) == 4);
+    assert(AudioPlaneRingBufferReadPrimed(&ring, output, 4, 8) == 4);
+    assert(memcmp(output, second, sizeof(second)) == 0);
+}
+
+static void testPrimedReadRearmsAfterRealUnderrun(void)
+{
+    float storage[16] = {0};
+    AudioPlaneRingBuffer ring;
+    assert(AudioPlaneRingBufferInitialize(&ring, storage, 16, 1));
+    const float first[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const float second[] = {9, 10, 11, 12};
+    const float third[] = {13, 14, 15, 16};
+    float output[4] = {0};
+
+    assert(AudioPlaneRingBufferWrite(&ring, first, 8) == 8);
+    assert(AudioPlaneRingBufferReadPrimed(&ring, output, 4, 8) == 4);
+    assert(AudioPlaneRingBufferReadPrimed(&ring, output, 4, 8) == 4);
+    assert(AudioPlaneRingBufferReadPrimed(&ring, output, 4, 8) == 0);
+    assert(AudioPlaneRingBufferUnderrunFrames(&ring) == 4);
+
+    assert(AudioPlaneRingBufferWrite(&ring, second, 4) == 4);
+    assert(AudioPlaneRingBufferReadPrimed(&ring, output, 4, 8) == 0);
+    assert(AudioPlaneRingBufferQueuedFrames(&ring) == 4);
+    assert(AudioPlaneRingBufferWrite(&ring, third, 4) == 4);
+    assert(AudioPlaneRingBufferReadPrimed(&ring, output, 4, 8) == 4);
+    assert(memcmp(output, second, sizeof(second)) == 0);
+}
+
 typedef struct StressContext {
     AudioPlaneRingBuffer *ring;
     _Atomic bool producerDone;
@@ -129,6 +178,8 @@ int main(void)
     testWrap();
     testOverflowDropsNewest();
     testUnderrunFillsSilence();
+    testPrimedReadKeepsCallbackSafetyCushion();
+    testPrimedReadRearmsAfterRealUnderrun();
     testConcurrentStress();
     puts("AudioPlaneRingBufferTests passed");
     return 0;
