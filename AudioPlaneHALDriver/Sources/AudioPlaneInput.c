@@ -56,7 +56,7 @@ A minimal user-space driver.
 #else
 
 	#define	DebugMsg(...)				do {} while(0)
-	
+
 	#define	FailIf(inCondition, inHandler, inMessage)									\
 			if(inCondition)																\
 			{																			\
@@ -282,7 +282,7 @@ void*	AudioPlaneInput_Create(CFAllocatorRef inAllocator, CFUUIDRef inRequestedTy
 	//	the IUnknown methods that are used to discover that actual interface to talk to the driver.
 	//	The majority of the driver's initilization should be handled in the Initialize() method of
 	//	the driver's AudioServerPlugInDriverInterface.
-	
+
 	#pragma unused(inAllocator)
     void* theAnswer = NULL;
     if(CFEqual(inRequestedTypeUUID, kAudioServerPlugInTypeUUID))
@@ -305,7 +305,7 @@ static HRESULT	AudioPlaneInput_QueryInterface(void* inDriver, REFIID inUUID, LPV
 	//	declare the local variables
 	HRESULT theAnswer = 0;
 	CFUUIDRef theRequestedUUID = NULL;
-	
+
 	//	validate the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_QueryInterface: bad driver reference");
 	FailWithAction(outInterface == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_QueryInterface: no place to store the returned interface");
@@ -328,10 +328,10 @@ static HRESULT	AudioPlaneInput_QueryInterface(void* inDriver, REFIID inUUID, LPV
 	{
 		theAnswer = E_NOINTERFACE;
 	}
-	
+
 	//	make sure to release the UUID we created
 	CFRelease(theRequestedUUID);
-		
+
 Done:
 	return theAnswer;
 }
@@ -339,10 +339,10 @@ Done:
 static ULONG	AudioPlaneInput_AddRef(void* inDriver)
 {
 	//	This call returns the resulting reference count after the increment.
-	
+
 	//	declare the local variables
 	ULONG theAnswer = 0;
-	
+
 	//	check the arguments
 	FailIf(inDriver != gAudioServerPlugInDriverRef, Done, "AudioPlaneInput_AddRef: bad driver reference");
 
@@ -365,7 +365,7 @@ static ULONG	AudioPlaneInput_Release(void* inDriver)
 
 	//	declare the local variables
 	ULONG theAnswer = 0;
-	
+
 	//	check the arguments
 	FailIf(inDriver != gAudioServerPlugInDriverRef, Done, "AudioPlaneInput_Release: bad driver reference");
 
@@ -398,13 +398,13 @@ static OSStatus	AudioPlaneInput_Initialize(AudioServerPlugInDriverRef inDriver, 
 
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_Initialize: bad driver reference");
-	
+
 	//	store the AudioServerPlugInHostRef
 	gPlugIn_Host = inHost;
-	
+
 	//	initialize the box acquired property from the settings
 	CFPropertyListRef theSettingsData = NULL;
 	gPlugIn_Host->CopyFromStorage(gPlugIn_Host, CFSTR("box acquired"), &theSettingsData);
@@ -422,7 +422,7 @@ static OSStatus	AudioPlaneInput_Initialize(AudioServerPlugInDriverRef inDriver, 
 		}
 		CFRelease(theSettingsData);
 	}
-	
+
 	//	initialize the box name from the settings
 	gPlugIn_Host->CopyFromStorage(gPlugIn_Host, CFSTR("box acquired"), &theSettingsData);
 	if(theSettingsData != NULL)
@@ -434,7 +434,7 @@ static OSStatus	AudioPlaneInput_Initialize(AudioServerPlugInDriverRef inDriver, 
 		}
 		CFRelease(theSettingsData);
 	}
-	
+
 	//	set the box name directly as a last resort
 	if(gBox_Name == NULL)
 	{
@@ -443,14 +443,14 @@ static OSStatus	AudioPlaneInput_Initialize(AudioServerPlugInDriverRef inDriver, 
 
 	AudioPlaneRingBufferInitialize(&gAudioPlaneTransport, gAudioPlaneTransportStorage,
 								   kAudioPlaneTransportCapacityFrames, kAudioPlaneChannels);
-	
+
 	//	calculate the host ticks per frame
 	struct mach_timebase_info theTimeBaseInfo;
 	mach_timebase_info(&theTimeBaseInfo);
 	Float64 theHostClockFrequency = (Float64)theTimeBaseInfo.denom / (Float64)theTimeBaseInfo.numer;
 	theHostClockFrequency *= 1000000000.0;
 	gDevice_HostTicksPerFrame = theHostClockFrequency / gDevice_SampleRate;
-	
+
 Done:
 	return theAnswer;
 }
@@ -461,12 +461,12 @@ static OSStatus	AudioPlaneInput_CreateDevice(AudioServerPlugInDriverRef inDriver
 	//	create an AudioEndpointDevice from a set of AudioEndpoints. Since this driver is not a
 	//	Transport Manager, we just check the arguments and return
 	//	kAudioHardwareUnsupportedOperationError.
-	
+
 	#pragma unused(inDescription, inClientInfo, outDeviceObjectID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = kAudioHardwareUnsupportedOperationError;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_CreateDevice: bad driver reference");
 
@@ -479,12 +479,12 @@ static OSStatus	AudioPlaneInput_DestroyDevice(AudioServerPlugInDriverRef inDrive
 	//	This method is used to tell a driver that implements the Transport Manager semantics to
 	//	destroy an AudioEndpointDevice. Since this driver is not a Transport Manager, we just check
 	//	the arguments and return kAudioHardwareUnsupportedOperationError.
-	
+
 	#pragma unused(inDeviceObjectID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = kAudioHardwareUnsupportedOperationError;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_DestroyDevice: bad driver reference");
 
@@ -498,12 +498,12 @@ static OSStatus	AudioPlaneInput_AddDeviceClient(AudioServerPlugInDriverRef inDri
 	//	This allows the device to act differently depending on who the client is. This driver does
 	//	not need to track the clients using the device, so we just check the arguments and return
 	//	successfully.
-	
+
 	#pragma unused(inClientInfo)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_AddDeviceClient: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_AddDeviceClient: bad device ID");
@@ -517,12 +517,12 @@ static OSStatus	AudioPlaneInput_RemoveDeviceClient(AudioServerPlugInDriverRef in
 	//	This method is used to inform the driver about a client that is no longer using the given
 	//	device. This driver does not track clients, so we just check the arguments and return
 	//	successfully.
-	
+
 	#pragma unused(inClientInfo)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_RemoveDeviceClient: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_RemoveDeviceClient: bad device ID");
@@ -546,23 +546,23 @@ static OSStatus	AudioPlaneInput_PerformDeviceConfigurationChange(AudioServerPlug
 	//	For the device implemented by this driver, only sample rate changes go through this process
 	//	as it is the only state that can be changed for the device that isn't a control. For this
 	//	change, the new sample rate is passed in the inChangeAction argument.
-	
+
 	#pragma unused(inChangeInfo)
 
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_PerformDeviceConfigurationChange: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_PerformDeviceConfigurationChange: bad device ID");
 	FailWithAction((inChangeAction != 44100) && (inChangeAction != 48000), theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_PerformDeviceConfigurationChange: bad sample rate");
-	
+
 	//	lock the state mutex
 	pthread_mutex_lock(&gPlugIn_StateMutex);
-	
+
 	//	change the sample rate
 	gDevice_SampleRate = inChangeAction;
-	
+
 	//	recalculate the state that depends on the sample rate
 	struct mach_timebase_info theTimeBaseInfo;
 	mach_timebase_info(&theTimeBaseInfo);
@@ -572,7 +572,7 @@ static OSStatus	AudioPlaneInput_PerformDeviceConfigurationChange(AudioServerPlug
 
 	//	unlock the state mutex
 	pthread_mutex_unlock(&gPlugIn_StateMutex);
-	
+
 Done:
 	return theAnswer;
 }
@@ -588,7 +588,7 @@ static OSStatus	AudioPlaneInput_AbortDeviceConfigurationChange(AudioServerPlugIn
 
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_PerformDeviceConfigurationChange: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_PerformDeviceConfigurationChange: bad device ID");
@@ -602,14 +602,14 @@ Done:
 static Boolean	AudioPlaneInput_HasProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress)
 {
 	//	This method returns whether or not the given object has the given property.
-	
+
 	//	declare the local variables
 	Boolean theAnswer = false;
-	
+
 	//	check the arguments
 	FailIf(inDriver != gAudioServerPlugInDriverRef, Done, "AudioPlaneInput_HasProperty: bad driver reference");
 	FailIf(inAddress == NULL, Done, "AudioPlaneInput_HasProperty: no address");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetPropertyData() method.
@@ -618,20 +618,20 @@ static Boolean	AudioPlaneInput_HasProperty(AudioServerPlugInDriverRef inDriver, 
 		case kObjectID_PlugIn:
 			theAnswer = AudioPlaneInput_HasPlugInProperty(inDriver, inObjectID, inClientProcessID, inAddress);
 			break;
-		
+
 		case kObjectID_Box:
 			theAnswer = AudioPlaneInput_HasBoxProperty(inDriver, inObjectID, inClientProcessID, inAddress);
 			break;
-		
+
 		case kObjectID_Device:
 			theAnswer = AudioPlaneInput_HasDeviceProperty(inDriver, inObjectID, inClientProcessID, inAddress);
 			break;
-		
+
 		case kObjectID_Stream_Input:
 		case kObjectID_Stream_Output:
 			theAnswer = AudioPlaneInput_HasStreamProperty(inDriver, inObjectID, inClientProcessID, inAddress);
 			break;
-		
+
 		case kObjectID_Volume_Input_Master:
 		case kObjectID_Volume_Output_Master:
 		case kObjectID_Mute_Input_Master:
@@ -651,15 +651,15 @@ static OSStatus	AudioPlaneInput_IsPropertySettable(AudioServerPlugInDriverRef in
 {
 	//	This method returns whether or not the given property on the object can have its value
 	//	changed.
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsPropertySettable: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsPropertySettable: no address");
 	FailWithAction(outIsSettable == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsPropertySettable: no place to put the return value");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetPropertyData() method.
@@ -668,20 +668,20 @@ static OSStatus	AudioPlaneInput_IsPropertySettable(AudioServerPlugInDriverRef in
 		case kObjectID_PlugIn:
 			theAnswer = AudioPlaneInput_IsPlugInPropertySettable(inDriver, inObjectID, inClientProcessID, inAddress, outIsSettable);
 			break;
-		
+
 		case kObjectID_Box:
 			theAnswer = AudioPlaneInput_IsBoxPropertySettable(inDriver, inObjectID, inClientProcessID, inAddress, outIsSettable);
 			break;
-		
+
 		case kObjectID_Device:
 			theAnswer = AudioPlaneInput_IsDevicePropertySettable(inDriver, inObjectID, inClientProcessID, inAddress, outIsSettable);
 			break;
-		
+
 		case kObjectID_Stream_Input:
 		case kObjectID_Stream_Output:
 			theAnswer = AudioPlaneInput_IsStreamPropertySettable(inDriver, inObjectID, inClientProcessID, inAddress, outIsSettable);
 			break;
-		
+
 		case kObjectID_Volume_Input_Master:
 		case kObjectID_Volume_Output_Master:
 		case kObjectID_Mute_Input_Master:
@@ -691,7 +691,7 @@ static OSStatus	AudioPlaneInput_IsPropertySettable(AudioServerPlugInDriverRef in
 		case kObjectID_DataDestination_PlayThru_Master:
 			theAnswer = AudioPlaneInput_IsControlPropertySettable(inDriver, inObjectID, inClientProcessID, inAddress, outIsSettable);
 			break;
-				
+
 		default:
 			theAnswer = kAudioHardwareBadObjectError;
 			break;
@@ -704,15 +704,15 @@ Done:
 static OSStatus	AudioPlaneInput_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32* outDataSize)
 {
 	//	This method returns the byte size of the property's data.
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetPropertyDataSize: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPropertyDataSize: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPropertyDataSize: no place to put the return value");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetPropertyData() method.
@@ -721,20 +721,20 @@ static OSStatus	AudioPlaneInput_GetPropertyDataSize(AudioServerPlugInDriverRef i
 		case kObjectID_PlugIn:
 			theAnswer = AudioPlaneInput_GetPlugInPropertyDataSize(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, outDataSize);
 			break;
-		
+
 		case kObjectID_Box:
 			theAnswer = AudioPlaneInput_GetBoxPropertyDataSize(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, outDataSize);
 			break;
-		
+
 		case kObjectID_Device:
 			theAnswer = AudioPlaneInput_GetDevicePropertyDataSize(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, outDataSize);
 			break;
-		
+
 		case kObjectID_Stream_Input:
 		case kObjectID_Stream_Output:
 			theAnswer = AudioPlaneInput_GetStreamPropertyDataSize(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, outDataSize);
 			break;
-		
+
 		case kObjectID_Volume_Input_Master:
 		case kObjectID_Volume_Output_Master:
 		case kObjectID_Mute_Input_Master:
@@ -744,7 +744,7 @@ static OSStatus	AudioPlaneInput_GetPropertyDataSize(AudioServerPlugInDriverRef i
 		case kObjectID_DataDestination_PlayThru_Master:
 			theAnswer = AudioPlaneInput_GetControlPropertyDataSize(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, outDataSize);
 			break;
-				
+
 		default:
 			theAnswer = kAudioHardwareBadObjectError;
 			break;
@@ -758,13 +758,13 @@ static OSStatus	AudioPlaneInput_GetPropertyData(AudioServerPlugInDriverRef inDri
 {
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPropertyData: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPropertyData: no place to put the return value size");
 	FailWithAction(outData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPropertyData: no place to put the return value");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required.
 	//
@@ -775,20 +775,20 @@ static OSStatus	AudioPlaneInput_GetPropertyData(AudioServerPlugInDriverRef inDri
 		case kObjectID_PlugIn:
 			theAnswer = AudioPlaneInput_GetPlugInPropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, outDataSize, outData);
 			break;
-		
+
 		case kObjectID_Box:
 			theAnswer = AudioPlaneInput_GetBoxPropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, outDataSize, outData);
 			break;
-		
+
 		case kObjectID_Device:
 			theAnswer = AudioPlaneInput_GetDevicePropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, outDataSize, outData);
 			break;
-		
+
 		case kObjectID_Stream_Input:
 		case kObjectID_Stream_Output:
 			theAnswer = AudioPlaneInput_GetStreamPropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, outDataSize, outData);
 			break;
-		
+
 		case kObjectID_Volume_Input_Master:
 		case kObjectID_Volume_Output_Master:
 		case kObjectID_Mute_Input_Master:
@@ -798,7 +798,7 @@ static OSStatus	AudioPlaneInput_GetPropertyData(AudioServerPlugInDriverRef inDri
 		case kObjectID_DataDestination_PlayThru_Master:
 			theAnswer = AudioPlaneInput_GetControlPropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, outDataSize, outData);
 			break;
-				
+
 		default:
 			theAnswer = kAudioHardwareBadObjectError;
 			break;
@@ -814,11 +814,11 @@ static OSStatus	AudioPlaneInput_SetPropertyData(AudioServerPlugInDriverRef inDri
 	OSStatus theAnswer = 0;
 	UInt32 theNumberPropertiesChanged = 0;
 	AudioObjectPropertyAddress theChangedAddresses[2];
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetPropertyData: no address");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetPropertyData() method.
@@ -827,20 +827,20 @@ static OSStatus	AudioPlaneInput_SetPropertyData(AudioServerPlugInDriverRef inDri
 		case kObjectID_PlugIn:
 			theAnswer = AudioPlaneInput_SetPlugInPropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, inData, &theNumberPropertiesChanged, theChangedAddresses);
 			break;
-		
+
 		case kObjectID_Box:
 			theAnswer = AudioPlaneInput_SetBoxPropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, inData, &theNumberPropertiesChanged, theChangedAddresses);
 			break;
-		
+
 		case kObjectID_Device:
 			theAnswer = AudioPlaneInput_SetDevicePropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, inData, &theNumberPropertiesChanged, theChangedAddresses);
 			break;
-		
+
 		case kObjectID_Stream_Input:
 		case kObjectID_Stream_Output:
 			theAnswer = AudioPlaneInput_SetStreamPropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, inData, &theNumberPropertiesChanged, theChangedAddresses);
 			break;
-		
+
 		case kObjectID_Volume_Input_Master:
 		case kObjectID_Volume_Output_Master:
 		case kObjectID_Mute_Input_Master:
@@ -850,7 +850,7 @@ static OSStatus	AudioPlaneInput_SetPropertyData(AudioServerPlugInDriverRef inDri
 		case kObjectID_DataDestination_PlayThru_Master:
 			theAnswer = AudioPlaneInput_SetControlPropertyData(inDriver, inObjectID, inClientProcessID, inAddress, inQualifierDataSize, inQualifierData, inDataSize, inData, &theNumberPropertiesChanged, theChangedAddresses);
 			break;
-				
+
 		default:
 			theAnswer = kAudioHardwareBadObjectError;
 			break;
@@ -871,18 +871,18 @@ Done:
 static Boolean	AudioPlaneInput_HasPlugInProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress)
 {
 	//	This method returns whether or not the plug-in object has the given property.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	Boolean theAnswer = false;
-	
+
 	//	check the arguments
 	FailIf(inDriver != gAudioServerPlugInDriverRef, Done, "AudioPlaneInput_HasPlugInProperty: bad driver reference");
 	FailIf(inAddress == NULL, Done, "AudioPlaneInput_HasPlugInProperty: no address");
 	FailIf(inObjectID != kObjectID_PlugIn, Done, "AudioPlaneInput_HasPlugInProperty: not the plug-in object");
-	
-	
+
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetPlugInPropertyData() method.
@@ -912,18 +912,18 @@ static OSStatus	AudioPlaneInput_IsPlugInPropertySettable(AudioServerPlugInDriver
 {
 	//	This method returns whether or not the given property on the plug-in object can have its
 	//	value changed.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsPlugInPropertySettable: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsPlugInPropertySettable: no address");
 	FailWithAction(outIsSettable == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsPlugInPropertySettable: no place to put the return value");
 	FailWithAction(inObjectID != kObjectID_PlugIn, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsPlugInPropertySettable: not the plug-in object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetPlugInPropertyData() method.
@@ -942,11 +942,11 @@ static OSStatus	AudioPlaneInput_IsPlugInPropertySettable(AudioServerPlugInDriver
 		case kAudioObjectPropertyCustomPropertyInfoList:
 			*outIsSettable = false;
 			break;
-		
+
 		case kPlugIn_CustomPropertyID:
 			*outIsSettable = true;
 			break;
-		
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -959,18 +959,18 @@ Done:
 static OSStatus	AudioPlaneInput_GetPlugInPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32* outDataSize)
 {
 	//	This method returns the byte size of the property's data.
-	
+
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetPlugInPropertyDataSize: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPlugInPropertyDataSize: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPlugInPropertyDataSize: no place to put the return value");
 	FailWithAction(inObjectID != kObjectID_PlugIn, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetPlugInPropertyDataSize: not the plug-in object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetPlugInPropertyData() method.
@@ -979,19 +979,19 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyDataSize(AudioServerPlugInDrive
 		case kAudioObjectPropertyBaseClass:
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyClass:
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyOwner:
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioObjectPropertyManufacturer:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyOwnedObjects:
 			if(gBox_Acquired)
 			{
@@ -1002,15 +1002,15 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyDataSize(AudioServerPlugInDrive
 				*outDataSize = sizeof(AudioClassID);
 			}
 			break;
-			
+
 		case kAudioPlugInPropertyBoxList:
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioPlugInPropertyTranslateUIDToBox:
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioPlugInPropertyDeviceList:
 			if(gBox_Acquired)
 			{
@@ -1021,19 +1021,19 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyDataSize(AudioServerPlugInDrive
 				*outDataSize = 0;
 			}
 			break;
-			
+
 		case kAudioPlugInPropertyTranslateUIDToDevice:
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioPlugInPropertyResourceBundle:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyCustomPropertyInfoList:
 			*outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
 			break;
-			
+
 		case kPlugIn_CustomPropertyID:
 			FailWithAction(inQualifierDataSize != sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetPlugInPropertyDataSize: the qualifier is the wrong size for kPlugIn_CustomPropertyID");
 			FailWithAction(inQualifierData == NULL, theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetPlugInPropertyDataSize: no qualifier for kPlugIn_CustomPropertyID");
@@ -1041,7 +1041,7 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyDataSize(AudioServerPlugInDrive
 			CFShow(*((CFPropertyListRef*)inQualifierData));
 			*outDataSize = sizeof(CFPropertyListRef);
 			break;
-			
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -1054,18 +1054,18 @@ Done:
 static OSStatus	AudioPlaneInput_GetPlugInPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, UInt32* outDataSize, void* outData)
 {
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	UInt32 theNumberItemsToFetch;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetPlugInPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPlugInPropertyData: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPlugInPropertyData: no place to put the return value size");
 	FailWithAction(outData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetPlugInPropertyData: no place to put the return value");
 	FailWithAction(inObjectID != kObjectID_PlugIn, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetPlugInPropertyData: not the plug-in object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required.
 	//
@@ -1079,40 +1079,40 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyData(AudioServerPlugInDriverRef
 			*((AudioClassID*)outData) = kAudioObjectClassID;
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyClass:
 			//	The class is always kAudioPlugInClassID for regular drivers
 			FailWithAction(inDataSize < sizeof(AudioClassID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetPlugInPropertyData: not enough space for the return value of kAudioObjectPropertyClass for the plug-in");
 			*((AudioClassID*)outData) = kAudioPlugInClassID;
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyOwner:
 			//	The plug-in doesn't have an owning object
 			FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetPlugInPropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the plug-in");
 			*((AudioObjectID*)outData) = kAudioObjectUnknown;
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioObjectPropertyManufacturer:
 			//	This is the human readable name of the maker of the plug-in.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetPlugInPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the plug-in");
 			*((CFStringRef*)outData) = CFSTR("AudioPlane");
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyOwnedObjects:
 			//	Calculate the number of items that have been requested. Note that this
 			//	number is allowed to be smaller than the actual size of the list. In such
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
-			
+
 			//	Clamp that to the number of boxes this driver implements (which is just 1)
 			if(theNumberItemsToFetch > (gBox_Acquired ? 2 : 1))
 			{
 				theNumberItemsToFetch = (gBox_Acquired ? 2 : 1);
 			}
-			
+
 			//	Write the devices' object IDs into the return value
 			if(theNumberItemsToFetch > 1)
 			{
@@ -1123,33 +1123,33 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyData(AudioServerPlugInDriverRef
 			{
 				((AudioObjectID*)outData)[0] = kObjectID_Box;
 			}
-			
+
 			//	Return how many bytes we wrote to
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioPlugInPropertyBoxList:
 			//	Calculate the number of items that have been requested. Note that this
 			//	number is allowed to be smaller than the actual size of the list. In such
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
-			
+
 			//	Clamp that to the number of boxes this driver implements (which is just 1)
 			if(theNumberItemsToFetch > 1)
 			{
 				theNumberItemsToFetch = 1;
 			}
-			
+
 			//	Write the devices' object IDs into the return value
 			if(theNumberItemsToFetch > 0)
 			{
 				((AudioObjectID*)outData)[0] = kObjectID_Box;
 			}
-			
+
 			//	Return how many bytes we wrote to
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioPlugInPropertyTranslateUIDToBox:
 			//	This property takes the CFString passed in the qualifier and converts that
 			//	to the object ID of the box it corresponds to. For this driver, there is
@@ -1169,30 +1169,30 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyData(AudioServerPlugInDriverRef
 			}
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioPlugInPropertyDeviceList:
 			//	Calculate the number of items that have been requested. Note that this
 			//	number is allowed to be smaller than the actual size of the list. In such
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
-			
+
 			//	Clamp that to the number of devices this driver implements (which is just 1 if the
 			//	box has been acquired)
 			if(theNumberItemsToFetch > (gBox_Acquired ? 1 : 0))
 			{
 				theNumberItemsToFetch = (gBox_Acquired ? 1 : 0);
 			}
-			
+
 			//	Write the devices' object IDs into the return value
 			if(theNumberItemsToFetch > 0)
 			{
 				((AudioObjectID*)outData)[0] = kObjectID_Device;
 			}
-			
+
 			//	Return how many bytes we wrote to
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioPlugInPropertyTranslateUIDToDevice:
 			//	This property takes the CFString passed in the qualifier and converts that
 			//	to the object ID of the device it corresponds to. For this driver, there is
@@ -1212,7 +1212,7 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyData(AudioServerPlugInDriverRef
 			}
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioPlugInPropertyResourceBundle:
 			//	The resource bundle is a path relative to the path of the plug-in's bundle.
 			//	To specify that the plug-in bundle itself should be used, we just return the
@@ -1221,7 +1221,7 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyData(AudioServerPlugInDriverRef
 			*((CFStringRef*)outData) = CFSTR("");
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyCustomPropertyInfoList:
 			//	This property returns an array of AudioServerPlugInCustomPropertyInfo's that
 			//	describe the type of data used by any custom properties. For this example,
@@ -1233,7 +1233,7 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyData(AudioServerPlugInDriverRef
 			((AudioServerPlugInCustomPropertyInfo*)outData)->mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeCFPropertyList;
 			*outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
 			break;
-			
+
 		case kPlugIn_CustomPropertyID:
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetPlugInPropertyData: not enough space for the return value of kPlugIn_CustomPropertyID");
 			FailWithAction(inQualifierDataSize != sizeof(CFPropertyListRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetPlugInPropertyData: the qualifier is the wrong size for kPlugIn_CustomPropertyID");
@@ -1243,7 +1243,7 @@ static OSStatus	AudioPlaneInput_GetPlugInPropertyData(AudioServerPlugInDriverRef
 			*((CFStringRef*)outData) = CFSTR("AudioPlaneInput PlugIn Custom Property");
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -1256,20 +1256,20 @@ Done:
 static OSStatus	AudioPlaneInput_SetPlugInPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, const void* inData, UInt32* outNumberPropertiesChanged, AudioObjectPropertyAddress outChangedAddresses[2])
 {
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData, inDataSize, inData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetPlugInPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetPlugInPropertyData: no address");
 	FailWithAction(outNumberPropertiesChanged == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetPlugInPropertyData: no place to return the number of properties that changed");
 	FailWithAction(outChangedAddresses == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetPlugInPropertyData: no place to return the properties that changed");
 	FailWithAction(inObjectID != kObjectID_PlugIn, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetPlugInPropertyData: not the plug-in object");
-	
+
 	//	initialize the returned number of changed properties
 	*outNumberPropertiesChanged = 0;
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetPlugInPropertyData() method.
@@ -1284,7 +1284,7 @@ static OSStatus	AudioPlaneInput_SetPlugInPropertyData(AudioServerPlugInDriverRef
 			DebugMsg("AudioPlaneInput_SetPlugInPropertyData: the data passed to us was:");
 			CFShow(*((CFStringRef*)inData));
 			break;
-			
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -1299,18 +1299,18 @@ Done:
 static Boolean	AudioPlaneInput_HasBoxProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress)
 {
 	//	This method returns whether or not the box object has the given property.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	Boolean theAnswer = false;
-	
+
 	//	check the arguments
 	FailIf(inDriver != gAudioServerPlugInDriverRef, Done, "AudioPlaneInput_HasBoxProperty: bad driver reference");
 	FailIf(inAddress == NULL, Done, "AudioPlaneInput_HasBoxProperty: no address");
 	FailIf(inObjectID != kObjectID_Box, Done, "AudioPlaneInput_HasBoxProperty: not the box object");
-	
-	
+
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetBoxPropertyData() method.
@@ -1347,18 +1347,18 @@ static OSStatus	AudioPlaneInput_IsBoxPropertySettable(AudioServerPlugInDriverRef
 {
 	//	This method returns whether or not the given property on the plug-in object can have its
 	//	value changed.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsBoxPropertySettable: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsBoxPropertySettable: no address");
 	FailWithAction(outIsSettable == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsBoxPropertySettable: no place to put the return value");
 	FailWithAction(inObjectID != kObjectID_Box, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsBoxPropertySettable: not the plug-in object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetBoxPropertyData() method.
@@ -1382,13 +1382,13 @@ static OSStatus	AudioPlaneInput_IsBoxPropertySettable(AudioServerPlugInDriverRef
 		case kAudioBoxPropertyDeviceList:
 			*outIsSettable = false;
 			break;
-		
+
 		case kAudioObjectPropertyName:
 		case kAudioObjectPropertyIdentify:
 		case kAudioBoxPropertyAcquired:
 			*outIsSettable = true;
 			break;
-		
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -1401,18 +1401,18 @@ Done:
 static OSStatus	AudioPlaneInput_GetBoxPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32* outDataSize)
 {
 	//	This method returns the byte size of the property's data.
-	
+
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetBoxPropertyDataSize: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetBoxPropertyDataSize: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetBoxPropertyDataSize: no place to put the return value");
 	FailWithAction(inObjectID != kObjectID_Box, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetBoxPropertyDataSize: not the plug-in object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetBoxPropertyData() method.
@@ -1421,75 +1421,75 @@ static OSStatus	AudioPlaneInput_GetBoxPropertyDataSize(AudioServerPlugInDriverRe
 		case kAudioObjectPropertyBaseClass:
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyClass:
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyOwner:
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioObjectPropertyName:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyModelName:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyManufacturer:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyOwnedObjects:
 			*outDataSize = 0;
 			break;
-			
+
 		case kAudioObjectPropertyIdentify:
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioObjectPropertySerialNumber:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyFirmwareVersion:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioBoxPropertyBoxUID:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioBoxPropertyTransportType:
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyHasAudio:
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyHasVideo:
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyHasMIDI:
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyIsProtected:
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyAcquired:
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyAcquisitionFailed:
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyDeviceList:
 			{
 				pthread_mutex_lock(&gPlugIn_StateMutex);
@@ -1497,7 +1497,7 @@ static OSStatus	AudioPlaneInput_GetBoxPropertyDataSize(AudioServerPlugInDriverRe
 				pthread_mutex_unlock(&gPlugIn_StateMutex);
 			}
 			break;
-			
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -1510,17 +1510,17 @@ Done:
 static OSStatus	AudioPlaneInput_GetBoxPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, UInt32* outDataSize, void* outData)
 {
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetBoxPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetBoxPropertyData: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetBoxPropertyData: no place to put the return value size");
 	FailWithAction(outData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetBoxPropertyData: no place to put the return value");
 	FailWithAction(inObjectID != kObjectID_Box, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetBoxPropertyData: not the plug-in object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required.
 	//
@@ -1534,21 +1534,21 @@ static OSStatus	AudioPlaneInput_GetBoxPropertyData(AudioServerPlugInDriverRef in
 			*((AudioClassID*)outData) = kAudioObjectClassID;
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyClass:
 			//	The class is always kAudioBoxClassID for regular drivers
 			FailWithAction(inDataSize < sizeof(AudioClassID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyClass for the box");
 			*((AudioClassID*)outData) = kAudioBoxClassID;
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyOwner:
 			//	The owner is the plug-in object
 			FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the box");
 			*((AudioObjectID*)outData) = kObjectID_PlugIn;
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioObjectPropertyName:
 			//	This is the human readable name of the maker of the box.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the box");
@@ -1561,53 +1561,53 @@ static OSStatus	AudioPlaneInput_GetBoxPropertyData(AudioServerPlugInDriverRef in
 			}
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyModelName:
 			//	This is the human readable name of the maker of the box.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the box");
 			*((CFStringRef*)outData) = CFSTR("AudioPlane Virtual Audio");
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyManufacturer:
 			//	This is the human readable name of the maker of the box.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the box");
 			*((CFStringRef*)outData) = CFSTR("AudioPlane");
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyOwnedObjects:
 			//	This returns the objects directly owned by the object. Boxes don't own anything.
 			*outDataSize = 0;
 			break;
-			
+
 		case kAudioObjectPropertyIdentify:
 			//	This is used to highling the device in the UI, but it's value has no meaning
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyIdentify for the box");
 			*((UInt32*)outData) = 0;
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioObjectPropertySerialNumber:
 			//	This is the human readable serial number of the box.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertySerialNumber for the box");
 			*((CFStringRef*)outData) = CFSTR("00000001");
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyFirmwareVersion:
 			//	This is the human readable firmware version of the box.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyFirmwareVersion for the box");
 			*((CFStringRef*)outData) = CFSTR("1.0");
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioBoxPropertyBoxUID:
 			//	Boxes have UIDs the same as devices
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the box");
 			*((CFStringRef*)outData) = CFSTR(kBox_UID);
 			break;
-			
+
 		case kAudioBoxPropertyTransportType:
 			//	This value represents how the device is attached to the system. This can be
 			//	any 32 bit integer, but common values for this property are defined in
@@ -1616,35 +1616,35 @@ static OSStatus	AudioPlaneInput_GetBoxPropertyData(AudioServerPlugInDriverRef in
 			*((UInt32*)outData) = kAudioDeviceTransportTypeVirtual;
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyHasAudio:
 			//	Indicates whether or not the box has audio capabilities
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioBoxPropertyHasAudio for the box");
 			*((UInt32*)outData) = 1;
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyHasVideo:
 			//	Indicates whether or not the box has video capabilities
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioBoxPropertyHasVideo for the box");
 			*((UInt32*)outData) = 0;
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyHasMIDI:
 			//	Indicates whether or not the box has MIDI capabilities
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioBoxPropertyHasMIDI for the box");
 			*((UInt32*)outData) = 0;
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyIsProtected:
 			//	Indicates whether or not the box has requires authentication to use
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioBoxPropertyIsProtected for the box");
 			*((UInt32*)outData) = 0;
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyAcquired:
 			//	When set to a non-zero value, the device is acquired for use by the local machine
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioBoxPropertyAcquired for the box");
@@ -1653,14 +1653,14 @@ static OSStatus	AudioPlaneInput_GetBoxPropertyData(AudioServerPlugInDriverRef in
 			pthread_mutex_unlock(&gPlugIn_StateMutex);
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyAcquisitionFailed:
 			//	This is used for notifications to say when an attempt to acquire a device has failed.
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetBoxPropertyData: not enough space for the return value of kAudioBoxPropertyAcquisitionFailed for the box");
 			*((UInt32*)outData) = 0;
 			*outDataSize = sizeof(UInt32);
 			break;
-			
+
 		case kAudioBoxPropertyDeviceList:
 			//	This is used to indicate which devices came from this box
 			pthread_mutex_lock(&gPlugIn_StateMutex);
@@ -1676,7 +1676,7 @@ static OSStatus	AudioPlaneInput_GetBoxPropertyData(AudioServerPlugInDriverRef in
 			}
 			pthread_mutex_unlock(&gPlugIn_StateMutex);
 			break;
-			
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -1689,20 +1689,20 @@ Done:
 static OSStatus	AudioPlaneInput_SetBoxPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, const void* inData, UInt32* outNumberPropertiesChanged, AudioObjectPropertyAddress outChangedAddresses[2])
 {
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData, inDataSize, inData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetBoxPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetBoxPropertyData: no address");
 	FailWithAction(outNumberPropertiesChanged == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetBoxPropertyData: no place to return the number of properties that changed");
 	FailWithAction(outChangedAddresses == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetBoxPropertyData: no place to return the properties that changed");
 	FailWithAction(inObjectID != kObjectID_Box, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetBoxPropertyData: not the box object");
-	
+
 	//	initialize the returned number of changed properties
 	*outNumberPropertiesChanged = 0;
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetPlugInPropertyData() method.
@@ -1731,7 +1731,7 @@ static OSStatus	AudioPlaneInput_SetBoxPropertyData(AudioServerPlugInDriverRef in
                 outChangedAddresses[0].mElement = kAudioObjectPropertyElementMain;
 			}
 			break;
-			
+
 		case kAudioObjectPropertyIdentify:
 			//	since we don't have any actual hardware to flash, we will schedule a notificaiton for
 			//	this property off into the future as a testing thing. Note that a real implementation
@@ -1747,7 +1747,7 @@ static OSStatus	AudioPlaneInput_SetBoxPropertyData(AudioServerPlugInDriverRef in
 																																		});
 			}
 			break;
-			
+
 		case kAudioBoxPropertyAcquired:
 			//	When the box is acquired, it means the contents, namely the device, are available to the system
 			{
@@ -1758,7 +1758,7 @@ static OSStatus	AudioPlaneInput_SetBoxPropertyData(AudioServerPlugInDriverRef in
 					//	the new value is different from the old value, so save it
 					gBox_Acquired = *((UInt32*)inData) != 0;
 					gPlugIn_Host->WriteToStorage(gPlugIn_Host, CFSTR("box acquired"), gBox_Acquired ? kCFBooleanTrue : kCFBooleanFalse);
-					
+
 					//	and it means that this property and the device list property have changed
 					*outNumberPropertiesChanged = 2;
 					outChangedAddresses[0].mSelector = kAudioBoxPropertyAcquired;
@@ -1767,7 +1767,7 @@ static OSStatus	AudioPlaneInput_SetBoxPropertyData(AudioServerPlugInDriverRef in
 					outChangedAddresses[1].mSelector = kAudioBoxPropertyDeviceList;
 					outChangedAddresses[1].mScope = kAudioObjectPropertyScopeGlobal;
 					outChangedAddresses[1].mElement = kAudioObjectPropertyElementMain;
-					
+
 					//	but it also means that the device list has changed for the plug-in too
 					dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),	^()
 																									{
@@ -1778,7 +1778,7 @@ static OSStatus	AudioPlaneInput_SetBoxPropertyData(AudioServerPlugInDriverRef in
 				pthread_mutex_unlock(&gPlugIn_StateMutex);
 			}
 			break;
-			
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -1793,17 +1793,17 @@ Done:
 static Boolean	AudioPlaneInput_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress)
 {
 	//	This method returns whether or not the given object has the given property.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	Boolean theAnswer = false;
-	
+
 	//	check the arguments
 	FailIf(inDriver != gAudioServerPlugInDriverRef, Done, "AudioPlaneInput_HasDeviceProperty: bad driver reference");
 	FailIf(inAddress == NULL, Done, "AudioPlaneInput_HasDeviceProperty: no address");
 	FailIf(inObjectID != kObjectID_Device, Done, "AudioPlaneInput_HasDeviceProperty: not the device object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetDevicePropertyData() method.
@@ -1831,7 +1831,7 @@ static Boolean	AudioPlaneInput_HasDeviceProperty(AudioServerPlugInDriverRef inDr
 		case kAudioDevicePropertyStreams:
 			theAnswer = true;
 			break;
-			
+
 		case kAudioDevicePropertyDeviceCanBeDefaultDevice:
 		case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
 		case kAudioDevicePropertyLatency:
@@ -1840,7 +1840,7 @@ static Boolean	AudioPlaneInput_HasDeviceProperty(AudioServerPlugInDriverRef inDr
 		case kAudioDevicePropertyPreferredChannelLayout:
 			theAnswer = (inAddress->mScope == kAudioObjectPropertyScopeInput) || (inAddress->mScope == kAudioObjectPropertyScopeOutput);
 			break;
-		
+
 		case kAudioObjectPropertyElementName:
 			theAnswer = inAddress->mElement <= 2;
 			break;
@@ -1854,18 +1854,18 @@ static OSStatus	AudioPlaneInput_IsDevicePropertySettable(AudioServerPlugInDriver
 {
 	//	This method returns whether or not the given property on the object can have its value
 	//	changed.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsDevicePropertySettable: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsDevicePropertySettable: no address");
 	FailWithAction(outIsSettable == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsDevicePropertySettable: no place to put the return value");
 	FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsDevicePropertySettable: not the device object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetDevicePropertyData() method.
@@ -1899,11 +1899,11 @@ static OSStatus	AudioPlaneInput_IsDevicePropertySettable(AudioServerPlugInDriver
 		case kAudioDevicePropertyIcon:
 			*outIsSettable = false;
 			break;
-		
+
 		case kAudioDevicePropertyNominalSampleRate:
 			*outIsSettable = true;
 			break;
-		
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -1916,18 +1916,18 @@ Done:
 static OSStatus	AudioPlaneInput_GetDevicePropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32* outDataSize)
 {
 	//	This method returns the byte size of the property's data.
-	
+
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetDevicePropertyDataSize: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetDevicePropertyDataSize: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetDevicePropertyDataSize: no place to put the return value");
 	FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetDevicePropertyDataSize: not the device object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetDevicePropertyData() method.
@@ -1936,38 +1936,38 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyDataSize(AudioServerPlugInDrive
 		case kAudioObjectPropertyBaseClass:
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyClass:
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyOwner:
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioObjectPropertyName:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyManufacturer:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyElementName:
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyOwnedObjects:
 			switch(inAddress->mScope)
 			{
 				case kAudioObjectPropertyScopeGlobal:
 					*outDataSize = 8 * sizeof(AudioObjectID);
 					break;
-					
+
 				case kAudioObjectPropertyScopeInput:
 					*outDataSize = 4 * sizeof(AudioObjectID);
 					break;
-					
+
 				case kAudioObjectPropertyScopeOutput:
 					*outDataSize = 4 * sizeof(AudioObjectID);
 					break;
@@ -2020,11 +2020,11 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyDataSize(AudioServerPlugInDrive
 				case kAudioObjectPropertyScopeGlobal:
 					*outDataSize = 2 * sizeof(AudioObjectID);
 					break;
-					
+
 				case kAudioObjectPropertyScopeInput:
 					*outDataSize = 1 * sizeof(AudioObjectID);
 					break;
-					
+
 				case kAudioObjectPropertyScopeOutput:
 					*outDataSize = 1 * sizeof(AudioObjectID);
 					break;
@@ -2046,7 +2046,7 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyDataSize(AudioServerPlugInDrive
 		case kAudioDevicePropertyAvailableNominalSampleRates:
 			*outDataSize = 2 * sizeof(AudioValueRange);
 			break;
-		
+
 		case kAudioDevicePropertyIsHidden:
 			*outDataSize = sizeof(UInt32);
 			break;
@@ -2079,19 +2079,19 @@ Done:
 static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, UInt32* outDataSize, void* outData)
 {
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	UInt32 theNumberItemsToFetch;
 	UInt32 theItemIndex;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetDevicePropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetDevicePropertyData: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetDevicePropertyData: no place to put the return value size");
 	FailWithAction(outData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetDevicePropertyData: no place to put the return value");
 	FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetDevicePropertyData: not the device object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required.
 	//
@@ -2105,35 +2105,35 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 			*((AudioClassID*)outData) = kAudioObjectClassID;
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyClass:
 			//	The class is always kAudioDeviceClassID for devices created by drivers
 			FailWithAction(inDataSize < sizeof(AudioClassID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetDevicePropertyData: not enough space for the return value of kAudioObjectPropertyClass for the device");
 			*((AudioClassID*)outData) = kAudioDeviceClassID;
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyOwner:
 			//	The device's owner is the plug-in object
 			FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetDevicePropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the device");
 			*((AudioObjectID*)outData) = kObjectID_PlugIn;
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioObjectPropertyName:
 			//	This is the human readable name of the device.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetDevicePropertyData: not enough space for the return value of kAudioObjectPropertyName for the device");
 			*((CFStringRef*)outData) = CFSTR("AudioPlane Input");
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyManufacturer:
 			//	This is the human readable name of the maker of the plug-in.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetDevicePropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the device");
 			*((CFStringRef*)outData) = CFSTR("AudioPlane");
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyElementName:
 			//	This is the human readable name of the maker of the plug-in.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetDevicePropertyData: not enough space for the return value of kAudioObjectPropertyElementName for the device");
@@ -2142,29 +2142,29 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 				case 0:
 					*((CFStringRef*)outData) = CFSTR("MasterElementName");
 					break;
-				
+
 				case 1:
 					*((CFStringRef*)outData) = CFSTR("LeftElementName");
 					break;
-				
+
 				case 2:
 					*((CFStringRef*)outData) = CFSTR("RightElementName");
 					break;
-				
+
 				default:
 					*((CFStringRef*)outData) = CFSTR("unknown");
 					break;
-				
+
 			};
 			*outDataSize = sizeof(CFStringRef);
 			break;
-			
+
 		case kAudioObjectPropertyOwnedObjects:
 			//	Calculate the number of items that have been requested. Note that this
 			//	number is allowed to be smaller than the actual size of the list. In such
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
-			
+
 			//	The device owns its streams and controls. Note that what is returned here
 			//	depends on the scope requested.
 			switch(inAddress->mScope)
@@ -2175,35 +2175,35 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 					{
 						theNumberItemsToFetch = 9;
 					}
-					
+
 					//	fill out the list with as many objects as requested, which is everything
 					for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
 					{
 						((AudioObjectID*)outData)[theItemIndex] = kObjectID_Stream_Input + theItemIndex;
 					}
 					break;
-					
+
 				case kAudioObjectPropertyScopeInput:
 					//	input scope means just the objects on the input side
 					if(theNumberItemsToFetch > 4)
 					{
 						theNumberItemsToFetch = 4;
 					}
-					
+
 					//	fill out the list with the right objects
 					for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
 					{
 						((AudioObjectID*)outData)[theItemIndex] = kObjectID_Stream_Input + theItemIndex;
 					}
 					break;
-					
+
 				case kAudioObjectPropertyScopeOutput:
 					//	output scope means just the objects on the output side
 					if(theNumberItemsToFetch > 4)
 					{
 						theNumberItemsToFetch = 4;
 					}
-					
+
 					//	fill out the list with the right objects
 					for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
 					{
@@ -2211,7 +2211,7 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 					}
 					break;
 			};
-			
+
 			//	report how much we wrote
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioObjectID);
 			break;
@@ -2256,19 +2256,19 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 			//	number is allowed to be smaller than the actual size of the list. In such
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
-			
+
 			//	we only have the one device...
 			if(theNumberItemsToFetch > 1)
 			{
 				theNumberItemsToFetch = 1;
 			}
-			
+
 			//	Write the devices' object IDs into the return value
 			if(theNumberItemsToFetch > 0)
 			{
 				((AudioObjectID*)outData)[0] = kObjectID_Device;
 			}
-			
+
 			//	report how much we wrote
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioObjectID);
 			break;
@@ -2337,7 +2337,7 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 			//	number is allowed to be smaller than the actual size of the list. In such
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
-			
+
 			//	Note that what is returned here depends on the scope requested.
 			switch(inAddress->mScope)
 			{
@@ -2347,7 +2347,7 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 					{
 						theNumberItemsToFetch = 2;
 					}
-					
+
 					//	fill out the list with as many objects as requested
 					if(theNumberItemsToFetch > 0)
 					{
@@ -2358,28 +2358,28 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 						((AudioObjectID*)outData)[1] = kObjectID_Stream_Output;
 					}
 					break;
-					
+
 				case kAudioObjectPropertyScopeInput:
 					//	input scope means just the objects on the input side
 					if(theNumberItemsToFetch > 1)
 					{
 						theNumberItemsToFetch = 1;
 					}
-					
+
 					//	fill out the list with as many objects as requested
 					if(theNumberItemsToFetch > 0)
 					{
 						((AudioObjectID*)outData)[0] = kObjectID_Stream_Input;
 					}
 					break;
-					
+
 				case kAudioObjectPropertyScopeOutput:
 					//	output scope means just the objects on the output side
 					if(theNumberItemsToFetch > 1)
 					{
 						theNumberItemsToFetch = 1;
 					}
-					
+
 					//	fill out the list with as many objects as requested
 					if(theNumberItemsToFetch > 0)
 					{
@@ -2387,7 +2387,7 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 					}
 					break;
 			};
-			
+
 			//	report how much we wrote
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioObjectID);
 			break;
@@ -2401,7 +2401,7 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 			{
 				theNumberItemsToFetch = 7;
 			}
-			
+
 			//	fill out the list with as many objects as requested, which is everything
 			for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
 			{
@@ -2414,7 +2414,7 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 					((AudioObjectID*)outData)[theItemIndex] = kObjectID_Volume_Output_Master + (theItemIndex - 3);
 				}
 			}
-			
+
 			//	report how much we wrote
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioObjectID);
 			break;
@@ -2441,18 +2441,18 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 			//	This returns all nominal sample rates the device supports as an array of
 			//	AudioValueRangeStructs. Note that for discrete sampler rates, the range
 			//	will have the minimum value equal to the maximum value.
-			
+
 			//	Calculate the number of items that have been requested. Note that this
 			//	number is allowed to be smaller than the actual size of the list. In such
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioValueRange);
-			
+
 			//	clamp it to the number of items we have
 			if(theNumberItemsToFetch > 2)
 			{
 				theNumberItemsToFetch = 2;
 			}
-			
+
 			//	fill out the return array
 			if(theNumberItemsToFetch > 0)
 			{
@@ -2464,11 +2464,11 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 				((AudioValueRange*)outData)[1].mMinimum = 48000.0;
 				((AudioValueRange*)outData)[1].mMaximum = 48000.0;
 			}
-			
+
 			//	report how much we wrote
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioValueRange);
 			break;
-		
+
 		case kAudioDevicePropertyIsHidden:
 			//	This returns whether or not the device is visible to clients.
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyIsHidden for the device");
@@ -2527,7 +2527,7 @@ static OSStatus	AudioPlaneInput_GetDevicePropertyData(AudioServerPlugInDriverRef
 				*outDataSize = sizeof(CFURLRef);
 			}
 			break;
-			
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -2540,22 +2540,22 @@ Done:
 static OSStatus	AudioPlaneInput_SetDevicePropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, const void* inData, UInt32* outNumberPropertiesChanged, AudioObjectPropertyAddress outChangedAddresses[2])
 {
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	Float64 theOldSampleRate;
 	UInt64 theNewSampleRate;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetDevicePropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetDevicePropertyData: no address");
 	FailWithAction(outNumberPropertiesChanged == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetDevicePropertyData: no place to return the number of properties that changed");
 	FailWithAction(outChangedAddresses == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetDevicePropertyData: no place to return the properties that changed");
 	FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetDevicePropertyData: not the device object");
-	
+
 	//	initialize the returned number of changed properties
 	*outNumberPropertiesChanged = 0;
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetDevicePropertyData() method.
@@ -2568,7 +2568,7 @@ static OSStatus	AudioPlaneInput_SetDevicePropertyData(AudioServerPlugInDriverRef
 			//	check the arguments
 			FailWithAction(inDataSize != sizeof(Float64), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_SetDevicePropertyData: wrong size for the data for kAudioDevicePropertyNominalSampleRate");
 			FailWithAction((*((const Float64*)inData) != 44100.0) && (*((const Float64*)inData) != 48000.0), theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetDevicePropertyData: unsupported value for kAudioDevicePropertyNominalSampleRate");
-			
+
 			//	make sure that the new value is different than the old value
 			pthread_mutex_lock(&gPlugIn_StateMutex);
 			theOldSampleRate = gDevice_SampleRate;
@@ -2585,7 +2585,7 @@ static OSStatus	AudioPlaneInput_SetDevicePropertyData(AudioServerPlugInDriverRef
 				dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, theNewSampleRate, NULL); });
 			}
 			break;
-		
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -2600,17 +2600,17 @@ Done:
 static Boolean	AudioPlaneInput_HasStreamProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress)
 {
 	//	This method returns whether or not the given object has the given property.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	Boolean theAnswer = false;
-	
+
 	//	check the arguments
 	FailIf(inDriver != gAudioServerPlugInDriverRef, Done, "AudioPlaneInput_HasStreamProperty: bad driver reference");
 	FailIf(inAddress == NULL, Done, "AudioPlaneInput_HasStreamProperty: no address");
 	FailIf((inObjectID != kObjectID_Stream_Input) && (inObjectID != kObjectID_Stream_Output), Done, "AudioPlaneInput_HasStreamProperty: not a stream object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetStreamPropertyData() method.
@@ -2642,18 +2642,18 @@ static OSStatus	AudioPlaneInput_IsStreamPropertySettable(AudioServerPlugInDriver
 {
 	//	This method returns whether or not the given property on the object can have its value
 	//	changed.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsStreamPropertySettable: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsStreamPropertySettable: no address");
 	FailWithAction(outIsSettable == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsStreamPropertySettable: no place to put the return value");
 	FailWithAction((inObjectID != kObjectID_Stream_Input) && (inObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsStreamPropertySettable: not a stream object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetStreamPropertyData() method.
@@ -2672,13 +2672,13 @@ static OSStatus	AudioPlaneInput_IsStreamPropertySettable(AudioServerPlugInDriver
 		case kAudioStreamPropertyAvailablePhysicalFormats:
 			*outIsSettable = false;
 			break;
-		
+
 		case kAudioStreamPropertyIsActive:
 		case kAudioStreamPropertyVirtualFormat:
 		case kAudioStreamPropertyPhysicalFormat:
 			*outIsSettable = true;
 			break;
-		
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -2691,18 +2691,18 @@ Done:
 static OSStatus	AudioPlaneInput_GetStreamPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32* outDataSize)
 {
 	//	This method returns the byte size of the property's data.
-	
+
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetStreamPropertyDataSize: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetStreamPropertyDataSize: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetStreamPropertyDataSize: no place to put the return value");
 	FailWithAction((inObjectID != kObjectID_Stream_Input) && (inObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetStreamPropertyDataSize: not a stream object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetStreamPropertyData() method.
@@ -2743,7 +2743,7 @@ static OSStatus	AudioPlaneInput_GetStreamPropertyDataSize(AudioServerPlugInDrive
 		case kAudioStreamPropertyStartingChannel:
 			*outDataSize = sizeof(UInt32);
 			break;
-		
+
 		case kAudioStreamPropertyLatency:
 			*outDataSize = sizeof(UInt32);
 			break;
@@ -2770,18 +2770,18 @@ Done:
 static OSStatus	AudioPlaneInput_GetStreamPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, UInt32* outDataSize, void* outData)
 {
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	UInt32 theNumberItemsToFetch;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetStreamPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetStreamPropertyData: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetStreamPropertyData: no place to put the return value size");
 	FailWithAction(outData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetStreamPropertyData: no place to put the return value");
 	FailWithAction((inObjectID != kObjectID_Stream_Input) && (inObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetStreamPropertyData: not a stream object");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required.
 	//
@@ -2795,21 +2795,21 @@ static OSStatus	AudioPlaneInput_GetStreamPropertyData(AudioServerPlugInDriverRef
 			*((AudioClassID*)outData) = kAudioObjectClassID;
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyClass:
 			//	The class is always kAudioStreamClassID for streams created by drivers
 			FailWithAction(inDataSize < sizeof(AudioClassID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetStreamPropertyData: not enough space for the return value of kAudioObjectPropertyClass for the stream");
 			*((AudioClassID*)outData) = kAudioStreamClassID;
 			*outDataSize = sizeof(AudioClassID);
 			break;
-			
+
 		case kAudioObjectPropertyOwner:
 			//	The stream's owner is the device object
 			FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetStreamPropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the stream");
 			*((AudioObjectID*)outData) = kObjectID_Device;
 			*outDataSize = sizeof(AudioObjectID);
 			break;
-			
+
 		case kAudioObjectPropertyOwnedObjects:
 			//	Streams do not own any objects
 			*outDataSize = 0 * sizeof(AudioObjectID);
@@ -2896,13 +2896,13 @@ static OSStatus	AudioPlaneInput_GetStreamPropertyData(AudioServerPlugInDriverRef
 			//	number is allowed to be smaller than the actual size of the list. In such
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioStreamRangedDescription);
-			
+
 			//	clamp it to the number of items we have
 			if(theNumberItemsToFetch > 2)
 			{
 				theNumberItemsToFetch = 2;
 			}
-			
+
 			//	fill out the return array
 			if(theNumberItemsToFetch > 0)
 			{
@@ -2930,7 +2930,7 @@ static OSStatus	AudioPlaneInput_GetStreamPropertyData(AudioServerPlugInDriverRef
 				((AudioStreamRangedDescription*)outData)[1].mSampleRateRange.mMinimum = 48000.0;
 				((AudioStreamRangedDescription*)outData)[1].mSampleRateRange.mMaximum = 48000.0;
 			}
-			
+
 			//	report how much we wrote
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioStreamRangedDescription);
 			break;
@@ -2947,22 +2947,22 @@ Done:
 static OSStatus	AudioPlaneInput_SetStreamPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, const void* inData, UInt32* outNumberPropertiesChanged, AudioObjectPropertyAddress outChangedAddresses[2])
 {
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	Float64 theOldSampleRate;
 	UInt64 theNewSampleRate;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetStreamPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetStreamPropertyData: no address");
 	FailWithAction(outNumberPropertiesChanged == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetStreamPropertyData: no place to return the number of properties that changed");
 	FailWithAction(outChangedAddresses == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetStreamPropertyData: no place to return the properties that changed");
 	FailWithAction((inObjectID != kObjectID_Stream_Input) && (inObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetStreamPropertyData: not a stream object");
-	
+
 	//	initialize the returned number of changed properties
 	*outNumberPropertiesChanged = 0;
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetStreamPropertyData() method.
@@ -2997,7 +2997,7 @@ static OSStatus	AudioPlaneInput_SetStreamPropertyData(AudioServerPlugInDriverRef
 			}
 			pthread_mutex_unlock(&gPlugIn_StateMutex);
 			break;
-			
+
 		case kAudioStreamPropertyVirtualFormat:
 		case kAudioStreamPropertyPhysicalFormat:
 			//	Changing the stream format needs to be handled via the
@@ -3013,7 +3013,7 @@ static OSStatus	AudioPlaneInput_SetStreamPropertyData(AudioServerPlugInDriverRef
 			FailWithAction(((const AudioStreamBasicDescription*)inData)->mChannelsPerFrame != 2, theAnswer = kAudioDeviceUnsupportedFormatError, Done, "AudioPlaneInput_SetStreamPropertyData: unsupported channels per frame for kAudioStreamPropertyPhysicalFormat");
 			FailWithAction(((const AudioStreamBasicDescription*)inData)->mBitsPerChannel != 32, theAnswer = kAudioDeviceUnsupportedFormatError, Done, "AudioPlaneInput_SetStreamPropertyData: unsupported bits per channel for kAudioStreamPropertyPhysicalFormat");
 			FailWithAction((((const AudioStreamBasicDescription*)inData)->mSampleRate != 44100.0) && (((const AudioStreamBasicDescription*)inData)->mSampleRate != 48000.0), theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetStreamPropertyData: unsupported sample rate for kAudioStreamPropertyPhysicalFormat");
-			
+
 			//	If we made it this far, the requested format is something we support, so make sure the sample rate is actually different
 			pthread_mutex_lock(&gPlugIn_StateMutex);
 			theOldSampleRate = gDevice_SampleRate;
@@ -3026,7 +3026,7 @@ static OSStatus	AudioPlaneInput_SetStreamPropertyData(AudioServerPlugInDriverRef
 				dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, theNewSampleRate, NULL); });
 			}
 			break;
-		
+
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
 			break;
@@ -3041,16 +3041,16 @@ Done:
 static Boolean	AudioPlaneInput_HasControlProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress)
 {
 	//	This method returns whether or not the given object has the given property.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	Boolean theAnswer = false;
-	
+
 	//	check the arguments
 	FailIf(inDriver != gAudioServerPlugInDriverRef, Done, "AudioPlaneInput_HasControlProperty: bad driver reference");
 	FailIf(inAddress == NULL, Done, "AudioPlaneInput_HasControlProperty: no address");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetControlPropertyData() method.
@@ -3075,7 +3075,7 @@ static Boolean	AudioPlaneInput_HasControlProperty(AudioServerPlugInDriverRef inD
 					break;
 			};
 			break;
-		
+
 		case kObjectID_Mute_Input_Master:
 		case kObjectID_Mute_Output_Master:
 			switch(inAddress->mSelector)
@@ -3091,7 +3091,7 @@ static Boolean	AudioPlaneInput_HasControlProperty(AudioServerPlugInDriverRef inD
 					break;
 			};
 			break;
-		
+
 		case kObjectID_DataSource_Input_Master:
 		case kObjectID_DataSource_Output_Master:
 		case kObjectID_DataDestination_PlayThru_Master:
@@ -3120,17 +3120,17 @@ static OSStatus	AudioPlaneInput_IsControlPropertySettable(AudioServerPlugInDrive
 {
 	//	This method returns whether or not the given property on the object can have its value
 	//	changed.
-	
+
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_IsControlPropertySettable: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsControlPropertySettable: no address");
 	FailWithAction(outIsSettable == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_IsControlPropertySettable: no place to put the return value");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetControlPropertyData() method.
@@ -3151,18 +3151,18 @@ static OSStatus	AudioPlaneInput_IsControlPropertySettable(AudioServerPlugInDrive
 				case kAudioLevelControlPropertyConvertDecibelsToScalar:
 					*outIsSettable = false;
 					break;
-				
+
 				case kAudioLevelControlPropertyScalarValue:
 				case kAudioLevelControlPropertyDecibelValue:
 					*outIsSettable = true;
 					break;
-				
+
 				default:
 					theAnswer = kAudioHardwareUnknownPropertyError;
 					break;
 			};
 			break;
-		
+
 		case kObjectID_Mute_Input_Master:
 		case kObjectID_Mute_Output_Master:
 			switch(inAddress->mSelector)
@@ -3175,17 +3175,17 @@ static OSStatus	AudioPlaneInput_IsControlPropertySettable(AudioServerPlugInDrive
 				case kAudioControlPropertyElement:
 					*outIsSettable = false;
 					break;
-				
+
 				case kAudioBooleanControlPropertyValue:
 					*outIsSettable = true;
 					break;
-				
+
 				default:
 					theAnswer = kAudioHardwareUnknownPropertyError;
 					break;
 			};
 			break;
-		
+
 		case kObjectID_DataSource_Input_Master:
 		case kObjectID_DataSource_Output_Master:
 		case kObjectID_DataDestination_PlayThru_Master:
@@ -3201,17 +3201,17 @@ static OSStatus	AudioPlaneInput_IsControlPropertySettable(AudioServerPlugInDrive
 				case kAudioSelectorControlPropertyItemName:
 					*outIsSettable = false;
 					break;
-				
+
 				case kAudioSelectorControlPropertyCurrentItem:
 					*outIsSettable = true;
 					break;
-				
+
 				default:
 					theAnswer = kAudioHardwareUnknownPropertyError;
 					break;
 			};
 			break;
-				
+
 		default:
 			theAnswer = kAudioHardwareBadObjectError;
 			break;
@@ -3224,17 +3224,17 @@ Done:
 static OSStatus	AudioPlaneInput_GetControlPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32* outDataSize)
 {
 	//	This method returns the byte size of the property's data.
-	
+
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetControlPropertyDataSize: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetControlPropertyDataSize: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetControlPropertyDataSize: no place to put the return value");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetControlPropertyData() method.
@@ -3293,7 +3293,7 @@ static OSStatus	AudioPlaneInput_GetControlPropertyDataSize(AudioServerPlugInDriv
 					break;
 			};
 			break;
-		
+
 		case kObjectID_Mute_Input_Master:
 		case kObjectID_Mute_Output_Master:
 			switch(inAddress->mSelector)
@@ -3331,7 +3331,7 @@ static OSStatus	AudioPlaneInput_GetControlPropertyDataSize(AudioServerPlugInDriv
 					break;
 			};
 			break;
-		
+
 		case kObjectID_DataSource_Input_Master:
 		case kObjectID_DataSource_Output_Master:
 		case kObjectID_DataDestination_PlayThru_Master:
@@ -3378,7 +3378,7 @@ static OSStatus	AudioPlaneInput_GetControlPropertyDataSize(AudioServerPlugInDriv
 					break;
 			};
 			break;
-				
+
 		default:
 			theAnswer = kAudioHardwareBadObjectError;
 			break;
@@ -3391,18 +3391,18 @@ Done:
 static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, UInt32* outDataSize, void* outData)
 {
 	#pragma unused(inClientProcessID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	UInt32 theNumberItemsToFetch;
 	UInt32 theItemIndex;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetControlPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetControlPropertyData: no address");
 	FailWithAction(outDataSize == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetControlPropertyData: no place to put the return value size");
 	FailWithAction(outData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_GetControlPropertyData: no place to put the return value");
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required.
 	//
@@ -3420,21 +3420,21 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					*((AudioClassID*)outData) = kAudioLevelControlClassID;
 					*outDataSize = sizeof(AudioClassID);
 					break;
-					
+
 				case kAudioObjectPropertyClass:
 					//	Volume controls are of the class, kAudioVolumeControlClassID
 					FailWithAction(inDataSize < sizeof(AudioClassID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: not enough space for the return value of kAudioObjectPropertyClass for the volume control");
 					*((AudioClassID*)outData) = kAudioVolumeControlClassID;
 					*outDataSize = sizeof(AudioClassID);
 					break;
-					
+
 				case kAudioObjectPropertyOwner:
 					//	The control's owner is the device object
 					FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the volume control");
 					*((AudioObjectID*)outData) = kObjectID_Device;
 					*outDataSize = sizeof(AudioObjectID);
 					break;
-					
+
 				case kAudioObjectPropertyOwnedObjects:
 					//	Controls do not own any objects
 					*outDataSize = 0 * sizeof(AudioObjectID);
@@ -3471,12 +3471,12 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					pthread_mutex_lock(&gPlugIn_StateMutex);
 					*((Float32*)outData) = (inObjectID == kObjectID_Volume_Input_Master) ? gVolume_Input_Master_Value : gVolume_Output_Master_Value;
 					pthread_mutex_unlock(&gPlugIn_StateMutex);
-					
+
 					//	Note that we square the scalar value before converting to dB so as to
 					//	provide a better curve for the slider
 					*((Float32*)outData) *= *((Float32*)outData);
 					*((Float32*)outData) = kVolume_MinDB + (*((Float32*)outData) * (kVolume_MaxDB - kVolume_MinDB));
-					
+
 					//	report how much we wrote
 					*outDataSize = sizeof(Float32);
 					break;
@@ -3492,7 +3492,7 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 				case kAudioLevelControlPropertyConvertScalarToDecibels:
 					//	This takes the scalar value in outData and converts it to dB.
 					FailWithAction(inDataSize < sizeof(Float32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: not enough space for the return value of kAudioLevelControlPropertyDecibelValue for the volume control");
-					
+
 					//	clamp the value to be between 0 and 1
 					if(*((Float32*)outData) < 0.0)
 					{
@@ -3502,12 +3502,12 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					{
 						*((Float32*)outData) = 1.0;
 					}
-					
+
 					//	Note that we square the scalar value before converting to dB so as to
 					//	provide a better curve for the slider
 					*((Float32*)outData) *= *((Float32*)outData);
 					*((Float32*)outData) = kVolume_MinDB + (*((Float32*)outData) * (kVolume_MaxDB - kVolume_MinDB));
-					
+
 					//	report how much we wrote
 					*outDataSize = sizeof(Float32);
 					break;
@@ -3515,7 +3515,7 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 				case kAudioLevelControlPropertyConvertDecibelsToScalar:
 					//	This takes the dB value in outData and converts it to scalar.
 					FailWithAction(inDataSize < sizeof(Float32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: not enough space for the return value of kAudioLevelControlPropertyDecibelValue for the volume control");
-					
+
 					//	clamp the value to be between kVolume_MinDB and kVolume_MaxDB
 					if(*((Float32*)outData) < kVolume_MinDB)
 					{
@@ -3525,13 +3525,13 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					{
 						*((Float32*)outData) = kVolume_MaxDB;
 					}
-					
+
 					//	Note that we square the scalar value before converting to dB so as to
 					//	provide a better curve for the slider. We undo that here.
 					*((Float32*)outData) = *((Float32*)outData) - kVolume_MinDB;
 					*((Float32*)outData) /= kVolume_MaxDB - kVolume_MinDB;
 					*((Float32*)outData) = sqrtf(*((Float32*)outData));
-					
+
 					//	report how much we wrote
 					*outDataSize = sizeof(Float32);
 					break;
@@ -3541,7 +3541,7 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					break;
 			};
 			break;
-		
+
 		case kObjectID_Mute_Input_Master:
 		case kObjectID_Mute_Output_Master:
 			switch(inAddress->mSelector)
@@ -3552,21 +3552,21 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					*((AudioClassID*)outData) = kAudioBooleanControlClassID;
 					*outDataSize = sizeof(AudioClassID);
 					break;
-					
+
 				case kAudioObjectPropertyClass:
 					//	Mute controls are of the class, kAudioMuteControlClassID
 					FailWithAction(inDataSize < sizeof(AudioClassID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: not enough space for the return value of kAudioObjectPropertyClass for the mute control");
 					*((AudioClassID*)outData) = kAudioMuteControlClassID;
 					*outDataSize = sizeof(AudioClassID);
 					break;
-					
+
 				case kAudioObjectPropertyOwner:
 					//	The control's owner is the device object
 					FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the mute control");
 					*((AudioObjectID*)outData) = kObjectID_Device;
 					*outDataSize = sizeof(AudioObjectID);
 					break;
-					
+
 				case kAudioObjectPropertyOwnedObjects:
 					//	Controls do not own any objects
 					*outDataSize = 0 * sizeof(AudioObjectID);
@@ -3602,7 +3602,7 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					break;
 			};
 			break;
-		
+
 		case kObjectID_DataSource_Input_Master:
 		case kObjectID_DataSource_Output_Master:
 		case kObjectID_DataDestination_PlayThru_Master:
@@ -3614,7 +3614,7 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					*((AudioClassID*)outData) = kAudioSelectorControlClassID;
 					*outDataSize = sizeof(AudioClassID);
 					break;
-					
+
 				case kAudioObjectPropertyClass:
 					//	Data Source controls are of the class, kAudioDataSourceControlClassID
 					FailWithAction(inDataSize < sizeof(AudioClassID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: not enough space for the return value of kAudioObjectPropertyClass for the data source control");
@@ -3625,22 +3625,22 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 						case kObjectID_DataSource_Output_Master:
 							*((AudioClassID*)outData) = kAudioDataSourceControlClassID;
 							break;
-							
+
 						case kObjectID_DataDestination_PlayThru_Master:
 							*((AudioClassID*)outData) = kAudioDataDestinationControlClassID;
 							break;
-							
+
 					};
 					*outDataSize = sizeof(AudioClassID);
 					break;
-					
+
 				case kAudioObjectPropertyOwner:
 					//	The control's owner is the device object
 					FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "AudioPlaneInput_GetControlPropertyData: not enough space for the return value of kAudioObjectPropertyOwner for the data source control");
 					*((AudioObjectID*)outData) = kObjectID_Device;
 					*outDataSize = sizeof(AudioObjectID);
 					break;
-					
+
 				case kAudioObjectPropertyOwnedObjects:
 					//	Controls do not own any objects
 					*outDataSize = 0 * sizeof(AudioObjectID);
@@ -3654,15 +3654,15 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 						case kObjectID_DataSource_Input_Master:
 							*((AudioObjectPropertyScope*)outData) = kAudioObjectPropertyScopeInput;
 							break;
-							
+
 						case kObjectID_DataSource_Output_Master:
 							*((AudioObjectPropertyScope*)outData) = kAudioObjectPropertyScopeOutput;
 							break;
-							
+
 						case kObjectID_DataDestination_PlayThru_Master:
 							*((AudioObjectPropertyScope*)outData) = kAudioObjectPropertyScopePlayThrough;
 							break;
-							
+
 					};
 					*outDataSize = sizeof(AudioObjectPropertyScope);
 					break;
@@ -3684,15 +3684,15 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 						case kObjectID_DataSource_Input_Master:
 							*((UInt32*)outData) = gDataSource_Input_Master_Value;
 							break;
-							
+
 						case kObjectID_DataSource_Output_Master:
 							*((UInt32*)outData) = gDataSource_Output_Master_Value;
 							break;
-							
+
 						case kObjectID_DataDestination_PlayThru_Master:
 							*((UInt32*)outData) = gDataDestination_PlayThru_Master_Value;
 							break;
-							
+
 					};
 					pthread_mutex_unlock(&gPlugIn_StateMutex);
 					*outDataSize = sizeof(UInt32);
@@ -3700,24 +3700,24 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 
 				case kAudioSelectorControlPropertyAvailableItems:
 					//	This returns the IDs for all the items the data source control supports.
-					
+
 					//	Calculate the number of items that have been requested. Note that this
 					//	number is allowed to be smaller than the actual size of the list. In such
 					//	case, only that number of items will be returned
 					theNumberItemsToFetch = inDataSize / sizeof(UInt32);
-					
+
 					//	clamp it to the number of items we have
 					if(theNumberItemsToFetch > kDataSource_NumberItems)
 					{
 						theNumberItemsToFetch = kDataSource_NumberItems;
 					}
-					
+
 					//	fill out the return array
 					for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
 					{
 						((UInt32*)outData)[theItemIndex] = theItemIndex;
 					}
-					
+
 					//	report how much we wrote
 					*outDataSize = theNumberItemsToFetch * sizeof(UInt32);
 					break;
@@ -3736,7 +3736,7 @@ static OSStatus	AudioPlaneInput_GetControlPropertyData(AudioServerPlugInDriverRe
 					break;
 			};
 			break;
-				
+
 		default:
 			theAnswer = kAudioHardwareBadObjectError;
 			break;
@@ -3749,20 +3749,20 @@ Done:
 static OSStatus	AudioPlaneInput_SetControlPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32 inDataSize, const void* inData, UInt32* outNumberPropertiesChanged, AudioObjectPropertyAddress outChangedAddresses[2])
 {
 	#pragma unused(inClientProcessID, inQualifierDataSize, inQualifierData)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	Float32 theNewVolume;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_SetControlPropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetControlPropertyData: no address");
 	FailWithAction(outNumberPropertiesChanged == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetControlPropertyData: no place to return the number of properties that changed");
 	FailWithAction(outChangedAddresses == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_SetControlPropertyData: no place to return the properties that changed");
-	
+
 	//	initialize the returned number of changed properties
 	*outNumberPropertiesChanged = 0;
-	
+
 	//	Note that for each object, this driver implements all the required properties plus a few
 	//	extras that are useful but not required. There is more detailed commentary about each
 	//	property in the AudioPlaneInput_GetControlPropertyData() method.
@@ -3816,7 +3816,7 @@ static OSStatus	AudioPlaneInput_SetControlPropertyData(AudioServerPlugInDriverRe
 					}
 					pthread_mutex_unlock(&gPlugIn_StateMutex);
 					break;
-				
+
 				case kAudioLevelControlPropertyDecibelValue:
 					//	For the dB value, we first convert it to a scalar value since that is how
 					//	the value is tracked. Note that if this value changes, it implies that the
@@ -3867,13 +3867,13 @@ static OSStatus	AudioPlaneInput_SetControlPropertyData(AudioServerPlugInDriverRe
 					}
 					pthread_mutex_unlock(&gPlugIn_StateMutex);
 					break;
-				
+
 				default:
 					theAnswer = kAudioHardwareUnknownPropertyError;
 					break;
 			};
 			break;
-		
+
 		case kObjectID_Mute_Input_Master:
 		case kObjectID_Mute_Output_Master:
 			switch(inAddress->mSelector)
@@ -3905,13 +3905,13 @@ static OSStatus	AudioPlaneInput_SetControlPropertyData(AudioServerPlugInDriverRe
 					}
 					pthread_mutex_unlock(&gPlugIn_StateMutex);
 					break;
-				
+
 				default:
 					theAnswer = kAudioHardwareUnknownPropertyError;
 					break;
 			};
 			break;
-		
+
 		case kObjectID_DataSource_Input_Master:
 		case kObjectID_DataSource_Output_Master:
 		case kObjectID_DataDestination_PlayThru_Master:
@@ -3937,7 +3937,7 @@ static OSStatus	AudioPlaneInput_SetControlPropertyData(AudioServerPlugInDriverRe
 								}
 							}
 							break;
-							
+
 						case kObjectID_DataSource_Output_Master:
 							{
 								if(gDataSource_Output_Master_Value != *((const UInt32*)inData))
@@ -3950,7 +3950,7 @@ static OSStatus	AudioPlaneInput_SetControlPropertyData(AudioServerPlugInDriverRe
 								}
 							}
 							break;
-							
+
 						case kObjectID_DataDestination_PlayThru_Master:
 							{
 								if(gDataDestination_PlayThru_Master_Value != *((const UInt32*)inData))
@@ -3966,13 +3966,13 @@ static OSStatus	AudioPlaneInput_SetControlPropertyData(AudioServerPlugInDriverRe
 					};
 					pthread_mutex_unlock(&gPlugIn_StateMutex);
 					break;
-				
+
 				default:
 					theAnswer = kAudioHardwareUnknownPropertyError;
 					break;
 			};
 			break;
-				
+
 		default:
 			theAnswer = kAudioHardwareBadObjectError;
 			break;
@@ -3991,19 +3991,19 @@ static OSStatus	AudioPlaneInput_StartIO(AudioServerPlugInDriverRef inDriver, Aud
 	//	important to note that multiple clients can have IO running on the device at the same time.
 	//	So, work only needs to be done when the first client starts. All subsequent starts simply
 	//	increment the counter.
-	
+
 	#pragma unused(inClientID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_StartIO: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_StartIO: bad device ID");
 
 	//	we need to hold the state lock
 	pthread_mutex_lock(&gPlugIn_StateMutex);
-	
+
 	//	figure out what we need to do
 	if(gDevice_IOIsRunning == UINT64_MAX)
 	{
@@ -4024,10 +4024,10 @@ static OSStatus	AudioPlaneInput_StartIO(AudioServerPlugInDriverRef inDriver, Aud
 		//	IO is already running, so just bump the counter
 		++gDevice_IOIsRunning;
 	}
-	
+
 	//	unlock the state lock
 	pthread_mutex_unlock(&gPlugIn_StateMutex);
-	
+
 Done:
 	return theAnswer;
 }
@@ -4036,19 +4036,19 @@ static OSStatus	AudioPlaneInput_StopIO(AudioServerPlugInDriverRef inDriver, Audi
 {
 	//	This call tells the device that the client has stopped IO. The driver can stop the hardware
 	//	once all clients have stopped.
-	
+
 	#pragma unused(inClientID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_StopIO: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_StopIO: bad device ID");
 
 	//	we need to hold the state lock
 	pthread_mutex_lock(&gPlugIn_StateMutex);
-	
+
 	//	figure out what we need to do
 	if(gDevice_IOIsRunning == 0)
 	{
@@ -4065,10 +4065,10 @@ static OSStatus	AudioPlaneInput_StopIO(AudioServerPlugInDriverRef inDriver, Audi
 		//	IO is still running, so just bump the counter
 		--gDevice_IOIsRunning;
 	}
-	
+
 	//	unlock the state lock
 	pthread_mutex_unlock(&gPlugIn_StateMutex);
-	
+
 Done:
 	return theAnswer;
 }
@@ -4083,9 +4083,9 @@ static OSStatus	AudioPlaneInput_GetZeroTimeStamp(AudioServerPlugInDriverRef inDr
 	//
 	//	For this device, the zero time stamps' sample time increments every kDevice_RingBufferSize
 	//	frames and the host time increments by kDevice_RingBufferSize * gDevice_HostTicksPerFrame.
-	
+
 	#pragma unused(inClientID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	UInt64 theCurrentHostTime;
@@ -4093,7 +4093,7 @@ static OSStatus	AudioPlaneInput_GetZeroTimeStamp(AudioServerPlugInDriverRef inDr
 	UInt64 theAnchorHostTime;
 	UInt64 theNumberTimeStamps;
 	UInt64 thePublishedTimeStamps;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetZeroTimeStamp: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetZeroTimeStamp: bad device ID");
@@ -4102,7 +4102,7 @@ static OSStatus	AudioPlaneInput_GetZeroTimeStamp(AudioServerPlugInDriverRef inDr
 	theCurrentHostTime = mach_absolute_time();
 	theAnchorHostTime = atomic_load_explicit(&gDevice_AnchorHostTime,
 										 memory_order_acquire);
-	
+
 	//	Calculate the latest complete zero-timestamp period. This function is called on a realtime
 	//	thread, so publish the monotonic counter with lock-free atomics rather than a mutex.
 	theHostTicksPerRingBuffer = gDevice_HostTicksPerFrame * ((Float64)kDevice_RingBufferSize);
@@ -4130,7 +4130,7 @@ static OSStatus	AudioPlaneInput_GetZeroTimeStamp(AudioServerPlugInDriverRef inDr
 	*outSampleTime = theNumberTimeStamps * kDevice_RingBufferSize;
 	*outHostTime = theAnchorHostTime + (((Float64)theNumberTimeStamps) * theHostTicksPerRingBuffer);
 	*outSeed = 1;
-	
+
 Done:
 	return theAnswer;
 }
@@ -4139,12 +4139,12 @@ static OSStatus	AudioPlaneInput_WillDoIOOperation(AudioServerPlugInDriverRef inD
 {
 	//	This method returns whether or not the device will do a given IO operation. For this device,
 	//	we only support reading input data and writing output data.
-	
+
 	#pragma unused(inClientID)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_WillDoIOOperation: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_WillDoIOOperation: bad device ID");
@@ -4158,14 +4158,14 @@ static OSStatus	AudioPlaneInput_WillDoIOOperation(AudioServerPlugInDriverRef inD
 			willDo = true;
 			willDoInPlace = true;
 			break;
-			
+
 		case kAudioServerPlugInIOOperationWriteMix:
 			willDo = true;
 			willDoInPlace = true;
 			break;
-			
+
 	};
-	
+
 	//	fill out the return values
 	if(outWillDo != NULL)
 	{
@@ -4184,12 +4184,12 @@ static OSStatus	AudioPlaneInput_BeginIOOperation(AudioServerPlugInDriverRef inDr
 {
 	//	This is called at the beginning of an IO operation. This device doesn't do anything, so just
 	//	check the arguments and return.
-	
+
 	#pragma unused(inClientID, inOperationID, inIOBufferFrameSize, inIOCycleInfo)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_BeginIOOperation: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_BeginIOOperation: bad device ID");
@@ -4203,12 +4203,12 @@ static OSStatus	AudioPlaneInput_DoIOOperation(AudioServerPlugInDriverRef inDrive
 	//	Move the fully mixed output into a bounded lock-free ring and expose it through the input
 	//	stream. The callback performs only bounded copies and atomics; it never allocates, locks,
 	//	logs, or performs IPC. Missing input is always initialized to silence.
-	
+
 	#pragma unused(inClientID, inIOCycleInfo, ioSecondaryBuffer)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_DoIOOperation: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_DoIOOperation: bad device ID");
@@ -4235,12 +4235,12 @@ static OSStatus	AudioPlaneInput_EndIOOperation(AudioServerPlugInDriverRef inDriv
 {
 	//	This is called at the end of an IO operation. This device doesn't do anything, so just check
 	//	the arguments and return.
-	
+
 	#pragma unused(inClientID, inOperationID, inIOBufferFrameSize, inIOCycleInfo)
-	
+
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	
+
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_EndIOOperation: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_EndIOOperation: bad device ID");
