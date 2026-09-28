@@ -27,6 +27,7 @@ Runtime and use the same public audio APIs as any other client.
 ## What works
 
 - Per-application capture through macOS Core Audio Process Taps
+- Physical-microphone discovery and capture through the same source API
 - Stable source identity with application name, bundle identifier, and PID
 - PCM16 and Float32; mono or stereo; 16, 24, and 48 kHz
 - Timestamped, sequenced binary PCM frames with discontinuity/drop metadata
@@ -72,6 +73,8 @@ signed development Runtime:
 The installer is user-local and does not use `sudo` or create a persistent
 LaunchAgent. On first live capture, macOS should request application-audio
 permission for the stable Runtime identity `com.sonexis.runtime`.
+The first physical-microphone capture separately asks for macOS Microphone
+permission for that same signed Runtime.
 
 Install the developer CLI with `pipx`:
 
@@ -204,6 +207,22 @@ AudioPlane Input ready. Type text and press Enter; /quit exits.
 macOS `say` performs local speech synthesis; no text or audio is sent to a
 cloud service. Use `--voice NAME`, `--rate WORDS_PER_MINUTE`, or
 `--destination ID_OR_NAME` to override the defaults.
+
+To keep your physical microphone available while AudioPlane Input is selected
+inside Discord, Zoom, or another app, run a bounded passthrough in one terminal:
+
+```bash
+audioplane mic-through
+```
+
+The command resolves the current macOS default microphone, captures it through
+the signed Runtime, and routes it to AudioPlane Input until `Ctrl-C`. In a
+second terminal, `audioplane speak` or an AI response output can inject audio
+at the same time; Core Audio mixes active output clients before the virtual
+input is read. Use `--source ID_OR_NAME` to select a different physical input.
+AudioPlane rejects choosing AudioPlane Input itself as the passthrough source,
+which would create a direct digital feedback loop. It never changes the macOS
+default or another application's selected microphone.
 
 BlackHole remains supported as a fallback. The first-party driver is currently
 a source-built developer preview and still requires the documented manual

@@ -173,6 +173,22 @@ application still decides model, feedback, turn-taking, and barge-in policy.
 Flush quiesces an in-flight ring read before advancing the software cursor, but
 cannot retract the current device quantum already handed to Core Audio.
 
+For physical-microphone passthrough while an application is set to AudioPlane
+Input, use the public composition helper:
+
+```python
+async with Sonexis() as sx:
+    async with sx.microphone_passthrough() as passthrough:
+        await passthrough.wait()
+```
+
+`audioplane mic-through` exposes the same flow from the command line. It uses
+48 kHz mono PCM, bounded Runtime capture/output queues, discontinuity
+propagation, and deterministic cancellation. It does not alter device
+selection. Concurrent `audioplane speak` or model-output sessions are combined
+by Core Audio before the virtual driver's `WriteMix` callback. The helper
+rejects routing AudioPlane Input back into itself.
+
 ## TypeScript
 
 ```typescript

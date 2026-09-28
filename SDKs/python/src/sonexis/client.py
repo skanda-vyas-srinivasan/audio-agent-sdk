@@ -16,7 +16,8 @@ from .errors import (AmbiguousOutputDestinationError, AmbiguousSourceError,
                      SonexisConnectionError, SonexisError, SonexisProtocolError,
                      SourceNotFoundError, UnsupportedFormatError)
 from .models import (AudioFormat, AudioFrame, AudioOutputDestination, AudioSource,
-                     CaptureInfo, Handshake, OutputInfo, RuntimeEvent, RuntimeStatus)
+                     CaptureInfo, Handshake, OutputInfo, RuntimeEvent, RuntimeStatus,
+                     SampleFormat)
 from .protocol import FLAG_EOS, MAX_CONTROL_BYTES, PROTOCOL_VERSION, read_frame
 from .unix_socket import open_trusted_unix_connection
 
@@ -41,6 +42,7 @@ _MUTATING_CONTROL_COMMANDS = frozenset({
 
 if TYPE_CHECKING:
     from .duplex import DuplexSession
+    from .microphone import MicrophonePassthrough
     from .output import AudioOutput
 
 
@@ -206,6 +208,7 @@ class Sonexis:
         bundle_identifier: Optional[str] = None,
         pid: Optional[int] = None,
         name: Optional[str] = None,
+        kind: Optional[str] = None,
         available_only: bool = True,
     ) -> List[AudioSource]:
         """Return sources matching explicit fields or a case-insensitive search string."""
@@ -222,6 +225,8 @@ class Sonexis:
                 continue
             if name is not None and source.name != name:
                 continue
+            if kind is not None and source.kind != kind:
+                continue
             if query is not None:
                 folded = query.casefold()
                 fields = (source.id, source.name, source.bundle_identifier or "")
@@ -229,6 +234,40 @@ class Sonexis:
                     continue
             matches.append(source)
         return matches
+
+    async def default_microphone(self) -> AudioSource:
+        """Return the current default physical input source unambiguously.
+
+        Runtime v1.0.1 and newer annotate the default microphone. The
+        single-device fallback keeps this helper useful with development
+        builds that advertise microphones without that annotation.
+        """
+        microphones = await self.find_sources(kind="microphone")
+        defaults = [source for source in microphones if source.is_default is True]
+        if len(defaults) == 1:
+            return defaults[0]
+        if len(defaults) > 1:
+            raise AmbiguousSourceError(
+                "ambiguous_default_microphone",
+                "Runtime reported more than one default microphone",
+                details={f"candidate_{index}": source.id
+                         for index, source in enumerate(defaults, 1)},
+            )
+        if len(microphones) == 1:
+            return microphones[0]
+        if not microphones:
+            raise SourceNotFoundError(
+                "microphone_not_found",
+                "No available microphone was reported by the Runtime. Check macOS "
+                "input-device availability and restart the signed Runtime.",
+                retryable=True,
+            )
+        raise AmbiguousSourceError(
+            "default_microphone_unknown",
+            "Runtime did not identify a default microphone; select one explicitly",
+            details={f"candidate_{index}": source.id
+                     for index, source in enumerate(microphones, 1)},
+        )
 
     async def get_source(self, selector: SourceSelector) -> AudioSource:
         """Resolve an ID, bundle ID, PID, exact app name, or source object uniquely."""
@@ -385,6 +424,33 @@ class Sonexis:
                              output_destination=output_destination,
                              input_format=input_format, output_format=output_format,
                              target_buffer_milliseconds=target_buffer_milliseconds)
+
+    def microphone_passthrough(
+        self,
+        input_source: Optional[SourceSelector] = None,
+        *,
+        output_destination: OutputDestinationSelector =
+            "coreaudio:com.audioplane.input.device",
+        format: AudioFormat = AudioFormat(
+            sample_rate=48_000,
+            channels=1,
+            sample_format=SampleFormat.PCM_S16LE,
+        ),
+        target_buffer_milliseconds: int = 60,
+    ) -> "MicrophonePassthrough":
+        """Create a physical-microphone to output forwarding session.
+
+        The returned object is an async context manager. No audio resource is
+        opened until it is entered.
+        """
+        from .microphone import MicrophonePassthrough
+        return MicrophonePassthrough(
+            self,
+            input_source=input_source,
+            output_destination=output_destination,
+            format=format,
+            target_buffer_milliseconds=target_buffer_milliseconds,
+        )
 
     async def stop(self, session_id: str) -> CaptureInfo:
         response = await self._request("stop_capture", session_id=session_id)

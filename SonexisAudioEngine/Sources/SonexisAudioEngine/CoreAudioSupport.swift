@@ -29,6 +29,13 @@ public struct NoDefaultOutputDeviceError: Error, CustomStringConvertible {
     }
 }
 
+public struct NoDefaultInputDeviceError: Error, CustomStringConvertible {
+    public init() {}
+    public var description: String {
+        "No default input device is available"
+    }
+}
+
 public func checkOSStatus(_ status: OSStatus, operation: String) throws {
     guard status == noErr else {
         throw CoreAudioError(operation: operation, status: status)
@@ -183,6 +190,19 @@ public enum CoreAudioSupport {
 
         guard deviceID != kAudioObjectUnknown else {
             throw NoDefaultOutputDeviceError()
+        }
+        return deviceID
+    }
+
+    public static func defaultInputDevice() throws -> AudioDeviceID {
+        let deviceID: AudioDeviceID = try readScalar(
+            objectID: AudioObjectID(kAudioObjectSystemObject),
+            selector: kAudioHardwarePropertyDefaultInputDevice,
+            defaultValue: AudioDeviceID(kAudioObjectUnknown),
+            operation: "Read default input device"
+        )
+        guard deviceID != kAudioObjectUnknown else {
+            throw NoDefaultInputDeviceError()
         }
         return deviceID
     }

@@ -17,6 +17,7 @@ from .models import (AudioFormat, AudioFrame, AudioOutputDestination, AudioSourc
                      CaptureInfo, Handshake, OutputInfo, OutputMetrics, RuntimeErrorInfo,
                      RuntimeEvent, RuntimeStatus, SampleFormat, SessionMetrics)
 from .multi import LabeledAudioFrame, MultiSourceSession
+from .microphone import MicrophonePassthrough, MicrophonePassthroughMetrics
 from .replay import ReplayStream
 from .duplex import DuplexSession
 
@@ -31,6 +32,7 @@ __all__ = [
     "CaptureInfo", "CaptureSession", "DuplexSession",
     "EventSubscription", "Handshake", "ReplayStream", "RuntimeErrorInfo", "RuntimeEvent", "RuntimeStatus", "SampleFormat",
     "LabeledAudioFrame", "LatencySummary", "LatencyTracker", "MultiSourceSession",
+    "MicrophonePassthrough", "MicrophonePassthroughMetrics",
     "OutputDestinationNotFoundError", "OutputFailedError", "OutputInfo", "OutputMetrics", "OutputUnavailableError",
     "OutputDestinationSelector", "SourceSelector",
     "PermissionDeniedError", "ProviderError",

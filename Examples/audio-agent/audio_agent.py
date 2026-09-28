@@ -325,7 +325,7 @@ async def choose_source(client: Sonexis, selector: Optional[str] = None):
         return await client.get_source(selector)
     sources = [source for source in await client.sources() if source.available]
     if not sources:
-        raise RuntimeError("No available application audio sources")
+        raise RuntimeError("No available audio sources")
     print("\nAvailable sources:\n")
     for index, source in enumerate(sources, 1):
         bundle = f" [{source.bundle_identifier}]" if source.bundle_identifier else ""

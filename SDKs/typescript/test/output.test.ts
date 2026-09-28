@@ -7,12 +7,14 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import {
   AmbiguousOutputDestinationError,
+  AudioFrame,
   AudioFormat,
   AudioFormats,
   AudioOutput,
   AudioOutputDestination,
   CaptureStream,
   DuplexSession,
+  MicrophonePassthrough,
   encodeOutputFrame,
   OutputInfo,
   OutputDestinationNotFoundError,
@@ -488,6 +490,64 @@ test("concurrent duplex close callers join the same cleanup", async () => {
   assert.equal(secondDone, false);
   release();
   await Promise.all([first, second]);
+});
+
+test("microphone passthrough forwards source-aware frames and blocks self-loops", async () => {
+  const format = AudioFormats.pcm48kMono();
+  const microphone = {
+    id: "microphone:physical", kind: "microphone" as const, name: "Physical Mic",
+    process_ids: [], process_state: "running" as const, is_available: true, is_default: true,
+  };
+  const destination = {
+    id: "coreaudio:com.audioplane.input.device", kind: "virtual_input" as const,
+    name: "AudioPlane Input", is_available: true, is_default: false,
+    follows_system_default: false,
+    active_device_id: "coreaudio:com.audioplane.input.device",
+    supported_formats: [format],
+  };
+  const frame: AudioFrame = {
+    streamId: randomUUID(), sequence: 0n, timestampNs: 10n, frameCount: 48,
+    format, data: Buffer.alloc(96), discontinuity: false, droppedFramesBefore: 2,
+    endOfStream: false, source: microphone, sourceId: microphone.id,
+    sourceName: microphone.name, sessionId: randomUUID(), receivedAtNs: 20n,
+  };
+  let inputClosed = false;
+  const input = {
+    async *[Symbol.asyncIterator]() { yield frame; },
+    close: async () => { inputClosed = true; },
+  } as unknown as CaptureStream;
+  const writes: Array<{ data: Buffer; discontinuity?: boolean }> = [];
+  let outputDrained: boolean | undefined;
+  const output = {
+    write: async (data: Buffer, options: { discontinuity?: boolean }) => {
+      writes.push({ data, discontinuity: options.discontinuity });
+    },
+    close: async (options: { drain?: boolean }) => { outputDrained = options.drain; },
+    cancel: async () => undefined,
+  } as unknown as AudioOutput;
+  const client = {
+    defaultMicrophone: async () => microphone,
+    getOutputDestination: async () => destination,
+    playback: async () => output,
+    capture: async () => input,
+  } as unknown as Sonexis;
+
+  const passthrough = await MicrophonePassthrough.open(client);
+  await passthrough.wait();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].discontinuity, true);
+  assert.equal(passthrough.metrics.framesForwarded, 48);
+  await passthrough.close(true);
+  assert.equal(inputClosed, true);
+  assert.equal(outputDrained, true);
+
+  const loopSource = { ...microphone, id: "microphone:com.audioplane.input.device" };
+  const loopClient = {
+    defaultMicrophone: async () => loopSource,
+    getOutputDestination: async () => destination,
+  } as unknown as Sonexis;
+  await assert.rejects(MicrophonePassthrough.open(loopClient), (error: unknown) =>
+    error instanceof SonexisError && error.code === "microphone_feedback_loop");
 });
 
 async function startRuntime(context: test.TestContext,

@@ -44,6 +44,8 @@ done
     "com.sonexis.ctl" ]
 strings "$OUTPUT_DIR/sonexis-runtime" \
     | grep -F '<key>NSAudioCaptureUsageDescription</key>' >/dev/null
+strings "$OUTPUT_DIR/sonexis-runtime" \
+    | grep -F '<key>NSMicrophoneUsageDescription</key>' >/dev/null
 
 RUNTIME_TEAM=$(codesign -dvv "$OUTPUT_DIR/sonexis-runtime" 2>&1 \
     | sed -n 's/^TeamIdentifier=//p')

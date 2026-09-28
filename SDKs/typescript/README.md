@@ -185,8 +185,27 @@ control connection.
 
 `default` follows the current system default output device. Fixed HAL outputs use
 stable `coreaudio:<UID>` IDs. Recognized installed loopback devices are exposed
-as `virtual_input`; Sonexis 1.0 will not install a first-party HAL driver.
+as `virtual_input`; AudioPlane includes a source-built first-party HAL driver,
+but installation remains an explicit system action.
 Output APIs fail with `unsupported_capability` against a pre-v0.4 Runtime.
+
+Physical inputs are ordinary `microphone` sources. `defaultMicrophone()` uses
+the Runtime's default-device annotation without silently choosing among
+ambiguous devices. To forward one into AudioPlane Input:
+
+```ts
+const passthrough = await sx.microphonePassthrough();
+try {
+  await passthrough.wait();
+} finally {
+  await passthrough.close();
+}
+```
+
+The helper propagates discontinuities and uses the same bounded capture/output
+planes. Pass `source`, `destination`, `format`, or
+`targetBufferMilliseconds` when overriding defaults. It rejects routing a
+virtual input directly back into itself.
 
 For ownership convenience, `await sx.duplex(source, options)` creates one
 capture and one output. It does not choose a model or turn policy:

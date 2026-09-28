@@ -376,9 +376,16 @@ do {
     case "sources":
         let sources = try client.listSources()
         if arguments.json { try printJSON(sources); break }
-        print("\("ID".padding(toLength: 42, withPad: " ", startingAt: 0))  \("STATUS".padding(toLength: 8, withPad: " ", startingAt: 0))  APP")
+        print("\("ID".padding(toLength: 46, withPad: " ", startingAt: 0))  "
+            + "\("KIND".padding(toLength: 12, withPad: " ", startingAt: 0))  "
+            + "\("STATUS".padding(toLength: 14, withPad: " ", startingAt: 0))  NAME")
         for source in sources {
-            print("\(terminalSafe(source.id).padding(toLength: 42, withPad: " ", startingAt: 0))  \((source.isAvailable ? "active" : "inactive").padding(toLength: 8, withPad: " ", startingAt: 0))  \(terminalSafe(source.name))")
+            let status = (source.isAvailable ? "active" : "inactive")
+                + (source.isDefault == true ? ",default" : "")
+            print("\(terminalSafe(source.id).padding(toLength: 46, withPad: " ", startingAt: 0))  "
+                + "\(source.kind.rawValue.padding(toLength: 12, withPad: " ", startingAt: 0))  "
+                + "\(status.padding(toLength: 14, withPad: " ", startingAt: 0))  "
+                + terminalSafe(source.name))
         }
     case "capture":
         guard let sourceID = arguments.value else { throw RuntimeErrorDTO(code: "usage", message: Arguments.usage) }

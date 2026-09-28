@@ -18,5 +18,7 @@
 	<string>1</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Sonexis Runtime captures application audio selected by the local developer.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>AudioPlane captures a microphone selected by the local developer for local audio routing.</string>
 </dict>
 </plist>

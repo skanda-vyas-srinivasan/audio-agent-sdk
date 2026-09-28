@@ -35,6 +35,18 @@ audioplane speak
 Type `/quit` to stop. The command uses the local macOS `say` voice by default;
 `audioplane speak --voice Samantha --rate 190` selects a voice and speech rate.
 
+When an application uses AudioPlane Input instead of a physical microphone,
+keep the current macOS microphone in the mix with:
+
+```sh
+audioplane mic-through
+```
+
+This resolves the annotated default microphone and forwards 48 kHz mono PCM
+through the Runtime until `Ctrl-C`. `audioplane speak` and model response audio
+can run concurrently. Use `--source ID_OR_NAME` for a different physical input;
+the SDK rejects a source/destination pair that is the same Core Audio device.
+
 For local development against a checkout:
 
 ```sh
@@ -117,6 +129,9 @@ Read-only request cancellation leaves an otherwise healthy connection usable.
 string selector. A name must resolve uniquely; the SDK raises
 `AmbiguousSourceError` rather than guessing. Use `find_sources`, `get_source`,
 or `wait_for_source` for discovery and applications that launch later.
+Physical inputs use stable `microphone:<Core Audio UID>` IDs, kind
+`"microphone"`, and optional `is_default` metadata. `default_microphone()`
+resolves the current default without guessing when metadata is ambiguous.
 
 Every delivered `AudioFrame` includes its immutable source snapshot, session and
 stream IDs, sequence, format, session-relative timestamp, discontinuity/drop
@@ -176,8 +191,9 @@ raises typed not-found/ambiguity errors rather than choosing silently.
 
 Installed loopback HAL devices are returned as `virtual_input` destinations
 when recognizable and can be selected by their `coreaudio:<UID>` ID or exact
-name. Sonexis 1.0 will not install a virtual driver; destination enumeration is
-the authoritative source of availability. `await output.refresh()` updates the
+name. AudioPlane includes a source-built first-party driver, but installation
+remains explicit; destination enumeration is the authoritative source of
+availability. `await output.refresh()` updates the
 creation-time destination snapshot after a default-device change.
 
 Capture and output can also be owned together without imposing agent policy:

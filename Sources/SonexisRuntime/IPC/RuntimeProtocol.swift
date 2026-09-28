@@ -4,7 +4,7 @@ public enum RuntimeProtocolInfo {
     public static let protocolVersion = 2
     public static let runtimeVersion = "1.0.0"
     public static let capabilities = [
-        "application_sources", "capture_sessions", "event_stream", "format_negotiation",
+        "application_sources", "microphone_sources", "capture_sessions", "event_stream", "format_negotiation",
         "multiple_sessions", "pcm_v2", "runtime_diagnostics", "runtime_diagnostics_v2",
         "exact_uint64_mirrors",
         "output_sessions",
@@ -81,11 +81,13 @@ public struct RuntimeSourceDTO: Codable, Equatable, Sendable {
     public let isAvailable: Bool
     public let isProducingAudio: Bool?
     public let nativeFormat: RuntimePCMFormatDTO?
+    public let isDefault: Bool?
 
     public init(id: String, kind: RuntimeSourceKindDTO = .application, processID: Int32? = nil,
                 processIDs: [Int32] = [], bundleIdentifier: String? = nil, name: String,
                 isActive: Bool = true, isAvailable: Bool? = nil,
-                isProducingAudio: Bool? = nil, nativeFormat: RuntimePCMFormatDTO? = nil) {
+                isProducingAudio: Bool? = nil, nativeFormat: RuntimePCMFormatDTO? = nil,
+                isDefault: Bool? = nil) {
         self.id = id
         self.kind = kind
         self.processID = processID ?? processIDs.sorted().first
@@ -96,6 +98,7 @@ public struct RuntimeSourceDTO: Codable, Equatable, Sendable {
         self.isAvailable = isAvailable ?? isActive
         self.isProducingAudio = isProducingAudio
         self.nativeFormat = nativeFormat
+        self.isDefault = isDefault
     }
 
     public var isActive: Bool { processState == .running }
@@ -104,11 +107,11 @@ public struct RuntimeSourceDTO: Codable, Equatable, Sendable {
     // `process_i_ds`. Pin this one public wire key to the documented spelling.
     private enum EncodingKeys: String, CodingKey {
         case id, kind, processID, processIDs = "process_ids", bundleIdentifier, name
-        case processState, isAvailable, isProducingAudio, nativeFormat
+        case processState, isAvailable, isProducingAudio, nativeFormat, isDefault
     }
     private enum DecodingKeys: String, CodingKey {
         case id, kind, processID, processIDs, bundleIdentifier, name
-        case processState, isAvailable, isProducingAudio, nativeFormat
+        case processState, isAvailable, isProducingAudio, nativeFormat, isDefault
     }
 
     public init(from decoder: Decoder) throws {
@@ -123,6 +126,7 @@ public struct RuntimeSourceDTO: Codable, Equatable, Sendable {
         isAvailable = try container.decode(Bool.self, forKey: .isAvailable)
         isProducingAudio = try container.decodeIfPresent(Bool.self, forKey: .isProducingAudio)
         nativeFormat = try container.decodeIfPresent(RuntimePCMFormatDTO.self, forKey: .nativeFormat)
+        isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -137,6 +141,7 @@ public struct RuntimeSourceDTO: Codable, Equatable, Sendable {
         try container.encode(isAvailable, forKey: .isAvailable)
         try container.encodeIfPresent(isProducingAudio, forKey: .isProducingAudio)
         try container.encodeIfPresent(nativeFormat, forKey: .nativeFormat)
+        try container.encodeIfPresent(isDefault, forKey: .isDefault)
     }
 }
 

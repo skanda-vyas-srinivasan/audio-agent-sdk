@@ -699,6 +699,38 @@ OSStatus SonexisAudioRingBufferIOProc(
     return noErr;
 }
 
+OSStatus SonexisAudioRingBufferInputIOProc(
+    AudioObjectID inDevice,
+    const AudioTimeStamp *inNow,
+    const AudioBufferList *inInputData,
+    const AudioTimeStamp *inInputTime,
+    AudioBufferList *outOutputData,
+    const AudioTimeStamp *inOutputTime,
+    void *inClientData
+) {
+    (void)inDevice;
+    (void)inNow;
+    (void)inInputTime;
+    (void)inOutputTime;
+    // An input IOProc can still receive output buffers on duplex hardware.
+    // Contribute silence instead of leaving an undefined output contribution.
+    if (outOutputData != NULL) {
+        for (UInt32 index = 0; index < outOutputData->mNumberBuffers; ++index) {
+            AudioBuffer *buffer = &outOutputData->mBuffers[index];
+            if (buffer->mData != NULL && buffer->mDataByteSize > 0) {
+                memset(buffer->mData, 0, buffer->mDataByteSize);
+            }
+        }
+    }
+    if (inClientData != NULL && inInputData != NULL) {
+        SonexisAudioRingBufferWriteFromAudioBufferList(
+            (SonexisAudioRingBuffer *)inClientData,
+            inInputData
+        );
+    }
+    return noErr;
+}
+
 uint32_t SonexisAudioRingBufferFlush(SonexisAudioRingBuffer *ringBuffer) {
     if (ringBuffer == NULL) {
         return 0;

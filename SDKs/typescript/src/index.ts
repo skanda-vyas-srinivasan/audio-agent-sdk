@@ -51,6 +51,7 @@ export interface AudioSource {
   is_available: boolean;
   is_producing_audio?: boolean;
   native_format?: AudioFormat;
+  is_default?: boolean;
 }
 
 export type SourceSelector = AudioSource | string | number;
@@ -62,6 +63,7 @@ export interface SourceFilter {
   bundleIdentifier?: string;
   pid?: number;
   name?: string;
+  kind?: AudioSource["kind"];
   availableOnly?: boolean;
 }
 export interface SessionMetrics {
@@ -174,6 +176,17 @@ export interface OutputWriteOptions {
 export interface DuplexOptions {
   inputFormat?: AudioFormat;
   output?: OutputOptions;
+}
+export interface MicrophonePassthroughOptions {
+  source?: SourceSelector;
+  destination?: OutputDestinationSelector;
+  format?: AudioFormat;
+  targetBufferMilliseconds?: number;
+}
+export interface MicrophonePassthroughMetrics {
+  framesForwarded: number;
+  bytesForwarded: number;
+  discontinuitiesForwarded: number;
 }
 export interface MultiSourceSessionOptions {
   /** Maximum complete AudioFrame packets buffered independently per label. */
@@ -553,6 +566,7 @@ export function filterSources(sources: readonly AudioSource[], filter: SourceFil
         && source.bundle_identifier !== filter.bundleIdentifier) return false;
     if (filter.pid !== undefined && !source.process_ids.includes(filter.pid)) return false;
     if (filter.name !== undefined && source.name !== filter.name) return false;
+    if (filter.kind !== undefined && source.kind !== filter.kind) return false;
     if (query !== undefined && ![source.id, source.bundle_identifier ?? "", source.name]
       .some((value) => value.toLowerCase().includes(query))) return false;
     return true;
@@ -835,6 +849,27 @@ export class Sonexis extends EventEmitter {
     return resolveSource(await this.sources(), selector);
   }
 
+  /** Resolve the current default physical input without silently guessing. */
+  async defaultMicrophone(): Promise<AudioSource> {
+    const microphones = await this.findSources({ kind: "microphone" });
+    const defaults = microphones.filter((source) => source.is_default === true);
+    if (defaults.length === 1) return defaults[0];
+    if (defaults.length > 1) {
+      throw new AmbiguousSourceError("Runtime reported more than one default microphone",
+        Object.fromEntries(defaults.map((source, index) =>
+          [`candidate_${index + 1}`, source.id])));
+    }
+    if (microphones.length === 1) return microphones[0];
+    if (!microphones.length) {
+      throw new SourceNotFoundError(
+        "No available microphone was reported by the Runtime", "microphone_not_found");
+    }
+    throw new AmbiguousSourceError(
+      "Runtime did not identify a default microphone; select one explicitly",
+      Object.fromEntries(microphones.map((source, index) =>
+        [`candidate_${index + 1}`, source.id])));
+  }
+
   /** Poll fresh source snapshots until an exact selector becomes available. */
   async waitForSource(selector: SourceSelector, options: {
     timeoutMs?: number; pollIntervalMs?: number; signal?: AbortSignal;
@@ -1007,6 +1042,12 @@ export class Sonexis extends EventEmitter {
   /** Compose one independent capture and one output without imposing agent policy. */
   duplex(source: SourceSelector, options: DuplexOptions = {}): Promise<DuplexSession> {
     return DuplexSession.open(this, source, options);
+  }
+
+  /** Forward a physical microphone through the bounded Runtime output plane. */
+  microphonePassthrough(options: MicrophonePassthroughOptions = {})
+    : Promise<MicrophonePassthrough> {
+    return MicrophonePassthrough.open(this, options);
   }
 
   async outputStatus(outputSessionId: string): Promise<OutputInfo> {
@@ -1713,7 +1754,13 @@ function runtimeErrorFromResponse(error: {
       return new SlowConsumerError(message, code, retryable, details, requestId);
     case "capture_failed":
     case "capture_initialization_failed":
+    case "microphone_capture_initialization_failed":
+    case "microphone_conversion_failed":
+    case "microphone_device_changed":
       return new CaptureFailedError(message, code, retryable, details, requestId);
+    case "unsupported_microphone_device":
+    case "unsupported_microphone_format":
+      return new UnsupportedFormatError(message, code, retryable, details, requestId);
     case "output_unavailable":
     case "output_destination_unavailable":
     case "output_destination_disconnected":
@@ -2109,6 +2156,97 @@ export class DuplexSession {
     ]);
     const failure = results.find((result): result is PromiseRejectedResult =>
       result.status === "rejected");
+    if (failure) throw failure.reason;
+  }
+}
+
+/** Bounded composition of one physical-microphone capture and one output. */
+export class MicrophonePassthrough {
+  readonly metrics: MicrophonePassthroughMetrics = {
+    framesForwarded: 0,
+    bytesForwarded: 0,
+    discontinuitiesForwarded: 0,
+  };
+  private pump: Promise<void>;
+  private closePromise?: Promise<void>;
+
+  private constructor(readonly source: AudioSource, readonly input: CaptureStream,
+                      readonly output: AudioOutput) {
+    this.pump = this.forward();
+    // Keep a rejected forwarding task observed even when a caller closes
+    // without awaiting wait(); wait() still exposes the original rejection.
+    void this.pump.catch(() => undefined);
+  }
+
+  /** @internal Constructed by Sonexis.microphonePassthrough(). */
+  static async open(client: Sonexis, options: MicrophonePassthroughOptions = {})
+    : Promise<MicrophonePassthrough> {
+    const source = options.source === undefined
+      ? await client.defaultMicrophone() : await client.getSource(options.source);
+    if (source.kind !== "microphone") {
+      throw new SonexisError("not_a_microphone",
+        `${JSON.stringify(source.name)} is a ${source.kind} source, not a microphone`, false,
+        { source_id: source.id });
+    }
+    const destination = await client.getOutputDestination(
+      options.destination ?? "coreaudio:com.audioplane.input.device");
+    const sourceUid = source.id.startsWith("microphone:")
+      ? source.id.slice("microphone:".length) : undefined;
+    const activeUid = destination.active_device_id?.startsWith("coreaudio:")
+      ? destination.active_device_id.slice("coreaudio:".length)
+      : destination.active_device_id;
+    if (sourceUid && activeUid && sourceUid === activeUid) {
+      throw new SonexisError("microphone_feedback_loop",
+        "The selected microphone and output are the same Core Audio device. "
+          + "Choose a physical microphone as the source and AudioPlane Input as the output.",
+        false, { source_id: source.id, device_uid: activeUid });
+    }
+
+    const format = options.format ?? AudioFormats.pcm48kMono();
+    const output = await client.playback({
+      destination,
+      format,
+      targetBufferMilliseconds: options.targetBufferMilliseconds ?? 60,
+    });
+    try {
+      const input = await client.capture(source, format);
+      return new MicrophonePassthrough(source, input, output);
+    } catch (error) {
+      await output.cancel();
+      throw error;
+    }
+  }
+
+  /** Wait until microphone capture ends or forwarding fails. */
+  wait(): Promise<void> { return this.pump; }
+
+  /** Stop immediately by default; pass true only when queued audio should drain. */
+  close(drainOutput = false): Promise<void> {
+    this.closePromise ??= this.finishClose(drainOutput);
+    return this.closePromise;
+  }
+
+  private async forward(): Promise<void> {
+    for await (const frame of this.input) {
+      const discontinuity = frame.discontinuity || frame.droppedFramesBefore > 0;
+      await this.output.write(frame.data, {
+        timestampNs: frame.timestampNs,
+        discontinuity,
+      });
+      this.metrics.framesForwarded += frame.frameCount;
+      this.metrics.bytesForwarded += frame.data.length;
+      if (discontinuity) this.metrics.discontinuitiesForwarded++;
+    }
+  }
+
+  private async finishClose(drainOutput: boolean): Promise<void> {
+    const inputResult = await Promise.allSettled([this.input.close()]);
+    const pumpResult = await Promise.allSettled([this.pump]);
+    const outputResult = await Promise.allSettled([
+      this.output.close({ drain: drainOutput }),
+    ]);
+    const failure = [...inputResult, ...pumpResult, ...outputResult]
+      .find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failure) throw failure.reason;
   }
 }

@@ -85,6 +85,30 @@ int main(void) {
     }
     SonexisAudioRingBufferDestroy(shapeRing);
 
+    SonexisAudioRingBuffer *inputRing = SonexisAudioRingBufferCreate(8, 2);
+    assert(inputRing != NULL);
+    AudioBufferList input = {
+        .mNumberBuffers = 1,
+        .mBuffers = {{ .mNumberChannels = 2, .mDataByteSize = sizeof(stereoInput),
+            .mData = stereoInput }},
+    };
+    float duplexOutput[8];
+    for (unsigned index = 0; index < 8; ++index) duplexOutput[index] = 1.0f;
+    AudioBufferList output = {
+        .mNumberBuffers = 1,
+        .mBuffers = {{ .mNumberChannels = 2, .mDataByteSize = sizeof(duplexOutput),
+            .mData = duplexOutput }},
+    };
+    assert(SonexisAudioRingBufferInputIOProc(0, &emptyTimeStamp, &input,
+        &emptyTimeStamp, &output, &emptyTimeStamp, inputRing) == noErr);
+    for (unsigned index = 0; index < 8; ++index) assert(duplexOutput[index] == 0.0f);
+    memset(stereoOutput, 0, sizeof(stereoOutput));
+    assert(SonexisAudioRingBufferReadInterleaved(inputRing, stereoOutput, 4) == 4);
+    for (unsigned index = 0; index < 8; ++index) {
+        assert(stereoOutput[index] == stereoInput[index]);
+    }
+    SonexisAudioRingBufferDestroy(inputRing);
+
     ringBuffer = SonexisAudioRingBufferCreate(4096, 2);
     assert(ringBuffer != NULL);
     atomic_init(&finished, false);

@@ -4,6 +4,17 @@ This changelog summarizes developer-visible Runtime and SDK milestones. It is
 not a dump of repository commits. Sonexis Runtime versions are independent of
 the native Sonexis application's 2.x release line.
 
+## Unreleased
+
+- Added physical Core Audio input discovery and capture through the existing
+  protocol-v2 source/session/data-plane model, including stable device-UID IDs,
+  default-input metadata, microphone permission text, and SDK resolution.
+- Added bounded Python microphone passthrough and `audioplane mic-through`, so
+  a physical microphone and independently injected speech/model audio can feed
+  AudioPlane Input concurrently without changing system device selections.
+- Added a two-callback virtual-input read cushion to reduce scheduling jitter;
+  reinstall/reboot validation of the updated driver remains manual.
+
 ## 1.0.0 — Production release candidate
 
 - Promoted the provider-neutral protocol v2, Python/TypeScript capture,

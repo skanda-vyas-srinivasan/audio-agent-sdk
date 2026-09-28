@@ -31,11 +31,12 @@ private final class RuntimeCaptureSessionAdapter: RuntimeBackendCaptureSession, 
 }
 
 private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sendable {
+    private static let microphonePrefix = "microphone:"
     private let registry = AudioSourceRegistry()
     private let manager = AudioCaptureManager()
 
     func availableSources() throws -> [RuntimeSourceDTO] {
-        try registry.availableSources().map { source in
+        let applications = try registry.availableSources().map { source in
             RuntimeSourceDTO(
                 id: source.id,
                 kind: .application,
@@ -51,6 +52,42 @@ private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sen
                 nativeFormat: nil
             )
         }
+        let defaultInput = try? CoreAudioSupport.defaultInputDevice()
+        let microphones = try CoreAudioSupport.audioDeviceIDs().compactMap { deviceID
+            -> RuntimeSourceDTO? in
+            guard let streams = try? CoreAudioSupport.inputStreamIDs(deviceID),
+                  !streams.isEmpty,
+                  let summary = try? CoreAudioSupport.deviceSummary(deviceID) else { return nil }
+            let nativeFormat: RuntimePCMFormatDTO?
+            if streams.count == 1,
+               let format = try? CoreAudioSupport.streamVirtualFormat(streams[0]),
+               format.isFloat32LinearPCM,
+               format.mSampleRate.isFinite,
+               format.mSampleRate >= 8_000,
+               format.mSampleRate <= 192_000,
+               format.mChannelsPerFrame > 0,
+               format.mChannelsPerFrame <= 8,
+               format.mBytesPerFrame == (format.isNonInterleaved
+                    ? 4 : 4 * format.mChannelsPerFrame) {
+                nativeFormat = RuntimePCMFormatDTO(
+                    sampleRate: UInt32(format.mSampleRate.rounded()),
+                    channelCount: UInt16(format.mChannelsPerFrame),
+                    sampleFormat: .float32LE,
+                    interleaved: !format.isNonInterleaved)
+            } else {
+                nativeFormat = nil
+            }
+            return RuntimeSourceDTO(
+                id: Self.microphonePrefix + summary.uid,
+                kind: .microphone,
+                name: summary.name,
+                isActive: true,
+                isAvailable: true,
+                isProducingAudio: nil,
+                nativeFormat: nativeFormat,
+                isDefault: deviceID == defaultInput)
+        }
+        return applications + microphones
     }
 
     func startCapture(
@@ -60,6 +97,27 @@ private final class SonexisCaptureBackend: RuntimeCaptureBackend, @unchecked Sen
         onDeviceChanged: @escaping @Sendable () -> Void,
         onEnded: @escaping @Sendable (RuntimeErrorDTO?) -> Void
     ) throws -> RuntimeBackendCaptureSession {
+        if sourceID.hasPrefix(Self.microphonePrefix) {
+            let uid = String(sourceID.dropFirst(Self.microphonePrefix.count))
+            guard !uid.isEmpty,
+                  let deviceID = try CoreAudioSupport.deviceID(forUID: uid),
+                  !(try CoreAudioSupport.inputStreamIDs(deviceID)).isEmpty else {
+                throw RuntimeErrorDTO(code: "source_unavailable",
+                    message: "Microphone source is no longer available: \(sourceID)",
+                    retryable: true)
+            }
+            let session = RuntimeMicrophoneCaptureSession(deviceID: deviceID,
+                outputFormat: format, onFrame: onFrame,
+                onDeviceChanged: onDeviceChanged, onEnded: onEnded)
+            do {
+                try session.start()
+                return session
+            } catch {
+                throw RuntimeErrorDTO(code: "microphone_capture_initialization_failed",
+                    message: "\(String(describing: error)). Verify Microphone permission for "
+                        + "com.sonexis.runtime, then retry.", retryable: true)
+            }
+        }
         let source: AudioSource
         do {
             source = try registry.source(id: sourceID)

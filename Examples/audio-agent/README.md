@@ -1,6 +1,6 @@
 # Sonexis audio agent
 
-This terminal reference application consumes only the public `sonexis` Python API. It can send one live application stream to OpenAI Realtime or Gemini Live, or exercise the same source-aware flow entirely offline with a mock provider and recorded audio.
+This terminal reference application consumes only the public `sonexis` Python API. It can send one live application or microphone stream to OpenAI Realtime or Gemini Live, or exercise the same source-aware flow entirely offline with a mock provider and recorded audio.
 
 From the repository root, install the SDK in a virtual environment:
 

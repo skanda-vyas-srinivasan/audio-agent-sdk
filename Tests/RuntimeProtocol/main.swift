@@ -135,6 +135,18 @@ do {
     let decodedSource = try RuntimeProtocolCodec.decodeLine(RuntimeSourceDTO.self, from: sourceLine)
     expect(decodedSource == source, "source did not round trip: \(sourceJSON) decoded=\(decodedSource)")
 
+    let microphone = RuntimeSourceDTO(id: "microphone:device.uid", kind: .microphone,
+        name: "Built-in Microphone", isDefault: true)
+    let microphoneLine = try RuntimeProtocolCodec.encodeLine(microphone)
+    let microphoneJSON = String(decoding: microphoneLine, as: UTF8.self)
+    expect(microphoneJSON.contains("\"kind\":\"microphone\""),
+        "microphone source kind is missing")
+    expect(microphoneJSON.contains("\"is_default\":true"),
+        "default microphone metadata is missing")
+    let decodedMicrophone = try RuntimeProtocolCodec.decodeLine(RuntimeSourceDTO.self,
+        from: microphoneLine)
+    expect(decodedMicrophone == microphone, "microphone source did not round trip")
+
     for split in 0...line.count {
         var parser = RuntimeNDJSONParser()
         let first = try parser.append(line.prefix(split))

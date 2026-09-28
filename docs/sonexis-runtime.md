@@ -247,9 +247,18 @@ offending connection or output session when framing cannot safely continue.
 
 An application source contains a bundle-stable ID (`app.<bundle identifier>`), kind, application name, bundle identifier, all current PIDs, process state, availability, and an optional audio-production heuristic. PID is transient metadata and never source identity. Core Audio object IDs and bundle paths are not exposed.
 
+A physical input source uses `microphone:<Core Audio device UID>`, kind
+`microphone`, the device display name, an empty PID list, its compatible native
+format when known, and optional `is_default` metadata. The stable UID is exposed
+instead of the transient `AudioObjectID`. Microphone capture uses the same
+session, normalization, binary frame, backpressure, and cleanup protocol as
+application capture. The signed Runtime carries both application-audio and
+microphone permission descriptions; macOS grants those permissions separately.
+
 `is_producing_audio` means that one current PID appears in the HAL audio-process list; it is not signal-level detection. `native_format` is currently null because discovery only knows the default-output format, not an authoritative application-native format. The capture response contains the authoritative negotiated Runtime output format.
 
-The source-kind enum reserves application, microphone, system mix, remote, and virtual values. Only application sources are implemented.
+The source-kind enum supports application and microphone sources and reserves
+system mix, remote, and virtual values for future backends.
 
 ## Capture sessions and format negotiation
 

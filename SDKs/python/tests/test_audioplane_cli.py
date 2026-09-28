@@ -32,6 +32,25 @@ class FakeOutput:
         self.writes.append(value)
 
 
+class FakePassthrough:
+    def __init__(self, source, destination):
+        self.source = source
+        self.output = FakeOutput(destination)
+        self.entered = False
+        self.exited = False
+        self.waited = False
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self.exited = True
+
+    async def wait(self):
+        self.waited = True
+
+
 class FakeClient:
     last_instance = None
 
@@ -43,6 +62,8 @@ class FakeClient:
         self.handshake = None
         self.output = None
         self.playback_call = None
+        self.passthrough_call = None
+        self.passthrough = None
 
     async def __aenter__(self):
         self.handshake = Handshake(
@@ -118,6 +139,42 @@ class FakeClient:
         self.playback_call = (destination, format, target_buffer_milliseconds)
         self.output = FakeOutput(resolved)
         return self.output
+
+    def microphone_passthrough(
+        self, source, *, output_destination, format, target_buffer_milliseconds
+    ):
+        resolved_source = AudioSource(
+            id="microphone:built-in",
+            name="MacBook Pro Microphone",
+            kind="microphone",
+            process_ids=[],
+            bundle_identifier=None,
+            process_state="running",
+            available=True,
+            producing_audio=None,
+            native_format=None,
+            is_default=True,
+        )
+        resolved_output = AudioOutputDestination(
+            id=output_destination,
+            name="AudioPlane Input",
+            kind="virtual_input",
+            available=True,
+            is_default=False,
+            follows_system_default=False,
+            active_device_id="com.audioplane.input.device",
+            active_device_name="AudioPlane Input",
+            native_format=None,
+            supported_formats=[],
+        )
+        self.passthrough_call = (
+            source,
+            output_destination,
+            format,
+            target_buffer_milliseconds,
+        )
+        self.passthrough = FakePassthrough(resolved_source, resolved_output)
+        return self.passthrough
 
 
 def arguments(command, *, json_output=False, socket=None, **values):
@@ -249,6 +306,41 @@ class AudioPlaneCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed.buffer_ms, 60)
         self.assertIsNone(parsed.voice)
         self.assertIsNone(parsed.rate)
+
+    async def test_microphone_passthrough_uses_default_input_and_virtual_output(self):
+        standard_output = io.StringIO()
+        with redirect_stdout(standard_output):
+            result = await _run(
+                arguments(
+                    "mic-through",
+                    source=None,
+                    destination="coreaudio:com.audioplane.input.device",
+                    buffer_ms=80,
+                ),
+                FakeClient,
+            )
+
+        self.assertEqual(result, 0)
+        client = FakeClient.last_instance
+        self.assertEqual(
+            client.passthrough_call,
+            (
+                None,
+                "coreaudio:com.audioplane.input.device",
+                AudioFormat(48_000, 1, SampleFormat.PCM_S16LE),
+                80,
+            ),
+        )
+        self.assertTrue(client.passthrough.entered)
+        self.assertTrue(client.passthrough.waited)
+        self.assertTrue(client.passthrough.exited)
+        self.assertIn("MacBook Pro Microphone", standard_output.getvalue())
+
+    async def test_microphone_passthrough_parser_defaults(self):
+        parsed = _parser().parse_args(["mic-through"])
+        self.assertIsNone(parsed.source)
+        self.assertEqual(parsed.destination, "coreaudio:com.audioplane.input.device")
+        self.assertEqual(parsed.buffer_ms, 60)
 
 
 if __name__ == "__main__":

@@ -71,6 +71,7 @@ class AudioSource:
     available: bool
     producing_audio: Optional[bool]
     native_format: Optional[AudioFormat]
+    is_default: Optional[bool] = None
 
     def __repr__(self) -> str:
         bundle = f", bundle_identifier={self.bundle_identifier!r}" if self.bundle_identifier else ""
@@ -83,7 +84,8 @@ class AudioSource:
                    [int(pid) for pid in value.get("process_i_ds", value.get("process_ids", []))],
                    value.get("bundle_identifier"), str(value.get("process_state", "unknown")),
                    bool(value.get("is_available", False)), value.get("is_producing_audio"),
-                   AudioFormat.from_wire(native) if native else None)
+                   AudioFormat.from_wire(native) if native else None,
+                   value.get("is_default"))
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,7 @@ CLI="$ROOT_DIR/.build/signed-dev/bin/sonexisctl"
 codesign --verify --strict "$RUNTIME"
 codesign --verify --strict "$CLI"
 strings "$RUNTIME" | grep -F '<key>NSAudioCaptureUsageDescription</key>' >/dev/null
+strings "$RUNTIME" | grep -F '<key>NSMicrophoneUsageDescription</key>' >/dev/null
 [ "$(codesign -dvv "$RUNTIME" 2>&1 | sed -n 's/^Identifier=//p')" = \
     "com.sonexis.runtime" ]
 "$ROOT_DIR/Scripts/test-runtime-install.sh"

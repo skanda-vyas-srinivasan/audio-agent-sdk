@@ -14,6 +14,7 @@ microphone inside third-party applications is interactive.
 - initial system installation and Core Audio enumeration: **PASSED**
 - corrected `AudioPlane Input` data-source label after reinstall: **NOT RUN**
 - v0.1.2 callback-jitter cushion after reinstall: **NOT RUN**
+- physical microphone passthrough and concurrent speech mixing: **NOT RUN**
 - Discord/Zoom microphone reception: **NOT RUN**
 - uninstall/reboot recovery: **NOT RUN**
 
@@ -91,7 +92,32 @@ sonexisctl play /absolute/path/to/test.wav \
 Confirm the receiving application sees meter activity and records intelligible
 audio. Verify Runtime diagnostics report no dropped output frames.
 
-## 5. Failure and recovery checks
+## 5. Verify microphone plus injected-audio mixing
+
+The signed Runtime build now exposes physical microphones through `audioplane
+sources`. The first capture may trigger a separate macOS Microphone permission
+prompt for `com.sonexis.runtime`.
+
+Keep the receiving application set to **AudioPlane Input**. In one terminal:
+
+```bash
+audioplane sources
+audioplane mic-through
+```
+
+Speak and confirm the receiving application hears the current default physical
+microphone. In a second terminal, run:
+
+```bash
+audioplane speak
+```
+
+Enter several lines while speaking. Confirm both signals remain intelligible,
+`Ctrl-C` stops only microphone passthrough, and neither command changes any
+system or application device selection. If the desired physical input is not
+the macOS default, pass its exact ID or name with `--source`.
+
+## 6. Failure and recovery checks
 
 While no test audio is being sent:
 
@@ -101,7 +127,7 @@ While no test audio is being sent:
 4. confirm physical speakers, headphones, and microphone still work normally;
 5. confirm no system default device changed.
 
-## 6. Uninstall safely
+## 7. Uninstall safely
 
 ```bash
 ./Scripts/uninstall-audioplane-input.sh

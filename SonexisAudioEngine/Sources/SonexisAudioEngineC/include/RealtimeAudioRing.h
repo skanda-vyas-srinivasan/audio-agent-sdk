@@ -51,6 +51,18 @@ OSStatus SonexisAudioRingBufferIOProc(
     void * _Nullable inClientData
 );
 
+/// C-only HAL input callback. `inClientData` must be a live
+/// SonexisAudioRingBuffer pointer matching the input device channel count.
+OSStatus SonexisAudioRingBufferInputIOProc(
+    AudioObjectID inDevice,
+    const AudioTimeStamp *inNow,
+    const AudioBufferList *inInputData,
+    const AudioTimeStamp *inInputTime,
+    AudioBufferList *outOutputData,
+    const AudioTimeStamp *inOutputTime,
+    void * _Nullable inClientData
+);
+
 /// Discards all currently readable frames. This control-thread-only operation
 /// closes the read gate and waits for an in-flight realtime read before moving
 /// the cursor. Audio already handed to Core Audio may still render for up to

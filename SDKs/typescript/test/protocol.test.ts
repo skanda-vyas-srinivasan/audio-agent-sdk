@@ -191,6 +191,7 @@ test("filters source snapshots and exposes safe format presets", () => {
   assert.deepEqual(filterSources(sources, { query: "SPOT" }).map((value) => value.id),
     ["app.spotify"]);
   assert.deepEqual(filterSources(sources, { pid: 20 }).map((value) => value.id), ["app.chat"]);
+  assert.deepEqual(filterSources(sources, { kind: "microphone" }), []);
   assert.equal(filterSources(sources, { availableOnly: false }).length, 3);
   assert.deepEqual(AudioFormats.speech16k(), {
     sample_rate: 16000, channel_count: 1, sample_format: "pcm_s16le", interleaved: true,
@@ -198,6 +199,22 @@ test("filters source snapshots and exposes safe format presets", () => {
   assert.equal(AudioFormats.openAIRealtime().sample_rate, 24000);
   assert.equal(AudioFormats.geminiLive().sample_rate, 16000);
   assert.equal(AudioFormats.pcm48kStereo().channel_count, 2);
+});
+
+test("resolves the annotated default microphone without guessing", async () => {
+  const client = new Sonexis("/unused");
+  const first: AudioSource = {
+    ...source("microphone:first", "First Mic", "", 0),
+    kind: "microphone", process_ids: [], bundle_identifier: undefined, is_default: false,
+  };
+  const selected: AudioSource = {
+    ...first, id: "microphone:selected", name: "Selected Mic", is_default: true,
+  };
+  client.sources = async () => [first, selected];
+  assert.equal((await client.defaultMicrophone()).id, selected.id);
+
+  client.sources = async () => [];
+  await assert.rejects(client.defaultMicrophone(), SourceNotFoundError);
 });
 
 test("waitForSource refreshes snapshots and reports a structured timeout", async () => {

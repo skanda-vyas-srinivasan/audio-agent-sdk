@@ -129,14 +129,16 @@ The following are intentionally outside the first driver slice:
 
 - automatic per-application input switching;
 - changing the macOS default input or output;
-- physical microphone passthrough or microphone/model mixing;
 - acoustic echo cancellation;
 - automatic recovery of application-specific device preferences.
 
-Physical microphone passthrough can later be implemented above this stable
-device boundary by capturing the chosen microphone, mixing it with generated
-audio outside the HAL callback, and writing the result to `AudioPlane Input`.
-That work must not make the virtual device itself dependent on Runtime state.
+Physical microphone passthrough is implemented above this stable device
+boundary. The Runtime exposes physical inputs as `microphone` sources and the
+Python SDK composes one bounded capture with one bounded output using
+`microphone_passthrough()` / `audioplane mic-through`. The driver remains
+independent of Runtime state. Multiple Runtime output clients are combined by
+Core Audio's output mix before the driver's `WriteMix` operation copies the
+fully mixed signal into the virtual input ring.
 
 ## Security boundary
 

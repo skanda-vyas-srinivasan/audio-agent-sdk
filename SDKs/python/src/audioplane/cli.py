@@ -61,7 +61,7 @@ def _parser() -> argparse.ArgumentParser:
     for command, help_text in (
         ("doctor", "check SDK and Runtime connectivity"),
         ("status", "show Runtime health and aggregate metrics"),
-        ("sources", "list available application audio sources"),
+        ("sources", "list available application and microphone audio sources"),
         ("outputs", "list available audio output destinations"),
         ("version", "show the installed SDK version"),
     ):
@@ -84,6 +84,25 @@ def _parser() -> argparse.ArgumentParser:
         help="speech rate in words per minute",
     )
     speak.add_argument(
+        "--buffer-ms",
+        type=_buffer_milliseconds,
+        default=60,
+        help="Runtime target buffer in milliseconds (20-250; default: 60)",
+    )
+    microphone = subcommands.add_parser(
+        "mic-through",
+        help="forward a physical microphone into AudioPlane Input until interrupted",
+    )
+    microphone.add_argument(
+        "--source",
+        help="microphone source ID or exact name (default: current macOS input)",
+    )
+    microphone.add_argument(
+        "--destination",
+        default=_AUDIOPLANE_INPUT_ID,
+        help="output destination ID or name (default: AudioPlane Input)",
+    )
+    microphone.add_argument(
         "--buffer-ms",
         type=_buffer_milliseconds,
         default=60,
@@ -195,12 +214,14 @@ def _socket_path(argument: Optional[str]) -> Optional[str]:
 
 
 def _print_sources(sources: Sequence[AudioSource]) -> None:
-    print(f"{'ID':<36}  {'APP':<24}  {'STATUS':<10}  PID")
+    print(f"{'ID':<46}  {'NAME':<24}  {'KIND':<12}  {'STATUS':<10}  PID")
     for source in sources:
         pids = ",".join(str(pid) for pid in source.process_ids) or "-"
         status = "active" if source.available else source.process_state
-        print(f"{_safe(source.id):<36}  {_safe(source.name):<24}  "
-              f"{_safe(status):<10}  {pids}")
+        if source.is_default:
+            status += ",default"
+        print(f"{_safe(source.id):<46}  {_safe(source.name):<24}  "
+              f"{_safe(source.kind):<12}  {_safe(status):<10}  {pids}")
 
 
 def _print_outputs(outputs: Sequence[AudioOutputDestination]) -> None:
@@ -256,6 +277,26 @@ async def _run_speak(
                 print(f"audioplane: speak: {_safe(error)}", file=sys.stderr)
                 continue
             await output.write(pcm)
+    return 0
+
+
+async def _run_microphone_passthrough(client: Any, arguments: argparse.Namespace) -> int:
+    passthrough = client.microphone_passthrough(
+        arguments.source,
+        output_destination=arguments.destination,
+        format=_SPEAK_FORMAT,
+        target_buffer_milliseconds=arguments.buffer_ms,
+    )
+    async with passthrough:
+        assert passthrough.source is not None
+        assert passthrough.output is not None
+        destination = passthrough.output.destination
+        destination_name = destination.name if destination else arguments.destination
+        print(
+            f"Forwarding {_safe(passthrough.source.name)} to "
+            f"{_safe(destination_name)}. Press Ctrl-C to stop."
+        )
+        await passthrough.wait()
     return 0
 
 
@@ -316,6 +357,9 @@ async def _run(
 
         if arguments.command == "speak":
             return await _run_speak(client, arguments, line_reader, synthesizer)
+
+        if arguments.command == "mic-through":
+            return await _run_microphone_passthrough(client, arguments)
 
     raise AssertionError(f"unhandled command: {arguments.command}")
 
