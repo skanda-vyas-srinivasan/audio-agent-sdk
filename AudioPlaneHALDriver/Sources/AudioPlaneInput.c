@@ -4094,9 +4094,15 @@ static OSStatus	AudioPlaneInput_GetZeroTimeStamp(AudioServerPlugInDriverRef inDr
 	UInt64 theNumberTimeStamps;
 	UInt64 thePublishedTimeStamps;
 
-	//	check the arguments
-	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetZeroTimeStamp: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_GetZeroTimeStamp: bad device ID");
+	//	This method runs on a realtime thread. Validate without the debug logging macros.
+	if((inDriver != gAudioServerPlugInDriverRef) || (inDeviceObjectID != kObjectID_Device))
+	{
+		return kAudioHardwareBadObjectError;
+	}
+	if((outSampleTime == NULL) || (outHostTime == NULL) || (outSeed == NULL))
+	{
+		return kAudioHardwareIllegalOperationError;
+	}
 
 	//	get the current host time
 	theCurrentHostTime = mach_absolute_time();
@@ -4131,7 +4137,6 @@ static OSStatus	AudioPlaneInput_GetZeroTimeStamp(AudioServerPlugInDriverRef inDr
 	*outHostTime = theAnchorHostTime + (((Float64)theNumberTimeStamps) * theHostTicksPerRingBuffer);
 	*outSeed = 1;
 
-Done:
 	return theAnswer;
 }
 
@@ -4190,11 +4195,11 @@ static OSStatus	AudioPlaneInput_BeginIOOperation(AudioServerPlugInDriverRef inDr
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 
-	//	check the arguments
-	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_BeginIOOperation: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_BeginIOOperation: bad device ID");
-
-Done:
+	//	This method runs on a realtime thread. Do not call the debug logging macros.
+	if((inDriver != gAudioServerPlugInDriverRef) || (inDeviceObjectID != kObjectID_Device))
+	{
+		return kAudioHardwareBadObjectError;
+	}
 	return theAnswer;
 }
 
@@ -4209,12 +4214,17 @@ static OSStatus	AudioPlaneInput_DoIOOperation(AudioServerPlugInDriverRef inDrive
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 
-	//	check the arguments
-	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_DoIOOperation: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_DoIOOperation: bad device ID");
-	FailWithAction((inStreamObjectID != kObjectID_Stream_Input) && (inStreamObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_DoIOOperation: bad stream ID");
-
-	FailWithAction(ioMainBuffer == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "AudioPlaneInput_DoIOOperation: missing main buffer");
+	//	This method runs on a realtime thread. Validate with direct branches so even a DEBUG driver
+	//	does not log from the callback.
+	if((inDriver != gAudioServerPlugInDriverRef) || (inDeviceObjectID != kObjectID_Device) ||
+	   ((inStreamObjectID != kObjectID_Stream_Input) && (inStreamObjectID != kObjectID_Stream_Output)))
+	{
+		return kAudioHardwareBadObjectError;
+	}
+	if(ioMainBuffer == NULL)
+	{
+		return kAudioHardwareIllegalOperationError;
+	}
 
 	if((inOperationID == kAudioServerPlugInIOOperationWriteMix) && (inStreamObjectID == kObjectID_Stream_Output))
 	{
@@ -4227,7 +4237,6 @@ static OSStatus	AudioPlaneInput_DoIOOperation(AudioServerPlugInDriverRef inDrive
 										inIOBufferFrameSize);
 	}
 
-Done:
 	return theAnswer;
 }
 
@@ -4241,10 +4250,10 @@ static OSStatus	AudioPlaneInput_EndIOOperation(AudioServerPlugInDriverRef inDriv
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 
-	//	check the arguments
-	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_EndIOOperation: bad driver reference");
-	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "AudioPlaneInput_EndIOOperation: bad device ID");
-
-Done:
+	//	This method runs on a realtime thread. Do not call the debug logging macros.
+	if((inDriver != gAudioServerPlugInDriverRef) || (inDeviceObjectID != kObjectID_Device))
+	{
+		return kAudioHardwareBadObjectError;
+	}
 	return theAnswer;
 }
