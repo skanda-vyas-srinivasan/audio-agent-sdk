@@ -34,12 +34,14 @@ For a development-signed build, find the exact identity and rebuild:
 Review the script, then run:
 
 ```bash
+./Scripts/install-audioplane-input.sh --check
 ./Scripts/install-audioplane-input.sh
 ```
 
 The script validates the bundle ID and signature, refuses symlink targets, and
-only replaces `/Library/Audio/Plug-Ins/HAL/AudioPlaneInput.driver`. It invokes
-`sudo` visibly. It does not restart Core Audio or alter any default device.
+refuses ad-hoc signing. It only replaces
+`/Library/Audio/Plug-Ins/HAL/AudioPlaneInput.driver`, invokes `sudo` visibly,
+and does not restart Core Audio or alter any default device.
 
 Restart the Mac. Open Audio MIDI Setup and verify:
 

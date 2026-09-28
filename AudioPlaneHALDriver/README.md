@@ -38,7 +38,8 @@ make -C AudioPlaneHALDriver clean all \
 
 Building does not install or activate the driver. See
 `Scripts/install-audioplane-input.sh --help` for the explicit system install
-flow.
+flow. The installer refuses ad-hoc bundles; use the development build script or
+an explicit Apple Development/Developer ID identity before installation.
 
 ## Initial behavior
 

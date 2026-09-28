@@ -9,23 +9,26 @@ install_root="/Library/Audio/Plug-Ins/HAL"
 target_bundle="$install_root/$bundle_name"
 
 usage() {
-  echo "Usage: $0 [--bundle PATH]"
+  echo "Usage: $0 [--bundle PATH] [--check]"
   echo
   echo "Explicitly installs the built AudioPlane Input HAL driver."
+  echo "--check validates the exact bundle and target without invoking sudo."
   echo "This command invokes sudo but does not restart Core Audio automatically."
 }
 
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  usage
-  exit 0
-fi
-if [[ "${1:-}" == "--bundle" ]]; then
-  [[ $# -eq 2 ]] || { usage >&2; exit 64; }
-  source_bundle="$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")"
-elif [[ $# -ne 0 ]]; then
-  usage >&2
-  exit 64
-fi
+check_only=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help|-h) usage; exit 0 ;;
+    --check) check_only=true; shift ;;
+    --bundle)
+      [[ $# -ge 2 ]] || { usage >&2; exit 64; }
+      source_bundle="$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")"
+      shift 2
+      ;;
+    *) usage >&2; exit 64 ;;
+  esac
+done
 
 [[ -d "$source_bundle" ]] || {
   echo "AudioPlane Input bundle not found: $source_bundle" >&2
@@ -43,6 +46,18 @@ actual_id="$(plutil -extract CFBundleIdentifier raw "$source_bundle/Contents/Inf
   exit 65
 }
 codesign --verify --strict --verbose=2 "$source_bundle"
+signature_info="$(codesign -dvv "$source_bundle" 2>&1)"
+team_id="$(printf '%s\n' "$signature_info" | sed -n 's/^TeamIdentifier=//p')"
+[[ -n "$team_id" && "$team_id" != "not set" ]] || {
+  echo "Refusing to install an ad-hoc-signed driver." >&2
+  echo "Build it with: '$repo_root/Scripts/build-audioplane-input-dev.sh'" >&2
+  exit 65
+}
+printf '%s\n' "$signature_info" \
+  | grep -E '^Authority=(Apple Development|Developer ID Application):' >/dev/null || {
+    echo "Refusing driver without an Apple Development or Developer ID signature." >&2
+    exit 65
+  }
 
 if [[ -e "$target_bundle" ]]; then
   [[ -d "$target_bundle" && ! -L "$target_bundle" ]] || {
@@ -54,6 +69,14 @@ if [[ -e "$target_bundle" ]]; then
     echo "Refusing to replace bundle with unexpected ID: ${installed_id:-missing}" >&2
     exit 73
   }
+fi
+
+if [[ "$check_only" == true ]]; then
+  echo "AudioPlane Input install preflight passed."
+  echo "  source: $source_bundle"
+  echo "  target: $target_bundle"
+  echo "  team:   $team_id"
+  exit 0
 fi
 
 echo "Installing $source_bundle"
