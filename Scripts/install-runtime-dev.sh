@@ -46,6 +46,9 @@ CLI_TEAM=$(codesign -dvv "$CTL_SOURCE" 2>&1 | sed -n 's/^TeamIdentifier=//p')
 strings "$RUNTIME_SOURCE" | grep -F '<key>NSAudioCaptureUsageDescription</key>' >/dev/null || {
     echo "Runtime lacks NSAudioCaptureUsageDescription" >&2; exit 1;
 }
+strings "$RUNTIME_SOURCE" | grep -F '<key>NSMicrophoneUsageDescription</key>' >/dev/null || {
+    echo "Runtime lacks NSMicrophoneUsageDescription" >&2; exit 1;
+}
 VERSION=$(sed -n '1p' "$ROOT_DIR/RUNTIME_VERSION")
 [ "$("$RUNTIME_SOURCE" --version)" = "sonexis-runtime $VERSION (protocol 2)" ] || {
     echo "Runtime version does not match RUNTIME_VERSION" >&2; exit 1;
