@@ -17,6 +17,7 @@ swift test --package-path "$ROOT_DIR/SonexisAudioEngine"
 "$ROOT_DIR/Scripts/test-runtime-stress.sh"
 "$ROOT_DIR/Scripts/test-runtime-output-tsan.sh"
 "$ROOT_DIR/Scripts/test-python-sdk.sh"
+"$ROOT_DIR/Scripts/test-agent-torture.sh"
 "$ROOT_DIR/Scripts/test-runtime-examples.sh"
 "$ROOT_DIR/Scripts/test-runtime-packages.sh"
 

@@ -33,6 +33,13 @@ class AgentCLIAndDiagnosticsTests(unittest.TestCase):
         self.assertTrue(arguments.gemini_barge_in)
         self.assertTrue(arguments.validate_live)
 
+    def test_global_socket_is_preserved_for_agent_command(self):
+        arguments = _parser().parse_args([
+            "--socket", "/tmp/private/control.sock", "agent",
+            "--provider", "mock", "--source", "Test",
+        ])
+        self.assertEqual(arguments.socket, "/tmp/private/control.sock")
+
     def test_live_validation_correlates_turn_without_private_content(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "validation.json"

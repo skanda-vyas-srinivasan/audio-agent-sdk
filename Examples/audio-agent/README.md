@@ -1,6 +1,11 @@
-# Sonexis audio agent
+# AudioPlane realtime agent
 
-This terminal reference application consumes only the public `sonexis` Python API. It can send one live application or microphone stream to OpenAI Realtime or Gemini Live, or exercise the same source-aware flow entirely offline with a mock provider and recorded audio.
+This terminal reference application is installed as `audioplane agent` and
+consumes only public AudioPlane Python APIs. It can send one live application
+or microphone stream to OpenAI Realtime or Gemini Live, or exercise the same
+source-aware flow entirely offline with a mock provider and recorded audio.
+`audio_agent.py` remains a thin compatibility wrapper around the packaged
+implementation.
 
 From the repository root, install the SDK in a virtual environment:
 
@@ -13,7 +18,7 @@ python -m pip install --no-deps --no-build-isolation -e SDKs/python
 Start `sonexis-runtime`, then run the credential-free path:
 
 ```sh
-python Examples/audio-agent/audio_agent.py --provider mock
+audioplane agent --provider mock
 ```
 
 Choose a source by number. While capturing, enter `s` to switch sources or `q` to stop. The application prints stream/drop/latency statistics, watches for source removal and Runtime shutdown, and cleans up its capture on exit. `--output capture.wav` writes PCM16 audio for inspection.
@@ -29,11 +34,11 @@ example, `python3.10 -m venv .venv-ai`) before the provider install commands.
 ```sh
 python -m pip install -e 'SDKs/python[openai]'
 export OPENAI_API_KEY='...'
-python Examples/audio-agent/audio_agent.py --provider openai --source Spotify
+audioplane agent --provider openai --source Spotify
 
 python -m pip install -e 'SDKs/python[gemini]'
 export GEMINI_API_KEY='...'
-python Examples/audio-agent/audio_agent.py \
+audioplane agent \
   --provider gemini --source 'Google Chrome' \
   --response-output default --debug
 ```
@@ -46,7 +51,7 @@ Gemini response starts/turn completion, and raw returned-audio byte counts.
 Readable output transcription is printed normally. Tune application audio with:
 
 ```sh
-python Examples/audio-agent/audio_agent.py \
+audioplane agent \
   --provider gemini --source 'Google Chrome' --debug \
   --gemini-start-threshold 0.015 \
   --gemini-end-threshold 0.008 \
@@ -97,7 +102,7 @@ refused.
 For deterministic offline development, replay a matching PCM16 WAV:
 
 ```sh
-python Examples/audio-agent/audio_agent.py \
+audioplane agent \
   --provider mock \
   --replay /path/to/pcm16-mono-16khz.wav \
   --realtime-replay \
@@ -110,9 +115,28 @@ To exercise live capture, a deterministic mock response, and Runtime-owned
 speaker output without provider credentials, use headphones and run:
 
 ```sh
-python Examples/audio-agent/audio_agent.py \
+audioplane agent \
   --provider mock \
   --source "Google Chrome" \
   --response-output default \
   --non-interactive
 ```
+
+For an authenticated stability run, add `--validate-live`. AudioPlane prints a
+privacy-safe PASS/WARN line for each completed turn and a final summary without
+retaining PCM, credentials, or transcript text. `--validation-json PATH`
+writes the same metadata to a private (`0600`) regular file:
+
+```sh
+audioplane agent \
+  --provider gemini \
+  --source "Google Chrome" \
+  --response-output coreaudio:com.audioplane.input.device \
+  --gemini-barge-in \
+  --validate-live \
+  --validation-json /tmp/audioplane-live-validation.json \
+  --debug
+```
+
+`--debug` can print provider transcription and is therefore not privacy-safe
+for shared logs. Validation JSON never contains transcript or PCM content.

@@ -323,6 +323,23 @@ and new meaningful activity reopens the stream. Configure start/end RMS,
 minimum activity, and silence duration with `GeminiTurnDetectionConfig`, or
 inject the SDK's `VoiceActivityDetector` extension for speech-aware detection.
 
+For the complete packaged capture/provider/playback lifecycle, use the same
+entry point installed by the wheel:
+
+```sh
+audioplane agent \
+  --provider gemini \
+  --source "Google Chrome" \
+  --response-output coreaudio:com.audioplane.input.device \
+  --gemini-barge-in \
+  --validate-live \
+  --debug
+```
+
+The base `audioplane` commands remain usable without provider extras. The
+agent imports provider integrations lazily and reports missing optional
+dependencies or credentials as structured, actionable failures.
+
 ## Replay, activity, and diagnostics
 
 `ReplayStream.from_wav(...)` and `ReplayStream.from_pcm(...)` yield normal

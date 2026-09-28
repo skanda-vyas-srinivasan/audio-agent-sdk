@@ -83,7 +83,7 @@ Install the optional official SDK and keep the API key in the environment:
 ```sh
 python -m pip install -e 'SDKs/python[openai]'
 export OPENAI_API_KEY='...'
-python Examples/audio-agent/audio_agent.py --provider openai --source Discord
+audioplane agent --provider openai --source Discord
 ```
 
 `AudioFormat.openai_realtime()` requests mono PCM16LE at 24 kHz. The adapter
@@ -100,7 +100,7 @@ routed through the common Runtime output plane with `--response-output default`.
 python -m pip install -e 'SDKs/python[gemini]'
 export GEMINI_API_KEY='...'
 export GEMINI_LIVE_MODEL='gemini-3.1-flash-live-preview'  # optional override
-python Examples/audio-agent/audio_agent.py \
+audioplane agent \
   --provider gemini --source 'Google Chrome' \
   --response-output default --debug
 ```
@@ -167,8 +167,9 @@ validated; quota failure and network-interruption behavior remain manual.
 
 ## Reference audio agent
 
-`Examples/audio-agent/audio_agent.py` is an external application importing only
-public SDK APIs. It selects and switches sources, sends frames to OpenAI,
+`audioplane agent` is the packaged reference application and imports only
+public SDK APIs. `Examples/audio-agent/audio_agent.py` is a thin compatibility
+wrapper around the same implementation. It selects and switches sources, sends frames to OpenAI,
 Gemini, or an offline mock, prints provider events and stream/drop/latency
 statistics, watches source/runtime lifecycle events, optionally writes PCM/WAV,
 and shuts down cleanly. `--response-output default` plays Gemini or OpenAI
@@ -182,6 +183,20 @@ intentional lead. A provider's final sub-millisecond PCM fragment is padded
 with silence to Runtime's one-millisecond minimum. These rules handle bursty
 provider delivery without the render-queue drops or fatal short-packet errors
 that direct event-by-event writes can cause.
+
+Use `--validate-live` to correlate local activity, input finalization,
+provider-response start/completion/interruption, and Runtime output start. It
+prints one concise PASS/WARN result per completed turn. `--validation-json`
+writes the final timing/drop summary to a private regular file. Neither form
+retains PCM, credentials, or transcript text; `--debug` transcription remains
+separate and should not be copied into privacy-sensitive logs.
+
+The packaged pipeline also keeps capture-to-provider and provider-to-output
+workers separately bounded. The deterministic release gate subjects these
+workers to at least one million seeded state transitions, randomized provider
+chunk sizes, provider stalls, repeated barge-in, output disappearance, and
+task-leak checks. This complements rather than replaces authenticated live
+provider and audible-device validation.
 
 ## Duplex and barge-in
 

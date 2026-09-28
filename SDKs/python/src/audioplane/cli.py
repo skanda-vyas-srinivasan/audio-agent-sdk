@@ -114,7 +114,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     # Imported lazily so ordinary Runtime/CLI use has no provider dependency.
     from .agent import add_agent_arguments
-    add_agent_arguments(agent)
+    add_agent_arguments(agent, include_socket=False)
     return parser
 
 

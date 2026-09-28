@@ -299,6 +299,21 @@ configuration and are never embedded in the Runtime. See
 [AI integration](docs/ai-integration.md) for Gemini hybrid-VAD turn handling,
 OpenAI Realtime, response playback, and source-aware multi-stream examples.
 
+The installed CLI exposes that same implementation directly:
+
+```bash
+audioplane agent \
+  --provider gemini \
+  --source "Google Chrome" \
+  --response-output coreaudio:com.audioplane.input.device \
+  --gemini-barge-in \
+  --validate-live \
+  --debug
+```
+
+`--validate-live` reports per-turn finalization, provider-response, and output
+start timing without persisting PCM or transcript text.
+
 ## Runtime lifecycle
 
 ```bash
@@ -328,6 +343,7 @@ Run focused SDK/package tests:
 
 ```bash
 ./Scripts/test-python-sdk.sh
+./Scripts/test-agent-torture.sh
 ./Scripts/test-runtime-packages.sh
 ```
 
@@ -339,7 +355,8 @@ Run the complete automated release gate:
 
 The release gate covers Runtime protocol/core/output/integration/fuzz/stress
 tests, Thread Sanitizer, Python tests and packaging, TypeScript tests and
-packaging, embedded permission metadata, stable identifiers, and development
+packaging, more than one million deterministic agent-pipeline state
+transitions, embedded permission metadata, stable identifiers, and development
 signing. Live Process Tap capture and audible physical-device output still
 require manual macOS validation.
 

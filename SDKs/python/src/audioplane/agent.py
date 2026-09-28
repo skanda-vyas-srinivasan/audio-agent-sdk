@@ -828,11 +828,14 @@ class RuntimeResponsePlayer:
                 print(f"\nOutput debug: {output.metrics!r}")
 
 
-def add_agent_arguments(parser: argparse.ArgumentParser) -> None:
+def add_agent_arguments(
+    parser: argparse.ArgumentParser, *, include_socket: bool = True,
+) -> None:
     """Add the shared agent options to an argparse parser."""
     parser.add_argument("--provider", choices=("mock", "openai", "gemini"), default="mock")
     parser.add_argument("--source", help="source ID, bundle ID, PID, or exact app name")
-    parser.add_argument("--socket", help="Runtime control socket path")
+    if include_socket:
+        parser.add_argument("--socket", help="Runtime control socket path")
     parser.add_argument("--output", type=Path, help="optional PCM or .wav recording")
     parser.add_argument(
         "--response-output", metavar="DESTINATION",

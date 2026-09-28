@@ -41,6 +41,7 @@ tar -tzf "$PYTHON_SDIST" | grep -E '/LICENSE$' >/dev/null
 env -u PYTHONPATH "$TEST_DIR/python-wheel-env/bin/python" -c \
     "import audioplane, importlib.metadata, sonexis, sonexis.mcp_server, sonexis.providers; assert audioplane.__version__ == '$VERSION'; assert audioplane.AudioPlane is sonexis.Sonexis; assert importlib.metadata.version('audioplane') == '$VERSION'; assert 'python-wheel-env' in sonexis.__file__"
 "$TEST_DIR/python-wheel-env/bin/audioplane" version | grep -F "AudioPlane $VERSION" >/dev/null
+"$TEST_DIR/python-wheel-env/bin/audioplane" agent --help >/dev/null
 test -x "$TEST_DIR/python-wheel-env/bin/audioplane-mcp"
 PYTHON="$TEST_DIR/python-wheel-env/bin/python" SONEXIS_EXAMPLES_USE_INSTALLED=1 \
     "$ROOT_DIR/Scripts/test-runtime-examples.sh" >/dev/null
