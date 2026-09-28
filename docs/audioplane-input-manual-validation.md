@@ -26,9 +26,7 @@ make -C AudioPlaneHALDriver clean all test test-tsan inspect
 For a development-signed build, find the exact identity and rebuild:
 
 ```bash
-security find-identity -v -p codesigning
-make -C AudioPlaneHALDriver clean all test inspect \
-  SIGN_IDENTITY="Apple Development: YOUR NAME (TEAMID)"
+./Scripts/build-audioplane-input-dev.sh
 ```
 
 ## 2. Install explicitly

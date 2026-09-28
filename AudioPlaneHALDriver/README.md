@@ -22,7 +22,14 @@ The default build creates a universal arm64/x86_64 bundle and signs it ad hoc:
 AudioPlaneHALDriver/.build/AudioPlaneInput.driver
 ```
 
-For a development certificate, pass its exact identity:
+For an Apple Development-signed build using the same local signing discovery as
+the Runtime:
+
+```bash
+./Scripts/build-audioplane-input-dev.sh
+```
+
+Or pass an exact identity directly:
 
 ```bash
 make -C AudioPlaneHALDriver clean all \

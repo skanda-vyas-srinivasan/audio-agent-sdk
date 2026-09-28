@@ -173,7 +173,7 @@ To make generated audio appear as a microphone input to Discord, Zoom, or
 another application, build AudioPlane's first-party virtual device:
 
 ```bash
-make -C AudioPlaneHALDriver clean all test inspect
+./Scripts/build-audioplane-input-dev.sh
 ./Scripts/install-audioplane-input.sh
 ```
 

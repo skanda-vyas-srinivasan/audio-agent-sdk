@@ -32,6 +32,10 @@ fi
   echo "Build it first: make -C '$repo_root/AudioPlaneHALDriver' clean all test inspect" >&2
   exit 66
 }
+[[ ! -L "$source_bundle" ]] || {
+  echo "Refusing to install a symlinked driver bundle: $source_bundle" >&2
+  exit 65
+}
 
 actual_id="$(plutil -extract CFBundleIdentifier raw "$source_bundle/Contents/Info.plist")"
 [[ "$actual_id" == "$bundle_id" ]] || {
