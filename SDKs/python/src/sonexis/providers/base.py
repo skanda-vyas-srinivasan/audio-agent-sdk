@@ -1,7 +1,8 @@
 """Provider-neutral realtime audio consumer contract and validation helpers."""
 
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional, Protocol
+from dataclasses import dataclass, field
+import time
+from typing import Any, AsyncIterator, Mapping, Optional, Protocol
 
 from ..diagnostics import AudioSendReceipt
 from ..errors import ProviderError
@@ -29,6 +30,20 @@ class ProviderEvent:
     source_id: Optional[str] = None
     session_id: Optional[str] = None
     stream_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ProviderLifecycleEvent:
+    """Low-volume provider lifecycle signal suitable for diagnostics.
+
+    Lifecycle callbacks never contain PCM, credentials, or transcript text.
+    They execute on the SDK event loop and therefore must return quickly.
+    """
+
+    provider: str
+    type: str
+    timestamp_ns: int = field(default_factory=time.monotonic_ns)
+    details: Mapping[str, Any] = field(default_factory=dict)
 
 
 class ProviderStreamValidator:

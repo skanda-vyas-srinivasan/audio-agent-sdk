@@ -13,7 +13,7 @@ from ..activity import (ActivityDetectionConfig, ActivityState,
 from ..diagnostics import AudioSendReceipt, send_receipt
 from ..errors import ProviderError, sanitized_provider_error
 from ..models import AudioFormat, AudioFrame
-from .base import ProviderEvent, ProviderStreamValidator
+from .base import ProviderEvent, ProviderLifecycleEvent, ProviderStreamValidator
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,9 @@ class GeminiLiveSink:
                  close_timeout: float = 2.0,
                  turn_detection: Optional[GeminiTurnDetectionConfig] = None,
                  voice_activity_detector: Optional[VoiceActivityDetector] = None,
-                 debug_callback: Optional[Callable[[str], None]] = None) -> None:
+                 debug_callback: Optional[Callable[[str], None]] = None,
+                 lifecycle_callback: Optional[
+                     Callable[[ProviderLifecycleEvent], None]] = None) -> None:
         self._session = session
         self._blob_factory = blob_factory
         self._session_context = session_context
@@ -112,6 +114,7 @@ class GeminiLiveSink:
             voice_activity_detector=voice_activity_detector,
         )
         self._debug_callback = debug_callback
+        self._lifecycle_callback = lifecycle_callback
         self._candidate_frames: List[AudioFrame] = []
         self._pending_audio = bytearray()
         self._segment_open = False
@@ -133,6 +136,8 @@ class GeminiLiveSink:
         turn_detection: Optional[GeminiTurnDetectionConfig] = None,
         voice_activity_detector: Optional[VoiceActivityDetector] = None,
         debug_callback: Optional[Callable[[str], None]] = None,
+        lifecycle_callback: Optional[
+            Callable[[ProviderLifecycleEvent], None]] = None,
     ) -> "GeminiLiveSink":
         key = api_key or os.environ.get("GEMINI_API_KEY")
         if not key:
@@ -164,7 +169,8 @@ class GeminiLiveSink:
                        close_timeout=close_timeout,
                        turn_detection=selected_turn_detection,
                        voice_activity_detector=voice_activity_detector,
-                       debug_callback=debug_callback)
+                       debug_callback=debug_callback,
+                       lifecycle_callback=lifecycle_callback)
         except BaseException as error:
             close = getattr(client, "close", None)
             if close is not None:
@@ -186,6 +192,16 @@ class GeminiLiveSink:
                 self._debug_callback(message)
             except Exception:
                 pass
+
+    def _lifecycle(self, event_type: str, **details: Any) -> None:
+        if self._lifecycle_callback is None:
+            return
+        try:
+            self._lifecycle_callback(ProviderLifecycleEvent(
+                "gemini", event_type, details=details))
+        except Exception:
+            # Diagnostics must never break the audio/provider path.
+            pass
 
     async def _send_pcm(self, data: bytes) -> None:
         blob = self._blob_factory(data=data, mime_type="audio/pcm;rate=16000")
@@ -231,6 +247,7 @@ class GeminiLiveSink:
             raise
         self._last_turn_finalized_at = time.monotonic_ns()
         self._debug("audio_stream_end sent")
+        self._lifecycle("input_finalized")
         return flushed_bytes
 
     async def _send_with_turn_detection(self, frame: AudioFrame) -> int:
@@ -242,6 +259,7 @@ class GeminiLiveSink:
         if frame.discontinuity:
             if self._segment_open:
                 self._debug("local activity end (discontinuity)")
+                self._lifecycle("activity_ended", reason="discontinuity")
                 await self._send_audio_stream_end()
             self._activity_detector.reset()
             self._candidate_frames.clear()
@@ -263,11 +281,13 @@ class GeminiLiveSink:
             for candidate in pending:
                 sent_bytes += await self._queue_frame(candidate)
             self._debug("local activity start")
+            self._lifecycle("activity_started")
             return sent_bytes
 
         sent_bytes = await self._queue_frame(frame)
         if transition is not None and transition.type == "activity_ended":
             self._debug("local activity end")
+            self._lifecycle("activity_ended", reason="silence")
             sent_bytes += await self._send_audio_stream_end()
         return sent_bytes
 
@@ -344,13 +364,16 @@ class GeminiLiveSink:
                             timing = f" ({latency_ms:.0f} ms after turn end)"
                             self._last_turn_finalized_at = None
                         self._debug(f"Gemini response start{timing}")
+                        self._lifecycle("response_started")
                     interrupted = bool(getattr(server, "interrupted", False))
                     if interrupted:
                         self._debug("Gemini response interrupted")
+                        self._lifecycle("response_interrupted")
                         self._response_in_progress = False
                     turn_complete = bool(getattr(server, "turn_complete", False))
                     if turn_complete:
                         self._debug("Gemini turn complete")
+                        self._lifecycle("response_completed")
                         self._response_in_progress = False
                     event_type = ("output_transcription"
                                   if isinstance(text, str) else "message")

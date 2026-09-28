@@ -108,6 +108,13 @@ def _parser() -> argparse.ArgumentParser:
         default=60,
         help="Runtime target buffer in milliseconds (20-250; default: 60)",
     )
+    agent = subcommands.add_parser(
+        "agent",
+        help="run the source-aware realtime provider reference pipeline",
+    )
+    # Imported lazily so ordinary Runtime/CLI use has no provider dependency.
+    from .agent import add_agent_arguments
+    add_agent_arguments(agent)
     return parser
 
 
@@ -311,6 +318,10 @@ async def _run(
         payload = {"name": "AudioPlane", "sdk_version": __version__}
         _print_json(payload) if arguments.json else print(f"AudioPlane {__version__}")
         return 0
+
+    if arguments.command == "agent":
+        from .agent import run_agent
+        return await run_agent(arguments)
 
     socket_path = _socket_path(arguments.socket)
     async with client_type(
