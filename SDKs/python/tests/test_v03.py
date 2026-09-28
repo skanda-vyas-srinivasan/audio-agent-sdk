@@ -1210,19 +1210,106 @@ class ReferenceProviderOutputTests(unittest.IsolatedAsyncioTestCase):
             async def finish_response(self):
                 self.finishes += 1
 
+        class Forwarder:
+            def __init__(self):
+                self.pauses = 0
+                self.resumes = 0
+
+            def pause(self):
+                self.pauses += 1
+
+            def resume(self):
+                self.resumes += 1
+
         class Sink:
             async def events(self):
                 yield ProviderEvent(
                     "gemini", "audio", audio=b"\x01\x02",
-                    audio_format=AudioFormat.gemini_live_output())
+                    audio_format=AudioFormat.gemini_live_output(),
+                    response_started=True)
                 yield ProviderEvent(
                     "gemini", "message", response_completed=True)
 
         player = Player()
+        forwarder = Forwarder()
         await self.module.print_provider_events(
-            Sink(), asyncio.Event(), response_player=player)
+            Sink(), asyncio.Event(), response_player=player,
+            input_forwarder=forwarder)
         self.assertEqual(player.writes, [b"\x01\x02"])
         self.assertEqual(player.finishes, 1)
+        self.assertEqual(forwarder.pauses, 1)
+        self.assertEqual(forwarder.resumes, 1)
+
+    async def test_provider_input_queue_drops_oldest_without_blocking_capture(self):
+        audio_format = AudioFormat.gemini_live()
+
+        class Sink:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.frames = []
+
+            async def send_audio(self, frame):
+                if not self.frames:
+                    self.started.set()
+                    await self.release.wait()
+                self.frames.append(frame)
+
+        def frame(sequence):
+            return AudioFrame(
+                "stream", sequence, sequence * 10_000_000, 160,
+                audio_format, b"\0\0" * 160,
+                source=AudioSource(
+                    "app.test", "Test", "application", [1], None,
+                    "running", True, True, None),
+                session_id="session",
+            )
+
+        sink = Sink()
+        stats = self.module.StreamStats()
+        forwarder = self.module.ProviderInputForwarder(
+            sink, stats, max_queue_packets=4)
+        await forwarder.send_audio(frame(1))
+        await sink.started.wait()
+        for sequence in range(2, 21):
+            await asyncio.wait_for(
+                forwarder.send_audio(frame(sequence)), timeout=0.01)
+        self.assertEqual(forwarder._queue.qsize(), 4)
+        self.assertEqual(stats.provider_dropped, 15 * 160)
+        sink.release.set()
+        await forwarder.close()
+        self.assertEqual(
+            [value.sequence for value in sink.frames], [1, 17, 18, 19, 20])
+        self.assertTrue(sink.frames[1].discontinuity)
+        self.assertEqual(sink.frames[1].dropped_frames_before, 15 * 160)
+        self.assertEqual(stats.provider_queue_high_water, 4)
+
+    async def test_provider_input_pause_drops_response_overlap(self):
+        class Sink:
+            def __init__(self):
+                self.frames = []
+
+            async def send_audio(self, frame):
+                self.frames.append(frame)
+
+        def frame(sequence):
+            return AudioFrame(
+                "stream", sequence, sequence * 10_000_000, 160,
+                AudioFormat.gemini_live(), b"\0\0" * 160)
+
+        sink = Sink()
+        stats = self.module.StreamStats()
+        forwarder = self.module.ProviderInputForwarder(sink, stats)
+        forwarder.pause()
+        for sequence in range(1, 6):
+            await forwarder.send_audio(frame(sequence))
+        forwarder.resume()
+        await forwarder.send_audio(frame(6))
+        await forwarder.close()
+        self.assertEqual([value.sequence for value in sink.frames], [6])
+        self.assertTrue(sink.frames[0].discontinuity)
+        self.assertEqual(sink.frames[0].dropped_frames_before, 5 * 160)
+        self.assertEqual(stats.provider_dropped, 5 * 160)
 
     async def test_tiny_provider_tail_is_padded_and_flushed_once(self):
         from sonexis.providers import ProviderEvent

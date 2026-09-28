@@ -138,6 +138,15 @@ turn-by-turn response behavior. Override it with `--gemini-model MODEL` or
 respond to passive commentary even when the adapter finalized the turn
 correctly.
 
+Live capture and provider sending are decoupled by a bounded 32-packet,
+drop-oldest queue. A slow provider therefore causes explicit
+`provider_dropped` frames and a discontinuity instead of silently turning live
+audio into seconds-old audio. By default the reference application also drops
+new source audio while a non-interruptible Gemini response is active, avoiding
+an unbounded sequence of stale turns. `--gemini-barge-in` opts into overlapping
+input and Gemini's interruption behavior when that conversational policy is
+preferred.
+
 The authenticated live path was validated on 2026-09-26 with Google Chrome:
 local activity start/end were detected, exactly one `audio_stream_end` was
 sent, Gemini understood and referenced the captured commentary, readable output

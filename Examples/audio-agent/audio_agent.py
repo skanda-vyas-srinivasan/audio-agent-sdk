@@ -11,7 +11,7 @@ import struct
 import sys
 import time
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, Optional
 
@@ -178,6 +178,8 @@ class StreamStats:
         self.packets = 0
         self.bytes = 0
         self.dropped = 0
+        self.provider_dropped = 0
+        self.provider_queue_high_water = 0
         self.latency = LatencyTracker()
 
     def observe(self, frame: AudioFrame) -> None:
@@ -195,7 +197,123 @@ class StreamStats:
             timing = (f"latency_ms(p50/p95/p99)={latency.p50_ms:.2f}/"
                       f"{latency.p95_ms:.2f}/{latency.p99_ms:.2f}")
         return (f"wall_seconds={elapsed:.1f} packets={self.packets} frames={self.frames} "
-                f"bytes={self.bytes} dropped={self.dropped} {timing}")
+                f"bytes={self.bytes} dropped={self.dropped} "
+                f"provider_dropped={self.provider_dropped} "
+                f"provider_queue_hwm={self.provider_queue_high_water} {timing}")
+
+
+class ProviderInputForwarder:
+    """Keep live capture current when a provider's send call stalls.
+
+    The queue drops its oldest packets. The next delivered frame carries a
+    discontinuity and the exact dropped sample-frame count, allowing local VAD
+    and provider adapters to terminate stale activity rather than processing
+    seconds-old audio.
+    """
+
+    def __init__(
+        self,
+        sink: RealtimeAudioSink,
+        stats: StreamStats,
+        *,
+        max_queue_packets: int = 32,
+        close_timeout: float = 2.0,
+        on_failure: Optional[Callable[[Exception], None]] = None,
+    ) -> None:
+        if max_queue_packets < 1:
+            raise ValueError("provider input queue limit must be positive")
+        self._sink = sink
+        self._stats = stats
+        self._close_timeout = close_timeout
+        self._on_failure = on_failure
+        self._queue: "asyncio.Queue[Optional[AudioFrame]]" = asyncio.Queue(
+            maxsize=max_queue_packets)
+        self._pending_dropped_frames = 0
+        self._paused = False
+        self._closed = False
+        self._failure: Optional[Exception] = None
+        self._worker = asyncio.create_task(self._run())
+
+    async def send_audio(self, frame: AudioFrame) -> None:
+        if self._closed:
+            raise RuntimeError("provider input forwarding is closed")
+        if self._failure is not None:
+            raise RuntimeError(
+                f"provider input forwarding failed: {self._failure}") from self._failure
+        if self._paused:
+            self._record_drop(frame)
+            return
+        if self._queue.full():
+            dropped = self._queue.get_nowait()
+            self._queue.task_done()
+            if dropped is not None:
+                self._record_drop(dropped)
+        self._queue.put_nowait(frame)
+        self._stats.provider_queue_high_water = max(
+            self._stats.provider_queue_high_water, self._queue.qsize())
+
+    def pause(self) -> None:
+        """Drop queued/new input while a non-interruptible response is active."""
+        self._paused = True
+        while True:
+            try:
+                frame = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._queue.task_done()
+            if frame is not None:
+                self._record_drop(frame)
+
+    def resume(self) -> None:
+        self._paused = False
+
+    def _record_drop(self, frame: AudioFrame) -> None:
+        self._pending_dropped_frames += frame.frame_count
+        self._stats.provider_dropped += frame.frame_count
+
+    async def _run(self) -> None:
+        try:
+            while True:
+                frame = await self._queue.get()
+                try:
+                    if frame is None:
+                        return
+                    if self._pending_dropped_frames:
+                        frame = replace(
+                            frame,
+                            discontinuity=True,
+                            dropped_frames_before=(
+                                frame.dropped_frames_before
+                                + self._pending_dropped_frames),
+                        )
+                        self._pending_dropped_frames = 0
+                    await self._sink.send_audio(frame)
+                finally:
+                    self._queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._failure = error
+            self.pause()
+            if self._on_failure is not None:
+                self._on_failure(error)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        async def finish_worker() -> None:
+            await self._queue.join()
+            self._queue.put_nowait(None)
+            await self._worker
+
+        if not self._worker.done():
+            try:
+                await asyncio.wait_for(finish_worker(), self._close_timeout)
+            except asyncio.TimeoutError:
+                self._worker.cancel()
+            await asyncio.gather(self._worker, return_exceptions=True)
 
 
 @dataclass(frozen=True)
@@ -548,9 +666,12 @@ async def print_provider_events(
     *,
     debug: bool = False,
     response_player: Optional[RuntimeResponsePlayer] = None,
+    input_forwarder: Optional[ProviderInputForwarder] = None,
 ) -> None:
     try:
         async for event in sink.events():
+            if event.response_started and input_forwarder is not None:
+                input_forwarder.pause()
             if event.text:
                 print(f"\nAgent ({terminal_safe(event.provider)}): {terminal_safe(event.text)}")
             if event.audio and response_player is not None:
@@ -559,6 +680,8 @@ async def print_provider_events(
                 print(f"\nAgent ({event.provider}): received {len(event.audio)} audio bytes")
             if event.response_completed and response_player is not None:
                 await response_player.finish_response()
+            if event.response_completed and input_forwarder is not None:
+                input_forwarder.resume()
             if (debug and not event.text and not event.audio
                     and event.type not in {"session.started", "session.updated"}):
                 print(f"\nProvider event: {terminal_safe(event.type)}")
@@ -626,7 +749,7 @@ async def watch_source(client: Sonexis, source_id: str) -> str:
 
 async def consume(
     stream: AsyncIterator[AudioFrame],
-    sink: RealtimeAudioSink,
+    sink,
     output: OutputWriter,
     stats: StreamStats,
     done: asyncio.Event,
@@ -665,14 +788,31 @@ async def run_live(
             selector = None
             stats = StreamStats()
             sink = await create_sink(args)
+            def provider_input_failed(error: Exception) -> None:
+                if isinstance(error, ProviderError):
+                    detail = f"{error.message} (retryable={error.retryable})"
+                else:
+                    detail = str(error)
+                print(f"\nProvider send failed: {terminal_safe(detail)}")
+                done.set()
+
+            input_forwarder = ProviderInputForwarder(
+                sink, stats, on_failure=provider_input_failed)
             provider_events = asyncio.create_task(print_provider_events(
-                sink, done, debug=args.debug, response_player=response_player))
+                sink,
+                done,
+                debug=args.debug,
+                response_player=response_player,
+                input_forwarder=(
+                    None if args.gemini_barge_in else input_forwarder),
+            ))
             try:
                 async with await client.capture(source, format=sink.required_format) as stream:
                     print(f"\nListening to {terminal_safe(source.name)} ({terminal_safe(source.id)})")
                     print(f"session={terminal_safe(stream.info.id)} stream={terminal_safe(stream.info.stream_id)}")
                     tasks = {
-                        asyncio.create_task(consume(stream, sink, output, stats, done)),
+                        asyncio.create_task(consume(
+                            stream, input_forwarder, output, stats, done)),
                         asyncio.create_task(watch_source(client, source.id)),
                         asyncio.create_task(report_stats(stats, done)),
                         asyncio.create_task(done.wait()),
@@ -694,6 +834,7 @@ async def run_live(
                                 task.cancel()
                         await asyncio.gather(*tasks, return_exceptions=True)
             finally:
+                await input_forwarder.close()
                 await close_provider_session(sink, provider_events)
             print(f"Final stream stats: {stats.line()}")
             if result == "switch":

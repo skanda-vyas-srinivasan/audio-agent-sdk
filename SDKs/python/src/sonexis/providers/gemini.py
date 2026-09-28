@@ -5,9 +5,8 @@ import asyncio
 import inspect
 import sys
 import time
-from collections import deque
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Deque, List, Optional
+from typing import Any, AsyncIterator, Callable, List, Optional
 
 from ..activity import (ActivityDetectionConfig, ActivityState,
                         AudioActivityDetector, VoiceActivityDetector)
@@ -118,7 +117,7 @@ class GeminiLiveSink:
         self._segment_open = False
         self._terminal_send_error = False
         self._response_in_progress = False
-        self._turn_finalized_at: Deque[int] = deque()
+        self._last_turn_finalized_at: Optional[int] = None
         self._events_active = False
 
     @classmethod
@@ -230,7 +229,7 @@ class GeminiLiveSink:
         except BaseException:
             self._terminal_send_error = True
             raise
-        self._turn_finalized_at.append(time.monotonic_ns())
+        self._last_turn_finalized_at = time.monotonic_ns()
         self._debug("audio_stream_end sent")
         return flushed_bytes
 
@@ -338,11 +337,12 @@ class GeminiLiveSink:
                     if response_started:
                         self._response_in_progress = True
                         timing = ""
-                        if self._turn_finalized_at:
+                        if self._last_turn_finalized_at is not None:
                             latency_ms = ((time.monotonic_ns()
-                                           - self._turn_finalized_at.popleft())
+                                           - self._last_turn_finalized_at)
                                           / 1_000_000)
                             timing = f" ({latency_ms:.0f} ms after turn end)"
+                            self._last_turn_finalized_at = None
                         self._debug(f"Gemini response start{timing}")
                     if bool(getattr(server, "interrupted", False)):
                         self._debug("Gemini response interrupted")

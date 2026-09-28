@@ -64,6 +64,15 @@ application-audio turn requests a response. Select another model explicitly
 with `--gemini-model MODEL` or `GEMINI_LIVE_MODEL`. Models with proactive audio
 may intentionally stay silent for passive commentary even after a valid turn.
 
+The live reference path keeps capture reading independently of provider sends
+through a bounded 32-packet, drop-oldest queue. If Gemini stalls, current audio
+replaces stale audio and the next delivered frame carries a discontinuity plus
+the exact dropped-frame count. While a non-interruptible Gemini response is
+active, new input is intentionally discarded so turns cannot accumulate tens
+of seconds behind the response. `--gemini-barge-in` disables that suppression
+and allows new activity to interrupt the active response. Stream diagnostics
+report this separately as `provider_dropped` and `provider_queue_hwm`.
+
 `--response-output DESTINATION` routes returned provider PCM through Sonexis
 Runtime's bounded output plane. `--play-response` is shorthand for destination
 `default`. This works for both Gemini and OpenAI and never imports a Python
