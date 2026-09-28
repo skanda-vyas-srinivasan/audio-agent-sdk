@@ -1,24 +1,63 @@
-# Sonexis Python SDK
+# AudioPlane Python SDK
 
-The source-aware, bidirectional async SDK for Sonexis Runtime v1.0. It connects
+The source-aware, bidirectional async SDK for the local AudioPlane Runtime. It connects
 only to the local Unix-domain Runtime and keeps Core Audio details out of
 application code. The core package has no runtime dependencies and supports
 Python 3.9+.
 
+## Install the command-line client with pipx
+
+AudioPlane has not been published to PyPI. Install the current public repository
+directly with `pipx`:
+
+```sh
+pipx install \
+  "git+https://github.com/skanda-vyas-srinivasan/audioplane.git#subdirectory=SDKs/python"
+
+audioplane version
+audioplane doctor
+audioplane sources
+```
+
+This installs the `audioplane` client and `audioplane-mcp` control server in an
+isolated Python environment. It does **not** install or sign the native macOS
+Runtime; Process Tap permission belongs to that native executable. Build and
+start the signed Runtime using the repository quickstart before running commands
+that connect to it.
+
+For local development against a checkout:
+
+```sh
+pipx install --editable SDKs/python
+```
+
+New Python code can use the AudioPlane name:
+
+```python
+from audioplane import AudioPlane
+
+async with AudioPlane() as audio:
+    for source in await audio.sources():
+        print(source.name)
+```
+
+The existing `sonexis` import remains available for compatibility with v1.0
+applications and examples.
+
 ## Install for repository development
 
 ```sh
-cd /path/to/Sonexis
+cd /path/to/audioplane
 /usr/bin/python3 -m venv --system-site-packages .venv
 . .venv/bin/activate
 python -m pip install --no-deps --no-build-isolation -e SDKs/python
-python -c 'import sonexis; print(sonexis.__version__)'
+python -c 'import audioplane; print(audioplane.__version__)'
 ```
 
 The editable install is the normal repository-development path. Release
 engineering also builds a wheel and source distribution locally; install the
 wheel into a clean environment with `python -m pip install PATH_TO_WHEEL`.
-Sonexis packages are not currently published to PyPI.
+AudioPlane packages are not currently published to PyPI.
 
 For completely offline testing, installation is unnecessary:
 

@@ -39,7 +39,9 @@ tar -tzf "$PYTHON_SDIST" | grep -E '/LICENSE$' >/dev/null
 /usr/bin/python3 -m venv "$TEST_DIR/python-wheel-env"
 "$TEST_DIR/python-wheel-env/bin/python" -m pip install --no-deps "$PYTHON_WHEEL" >/dev/null
 env -u PYTHONPATH "$TEST_DIR/python-wheel-env/bin/python" -c \
-    "import importlib.metadata, sonexis, sonexis.mcp_server, sonexis.providers; assert sonexis.__version__ == '$VERSION'; assert importlib.metadata.version('sonexis') == '$VERSION'; assert 'python-wheel-env' in sonexis.__file__"
+    "import audioplane, importlib.metadata, sonexis, sonexis.mcp_server, sonexis.providers; assert audioplane.__version__ == '$VERSION'; assert audioplane.AudioPlane is sonexis.Sonexis; assert importlib.metadata.version('audioplane') == '$VERSION'; assert 'python-wheel-env' in sonexis.__file__"
+"$TEST_DIR/python-wheel-env/bin/audioplane" version | grep -F "AudioPlane $VERSION" >/dev/null
+test -x "$TEST_DIR/python-wheel-env/bin/audioplane-mcp"
 PYTHON="$TEST_DIR/python-wheel-env/bin/python" SONEXIS_EXAMPLES_USE_INSTALLED=1 \
     "$ROOT_DIR/Scripts/test-runtime-examples.sh" >/dev/null
 
@@ -47,7 +49,7 @@ PYTHON="$TEST_DIR/python-wheel-env/bin/python" SONEXIS_EXAMPLES_USE_INSTALLED=1 
 "$TEST_DIR/python-sdist-env/bin/python" -m pip install --no-deps --no-build-isolation \
     "$PYTHON_SDIST" >/dev/null
 env -u PYTHONPATH "$TEST_DIR/python-sdist-env/bin/python" -c \
-    "import importlib.metadata, sonexis; assert sonexis.__version__ == '$VERSION'; assert importlib.metadata.version('sonexis') == '$VERSION'"
+    "import audioplane, importlib.metadata, sonexis; assert audioplane.AudioPlane is sonexis.Sonexis; assert importlib.metadata.version('audioplane') == '$VERSION'"
 
 copy_tracked_tree SDKs/typescript "$TEST_DIR/typescript-src"
 (

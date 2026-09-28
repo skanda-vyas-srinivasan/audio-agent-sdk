@@ -3,13 +3,13 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sonexis"
+name = "audioplane"
 version = "1.0.0"
-description = "Source-aware bidirectional Python SDK for the local Sonexis audio Runtime"
+description = "Source-aware bidirectional audio I/O SDK for macOS"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
-authors = [{name = "Sonexis contributors"}]
+authors = [{name = "AudioPlane contributors"}]
 keywords = ["audio", "coreaudio", "macos", "realtime", "sdk"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
@@ -27,9 +27,12 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://sonexis.ink"
-Repository = "https://github.com/skanda-vyas-srinivasan/Sonexis"
-Issues = "https://github.com/skanda-vyas-srinivasan/Sonexis/issues"
+Repository = "https://github.com/skanda-vyas-srinivasan/audioplane"
+Issues = "https://github.com/skanda-vyas-srinivasan/audioplane/issues"
+
+[project.scripts]
+audioplane = "audioplane.cli:main"
+audioplane-mcp = "sonexis.mcp_server:main"
 
 [project.optional-dependencies]
 openai = ["openai[realtime]>=2; python_version >= '3.10'"]
@@ -45,3 +48,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 sonexis = ["py.typed"]
+audioplane = ["py.typed"]

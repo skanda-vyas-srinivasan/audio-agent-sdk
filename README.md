@@ -1,11 +1,15 @@
-# audioplane SDK
+# AudioPlane
 
-This repository contains Sonexis Runtime, `sonexisctl`, the public SDKs and
-examples, and Runtime's own `SonexisAudioEngine` Swift package. The engine name
-is product branding: it is ordinary source code owned by this repository, not
-a link, submodule, or dependency on the Sonexis App repository. This repository
-contains no Sonexis consumer App, UI, DSP graph, presets, recording, or
-workspace code.
+AudioPlane is a programmable, source-aware audio I/O Runtime and SDK for macOS.
+It captures individual application audio streams and routes realtime generated
+audio to local output destinations without requiring clients to implement Core
+Audio.
+
+The repository still contains internal `SonexisRuntime`, `sonexisctl`, and
+`SonexisAudioEngine` identifiers for v1.0 compatibility. Those are ordinary
+source code owned by this standalone repository—not links or dependencies on
+the Sonexis App repository. This repository contains no Sonexis consumer App,
+UI, DSP graph, presets, recording, or workspace code.
 
 Build both command-line products from a clean checkout:
 
@@ -33,12 +37,32 @@ script signs it with the first available Apple Development identity (or
 This installs only to the current user's Application Support directory. It
 does not use `sudo`, install a launch agent, or modify system audio components.
 
-Python SDK:
+Install the Python CLI in an isolated environment directly from GitHub:
+
+```bash
+pipx install \
+  "git+https://github.com/skanda-vyas-srinivasan/audioplane.git#subdirectory=SDKs/python"
+audioplane version
+audioplane doctor
+audioplane sources
+```
+
+`pipx` installs the Python client, not the signed native Runtime. The Runtime
+must be built and started first using the commands above.
+
+Python SDK for checkout development:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e SDKs/python
+```
+
+```python
+from audioplane import AudioPlane
+
+async with AudioPlane() as audio:
+    sources = await audio.sources()
 ```
 
 Run the self-contained regression/release gate with:
