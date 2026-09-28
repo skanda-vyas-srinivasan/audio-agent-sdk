@@ -11,8 +11,9 @@ import struct
 import sys
 import time
 import wave
+from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Awaitable, Callable, Optional
 
 from sonexis import (
     AudioFormat,
@@ -197,47 +198,240 @@ class StreamStats:
                 f"bytes={self.bytes} dropped={self.dropped} {timing}")
 
 
+@dataclass(frozen=True)
+class _QueuedProviderAudio:
+    provider: str
+    data: bytes
+    audio_format: AudioFormat
+    finish_response: bool = False
+
+
 class RuntimeResponsePlayer:
     """Routes provider audio through the public Sonexis output API."""
 
-    def __init__(self, client: Sonexis, destination: str, *, debug: bool) -> None:
+    def __init__(
+        self,
+        client: Sonexis,
+        destination: str,
+        *,
+        debug: bool,
+        max_pending_bytes: int = 4 * 1024 * 1024,
+        max_pending_chunks: int = 64,
+        close_timeout: float = 5.0,
+        on_failure: Optional[Callable[[Exception], None]] = None,
+        output_chunk_milliseconds: int = 50,
+        max_playback_lead_milliseconds: int = 150,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        if max_pending_bytes < 1 or max_pending_chunks < 1:
+            raise ValueError("response playback queue limits must be positive")
+        if output_chunk_milliseconds < 1:
+            raise ValueError("output chunk duration must be positive")
+        if max_playback_lead_milliseconds < output_chunk_milliseconds:
+            raise ValueError("maximum playback lead must cover at least one chunk")
         self._client = client
         self._destination = destination
         self._debug = debug
+        self._max_pending_bytes = max_pending_bytes
+        self._close_timeout = close_timeout
+        self._on_failure = on_failure
+        self._output_chunk_milliseconds = output_chunk_milliseconds
+        self._max_playback_lead_seconds = max_playback_lead_milliseconds / 1_000
+        self._clock = clock
+        self._sleep = sleep
         self._output = None
         self._format: Optional[AudioFormat] = None
+        self._playback_cursor: Optional[float] = None
+        self._pending_bytes = 0
+        self._queue: "asyncio.Queue[Optional[_QueuedProviderAudio]]" = (
+            asyncio.Queue(maxsize=max_pending_chunks))
+        self._failure: Optional[Exception] = None
+        self._closed = False
+        self._worker = asyncio.create_task(self._run())
 
     async def write(self, event: ProviderEvent) -> None:
         if not event.audio:
             return
+        if self._closed:
+            raise RuntimeError("provider response playback is closed")
+        if self._failure is not None:
+            raise RuntimeError(
+                f"provider response playback failed: {self._failure}") from self._failure
         if event.audio_format is None:
             raise RuntimeError(
                 f"{event.provider} returned audio without a declared PCM format")
-        if self._output is None:
+        if self._format is None:
             self._format = event.audio_format
-            self._output = await self._client.playback(
-                destination=self._destination,
-                format=event.audio_format,
-            )
-            print(
-                f"\nPlaying {event.provider} responses through "
-                f"{self._output.info.destination_id} "
-                f"(output session {self._output.info.id})")
         elif event.audio_format != self._format:
             raise RuntimeError(
                 f"provider response format changed from {self._format!r} "
                 f"to {event.audio_format!r}")
-        await self._output.write(event.audio)
+        data = bytes(event.audio)
+        frame_size = (event.audio_format.channels
+                      * event.audio_format.sample_format.bytes_per_sample)
+        if len(data) % frame_size:
+            raise RuntimeError(
+                f"{event.provider} returned a partial interleaved PCM frame")
+        await self._enqueue(_QueuedProviderAudio(
+            event.provider, data, event.audio_format))
         if self._debug:
-            print(f"\nOutput debug: queued {len(event.audio)} provider audio bytes")
+            print(
+                f"\nOutput debug: buffered {len(data)} provider audio bytes "
+                f"({self._pending_bytes} pending)")
+
+    async def finish_response(self) -> None:
+        """Flush a provider response's final sub-packet PCM tail."""
+        if self._format is None:
+            return
+        await self._enqueue(_QueuedProviderAudio(
+            "provider", b"", self._format, finish_response=True))
+
+    async def _enqueue(self, item: _QueuedProviderAudio) -> None:
+        if self._closed:
+            raise RuntimeError("provider response playback is closed")
+        if self._failure is not None:
+            raise RuntimeError(
+                f"provider response playback failed: {self._failure}") from self._failure
+        data_size = len(item.data)
+        if (self._queue.full()
+                or self._pending_bytes + data_size > self._max_pending_bytes):
+            raise RuntimeError(
+                "provider response playback queue is full; the output destination "
+                "is not consuming audio")
+        self._pending_bytes += data_size
+        try:
+            self._queue.put_nowait(item)
+        except asyncio.QueueFull as error:
+            self._pending_bytes -= data_size
+            raise RuntimeError(
+                "provider response playback queue is full; the output destination "
+                "is not consuming audio") from error
+
+    async def _open_output(
+        self, provider: str, audio_format: AudioFormat,
+    ) -> None:
+        if self._output is not None:
+            return
+        self._output = await self._client.playback(
+            destination=self._destination,
+            format=audio_format,
+        )
+        print(
+            f"\nPlaying {provider} responses through "
+            f"{self._output.info.destination_id} "
+            f"(output session {self._output.info.id})")
+
+    async def _write_paced(
+        self, provider: str, data: bytes, audio_format: AudioFormat,
+    ) -> None:
+        await self._open_output(provider, audio_format)
+        frame_size = (audio_format.channels
+                      * audio_format.sample_format.bytes_per_sample)
+        frame_count = len(data) // frame_size
+        duration = frame_count / audio_format.sample_rate
+        now = self._clock()
+        if self._playback_cursor is None or self._playback_cursor < now:
+            self._playback_cursor = now
+        lead = self._playback_cursor - now
+        if lead + duration > self._max_playback_lead_seconds:
+            await self._sleep(
+                lead + duration - self._max_playback_lead_seconds)
+            now = self._clock()
+            if self._playback_cursor < now:
+                self._playback_cursor = now
+        await self._output.write(data)
+        self._playback_cursor += duration
+
+    async def _flush_audio(
+        self,
+        pending: bytearray,
+        provider: str,
+        audio_format: AudioFormat,
+        *,
+        final: bool,
+    ) -> None:
+        frame_size = (audio_format.channels
+                      * audio_format.sample_format.bytes_per_sample)
+        minimum_bytes = max(1, audio_format.sample_rate // 1_000) * frame_size
+        chunk_frames = max(
+            1,
+            audio_format.sample_rate * self._output_chunk_milliseconds // 1_000,
+        )
+        chunk_bytes = chunk_frames * frame_size
+        while len(pending) >= chunk_bytes:
+            chunk = bytes(pending[:chunk_bytes])
+            del pending[:chunk_bytes]
+            await self._write_paced(provider, chunk, audio_format)
+        if final and pending:
+            if len(pending) < minimum_bytes:
+                pending.extend(b"\0" * (minimum_bytes - len(pending)))
+            chunk = bytes(pending)
+            pending.clear()
+            await self._write_paced(provider, chunk, audio_format)
+
+    async def _run(self) -> None:
+        pending = bytearray()
+        pending_provider = "provider"
+        try:
+            while True:
+                item = await self._queue.get()
+                try:
+                    if item is None:
+                        if self._format is not None:
+                            await self._flush_audio(
+                                pending, pending_provider, self._format, final=True)
+                        return
+                    if item.data:
+                        pending_provider = item.provider
+                        pending.extend(item.data)
+                    await self._flush_audio(
+                        pending,
+                        pending_provider,
+                        item.audio_format,
+                        final=item.finish_response,
+                    )
+                finally:
+                    if item is not None:
+                        self._pending_bytes -= len(item.data)
+                    self._queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._failure = error
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is not None:
+                    self._pending_bytes -= len(item.data)
+                self._queue.task_done()
+            if self._on_failure is not None:
+                self._on_failure(error)
 
     async def close(self) -> None:
-        if self._output is None:
+        if self._closed:
             return
+        self._closed = True
+        drain = self._failure is None
+        async def finish_worker() -> None:
+            await self._queue.join()
+            self._queue.put_nowait(None)
+            await self._worker
+
+        if not self._worker.done():
+            try:
+                await asyncio.wait_for(finish_worker(), self._close_timeout)
+            except asyncio.TimeoutError:
+                drain = False
+                self._worker.cancel()
+            await asyncio.gather(self._worker, return_exceptions=True)
         output, self._output = self._output, None
-        await output.aclose(drain=True)
-        if self._debug:
-            print(f"\nOutput debug: {output.metrics!r}")
+        if output is not None:
+            await output.aclose(drain=drain)
+            if self._debug:
+                print(f"\nOutput debug: {output.metrics!r}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -273,6 +467,15 @@ def parse_args() -> argparse.Namespace:
                         help="activity required before opening a Gemini turn")
     parser.add_argument("--gemini-silence-ms", type=float, default=1_200.0,
                         help="continuous local silence required to finalize a Gemini turn")
+    parser.add_argument(
+        "--gemini-barge-in", action="store_true",
+        help="allow new source activity to interrupt an active Gemini response")
+    parser.add_argument(
+        "--gemini-model",
+        default=os.environ.get(
+            "GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview"),
+        help=("Gemini Live model (default: gemini-3.1-flash-live-preview; "
+              "GEMINI_LIVE_MODEL also supported)"))
     return parser.parse_args()
 
 
@@ -285,10 +488,12 @@ async def create_sink(args: argparse.Namespace) -> RealtimeAudioSink:
             activity_end_threshold=args.gemini_end_threshold,
             minimum_activity_ms=args.gemini_min_activity_ms,
             silence_duration_ms=args.gemini_silence_ms,
+            allow_response_interruptions=args.gemini_barge_in,
         )
         debug_callback = ((lambda message: print(f"\nGemini debug: {message}"))
                           if args.debug else None)
         return await GeminiLiveSink.connect(
+            model=args.gemini_model,
             system_instruction=GEMINI_SYSTEM_INSTRUCTION,
             turn_detection=turn_detection,
             debug_callback=debug_callback,
@@ -352,6 +557,8 @@ async def print_provider_events(
                 await response_player.write(event)
             elif event.audio and debug:
                 print(f"\nAgent ({event.provider}): received {len(event.audio)} audio bytes")
+            if event.response_completed and response_player is not None:
+                await response_player.finish_response()
             if (debug and not event.text and not event.audio
                     and event.type not in {"session.started", "session.updated"}):
                 print(f"\nProvider event: {terminal_safe(event.type)}")
@@ -538,8 +745,16 @@ async def main() -> None:
             response_client = Sonexis(
                 args.socket, client_name="sonexis-audio-agent-output")
             await response_client.connect()
+            def response_playback_failed(error: Exception) -> None:
+                print(f"\nResponse playback failed: {terminal_safe(error)}")
+                done.set()
+
             response_player = RuntimeResponsePlayer(
-                response_client, args.response_output, debug=args.debug)
+                response_client,
+                args.response_output,
+                debug=args.debug,
+                on_failure=response_playback_failed,
+            )
         output = OutputWriter(args.output, required_format(args))
         try:
             if args.replay:

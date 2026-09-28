@@ -4,8 +4,10 @@ import os
 import asyncio
 import inspect
 import sys
+import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, List, Optional
+from typing import Any, AsyncIterator, Callable, Deque, List, Optional
 
 from ..activity import (ActivityDetectionConfig, ActivityState,
                         AudioActivityDetector, VoiceActivityDetector)
@@ -20,17 +22,25 @@ class GeminiTurnDetectionConfig(ActivityDetectionConfig):
     """Client-side end detection used alongside Gemini's automatic VAD."""
 
     enabled: bool = True
+    allow_response_interruptions: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be a boolean")
+        if not isinstance(self.allow_response_interruptions, bool):
+            raise ValueError("allow_response_interruptions must be a boolean")
 
 
 class GeminiLiveSink:
     """Send Sonexis PCM to a Google Gemini Live session."""
 
     required_format = AudioFormat.gemini_live()
+    # Runtime capture commonly produces approximately 10 ms frames. Gemini's
+    # Live API is substantially more reliable when realtime PCM is submitted
+    # in roughly 100 ms chunks (and currently recommends 1,024-2,048 samples).
+    # Coalescing happens on the SDK consumer task, never on an audio callback.
+    _input_chunk_frames = 1_600
 
     @staticmethod
     def _output_audio_format(mime_type: str) -> AudioFormat:
@@ -53,12 +63,23 @@ class GeminiLiveSink:
         return AudioFormat.gemini_live_output()
 
     @staticmethod
-    def _connection_config(response_modalities, system_instruction: Optional[str]) -> dict:
+    def _connection_config(
+        response_modalities,
+        system_instruction: Optional[str],
+        *,
+        allow_response_interruptions: bool = False,
+    ) -> dict:
         config = {
             "response_modalities": list(response_modalities or ["AUDIO"]),
+            "input_audio_transcription": {},
             "output_audio_transcription": {},
             "realtime_input_config": {
                 "automatic_activity_detection": {"disabled": False},
+                "activity_handling": (
+                    "START_OF_ACTIVITY_INTERRUPTS"
+                    if allow_response_interruptions else "NO_INTERRUPTION"
+                ),
+                "turn_coverage": "TURN_INCLUDES_ONLY_ACTIVITY",
             },
         }
         if system_instruction:
@@ -93,9 +114,11 @@ class GeminiLiveSink:
         )
         self._debug_callback = debug_callback
         self._candidate_frames: List[AudioFrame] = []
+        self._pending_audio = bytearray()
         self._segment_open = False
         self._terminal_send_error = False
         self._response_in_progress = False
+        self._turn_finalized_at: Deque[int] = deque()
         self._events_active = False
 
     @classmethod
@@ -125,7 +148,13 @@ class GeminiLiveSink:
             raise ProviderError(
                 "missing_dependency", "Install the Sonexis 'gemini' extra (google-genai)") from error
         selected_model = model or os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.8-live")
-        config = cls._connection_config(response_modalities, system_instruction)
+        selected_turn_detection = turn_detection or GeminiTurnDetectionConfig()
+        config = cls._connection_config(
+            response_modalities,
+            system_instruction,
+            allow_response_interruptions=(
+                selected_turn_detection.allow_response_interruptions),
+        )
         client = genai.Client(api_key=key)
         context = client.aio.live.connect(model=selected_model, config=config)
         try:
@@ -134,7 +163,7 @@ class GeminiLiveSink:
             return cls(session, blob_factory=types.Blob,
                        session_context=context, client=client,
                        close_timeout=close_timeout,
-                       turn_detection=turn_detection,
+                       turn_detection=selected_turn_detection,
                        voice_activity_detector=voice_activity_detector,
                        debug_callback=debug_callback)
         except BaseException as error:
@@ -159,16 +188,40 @@ class GeminiLiveSink:
             except Exception:
                 pass
 
-    async def _send_frame(self, frame: AudioFrame) -> None:
-        blob = self._blob_factory(data=frame.data, mime_type="audio/pcm;rate=16000")
+    async def _send_pcm(self, data: bytes) -> None:
+        blob = self._blob_factory(data=data, mime_type="audio/pcm;rate=16000")
         await self._session.send_realtime_input(audio=blob)
         # Set after every successful remote send so cancellation during an
         # onset-buffer flush still leaves close() able to terminate the segment.
         self._segment_open = True
 
-    async def _send_audio_stream_end(self) -> None:
+    async def _queue_frame(self, frame: AudioFrame) -> int:
+        self._pending_audio.extend(frame.data)
+        bytes_per_frame = (self.required_format.channels
+                           * self.required_format.sample_format.bytes_per_sample)
+        chunk_bytes = self._input_chunk_frames * bytes_per_frame
+        sent_bytes = 0
+        while len(self._pending_audio) >= chunk_bytes:
+            chunk = bytes(self._pending_audio[:chunk_bytes])
+            del self._pending_audio[:chunk_bytes]
+            await self._send_pcm(chunk)
+            sent_bytes += len(chunk)
+        return sent_bytes
+
+    async def _flush_pending_audio(self) -> int:
+        if not self._pending_audio:
+            return 0
+        chunk = bytes(self._pending_audio)
+        self._pending_audio.clear()
+        await self._send_pcm(chunk)
+        return len(chunk)
+
+    async def _send_audio_stream_end(self) -> int:
+        flushed_bytes = 0
+        if self._pending_audio:
+            flushed_bytes = await self._flush_pending_audio()
         if not self._segment_open:
-            return
+            return flushed_bytes
         # A cancelled/failed send has ambiguous remote state. Mark this segment
         # terminal before awaiting so close() cannot duplicate the edge.
         self._segment_open = False
@@ -177,12 +230,14 @@ class GeminiLiveSink:
         except BaseException:
             self._terminal_send_error = True
             raise
+        self._turn_finalized_at.append(time.monotonic_ns())
         self._debug("audio_stream_end sent")
+        return flushed_bytes
 
     async def _send_with_turn_detection(self, frame: AudioFrame) -> int:
         config = self._turn_detection
         if not config.enabled:
-            await self._send_frame(frame)
+            await self._send_pcm(frame.data)
             return len(frame.data)
 
         if frame.discontinuity:
@@ -207,16 +262,15 @@ class GeminiLiveSink:
             self._candidate_frames = []
             sent_bytes = 0
             for candidate in pending:
-                await self._send_frame(candidate)
-                sent_bytes += len(candidate.data)
+                sent_bytes += await self._queue_frame(candidate)
             self._debug("local activity start")
             return sent_bytes
 
-        await self._send_frame(frame)
+        sent_bytes = await self._queue_frame(frame)
         if transition is not None and transition.type == "activity_ended":
             self._debug("local activity end")
-            await self._send_audio_stream_end()
-        return len(frame.data)
+            sent_bytes += await self._send_audio_stream_end()
+        return sent_bytes
 
     async def send_audio(self, frame: AudioFrame) -> AudioSendReceipt:
         if self._closed:
@@ -252,6 +306,15 @@ class GeminiLiveSink:
                 async for value in self._session.receive():
                     received_any = True
                     server = getattr(value, "server_content", None)
+                    input_transcription = getattr(server, "input_transcription", None)
+                    input_text = getattr(input_transcription, "text", None)
+                    interim_transcription = getattr(
+                        server, "interim_input_transcription", None)
+                    interim_text = getattr(interim_transcription, "text", None)
+                    if isinstance(input_text, str) and input_text:
+                        self._debug(f"Gemini heard: {input_text}")
+                    elif isinstance(interim_text, str) and interim_text:
+                        self._debug(f"Gemini hearing: {interim_text}")
                     transcription = getattr(server, "output_transcription", None)
                     text = getattr(transcription, "text", None) or getattr(value, "text", None)
                     audio_parts = []
@@ -274,7 +337,15 @@ class GeminiLiveSink:
                     response_started = has_response and not self._response_in_progress
                     if response_started:
                         self._response_in_progress = True
-                        self._debug("Gemini response start")
+                        timing = ""
+                        if self._turn_finalized_at:
+                            latency_ms = ((time.monotonic_ns()
+                                           - self._turn_finalized_at.popleft())
+                                          / 1_000_000)
+                            timing = f" ({latency_ms:.0f} ms after turn end)"
+                        self._debug(f"Gemini response start{timing}")
+                    if bool(getattr(server, "interrupted", False)):
+                        self._debug("Gemini response interrupted")
                     turn_complete = bool(getattr(server, "turn_complete", False))
                     if turn_complete:
                         self._debug("Gemini turn complete")
@@ -344,5 +415,5 @@ class GeminiLiveSink:
         async with self._send_lock:
             self._candidate_frames.clear()
             self._activity_detector.reset()
-            if self._segment_open:
+            if self._segment_open or self._pending_audio:
                 await self._send_audio_stream_end()

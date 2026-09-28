@@ -59,12 +59,22 @@ background audio opens turns; lower them when quiet speech is missed. Keep the
 end threshold below the start threshold. A custom `VoiceActivityDetector` can
 be supplied to `GeminiLiveSink` when energy thresholds are insufficient.
 
+The reference app defaults to `gemini-3.1-flash-live-preview` so each finalized
+application-audio turn requests a response. Select another model explicitly
+with `--gemini-model MODEL` or `GEMINI_LIVE_MODEL`. Models with proactive audio
+may intentionally stay silent for passive commentary even after a valid turn.
+
 `--response-output DESTINATION` routes returned provider PCM through Sonexis
 Runtime's bounded output plane. `--play-response` is shorthand for destination
 `default`. This works for both Gemini and OpenAI and never imports a Python
-playback library. Use `sonexisctl outputs` to select a fixed speaker/headphone
-or an installed loopback device. Raw returned-audio byte diagnostics stay
-behind `--debug`.
+playback library. Provider receive and output playback run independently: a
+slow destination cannot freeze the model event stream, and a bounded queue
+fails explicitly instead of growing without limit. Provider PCM is coalesced
+into 50 ms output packets, paced to at most 150 ms ahead of realtime, and a
+sub-millisecond final tail is silence-padded to Runtime's legal packet minimum.
+This prevents bursty model delivery from overflowing Runtime's render queue.
+Use `sonexisctl outputs` to select a fixed speaker/headphone or an installed
+loopback device. Raw returned-audio byte diagnostics stay behind `--debug`.
 
 Provider modes select their required Sonexis format preset automatically. No
 credential or raw captured PCM is logged or stored unless `--output` is

@@ -99,7 +99,7 @@ routed through the common Runtime output plane with `--response-output default`.
 ```sh
 python -m pip install -e 'SDKs/python[gemini]'
 export GEMINI_API_KEY='...'
-export GEMINI_LIVE_MODEL='gemini-3.8-live'  # optional/current model selection
+export GEMINI_LIVE_MODEL='gemini-3.1-flash-live-preview'  # optional override
 python Examples/audio-agent/audio_agent.py \
   --provider gemini --source 'Google Chrome' \
   --response-output default --debug
@@ -113,11 +113,30 @@ The Gemini adapter keeps server automatic VAD enabled and adds edge-triggered
 local turn finalization for application audio. A short confirmed activity onset
 opens a segment; a configurable meaningful pause sends exactly one
 `audio_stream_end`; post-finalization silence is suppressed until activity
-resumes. `GeminiTurnDetectionConfig` controls start/end RMS thresholds, minimum
+resumes. Runtime-sized input packets are coalesced into approximately 100 ms
+provider chunks before transmission, and the final partial chunk is flushed
+before the turn-ending signal. This follows Gemini Live's realtime PCM chunking
+guidance without changing Runtime capture framing. `GeminiTurnDetectionConfig` controls start/end RMS thresholds, minimum
 activity, and silence duration, and applications can inject a
 `VoiceActivityDetector` when energy detection is insufficient. Output audio
 transcription is enabled so the reference application prints readable model
-responses even when the response modality is audio.
+responses even when the response modality is audio. Input transcription is
+also enabled and appears only in `--debug` output, making it possible to verify
+that Gemini received intelligible source audio without logging it by default.
+
+Application audio often resumes while Gemini is still generating. The adapter
+therefore requests Gemini's `NO_INTERRUPTION` activity policy by default so a
+new Chrome/Discord activity burst cannot silently cancel the preceding answer.
+Interactive applications that intentionally want provider-level barge-in can
+set `allow_response_interruptions=True`; the reference application exposes
+this as `--gemini-barge-in`. Debug output reports turn-end-to-response-start
+latency and explicit server interruption events.
+
+The reference application defaults to `gemini-3.1-flash-live-preview` for
+turn-by-turn response behavior. Override it with `--gemini-model MODEL` or
+`GEMINI_LIVE_MODEL`. A model with proactive audio may intentionally decline to
+respond to passive commentary even when the adapter finalized the turn
+correctly.
 
 The authenticated live path was validated on 2026-09-26 with Google Chrome:
 local activity start/end were detected, exactly one `audio_stream_end` was
@@ -144,7 +163,14 @@ statistics, watches source/runtime lifecycle events, optionally writes PCM/WAV,
 and shuts down cleanly. `--response-output default` plays Gemini or OpenAI
 speech through Sonexis; an installed loopback destination ID sends the same
 audio to an application's selected microphone. Its README contains exact
-commands.
+commands. Provider receive and Runtime playback run in separate tasks with a
+bounded queue, so a stalled output destination cannot freeze later provider
+events or grow memory without limit; exhaustion is reported explicitly.
+Returned PCM is emitted in paced 50 ms packets with no more than 150 ms of
+intentional lead. A provider's final sub-millisecond PCM fragment is padded
+with silence to Runtime's one-millisecond minimum. These rules handle bursty
+provider delivery without the render-queue drops or fatal short-packet errors
+that direct event-by-event writes can cause.
 
 ## Duplex and barge-in
 

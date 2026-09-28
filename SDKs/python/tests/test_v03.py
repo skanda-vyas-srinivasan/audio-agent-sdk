@@ -473,8 +473,18 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         config = GeminiLiveSink._connection_config(None, instruction)
         self.assertFalse(config["realtime_input_config"]
                          ["automatic_activity_detection"]["disabled"])
+        self.assertEqual(config["realtime_input_config"]["activity_handling"],
+                         "NO_INTERRUPTION")
+        self.assertEqual(config["realtime_input_config"]["turn_coverage"],
+                         "TURN_INCLUDES_ONLY_ACTIVITY")
+        self.assertEqual(config["input_audio_transcription"], {})
         self.assertEqual(config["output_audio_transcription"], {})
         self.assertEqual(config["system_instruction"], instruction)
+
+        barge_in = GeminiLiveSink._connection_config(
+            None, instruction, allow_response_interruptions=True)
+        self.assertEqual(barge_in["realtime_input_config"]["activity_handling"],
+                         "START_OF_ACTIVITY_INTERRUPTS")
 
     def test_provider_diagnostics_redact_common_secret_forms(self):
         message = sanitized_provider_error(RuntimeError(
@@ -535,6 +545,25 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         await sink.aclose()
         self.assertEqual(len([value for value in session.values
                               if value.get("audio_stream_end")]), 1)
+
+    async def test_gemini_coalesces_runtime_frames_before_finalizing(self):
+        session = FakeGeminiSession()
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value,
+            turn_detection=self.turn_config(
+                minimum_activity_ms=100, silence_duration_ms=100))
+
+        sequence = 1
+        for amplitude in [0.2] * 10 + [0.0] * 10:
+            await sink.send_audio(self.pcm_frame(
+                sequence, amplitude, frame_count=160))
+            sequence += 1
+
+        audio = [value["audio"]["data"] for value in session.values
+                 if "audio" in value]
+        self.assertEqual([len(value) for value in audio], [3_200, 3_200])
+        self.assertTrue(session.values[-1]["audio_stream_end"])
+        await sink.aclose()
 
     async def test_gemini_hybrid_vad_ignores_short_mid_sentence_pause(self):
         session = FakeGeminiSession()
@@ -623,6 +652,34 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.type, "output_transcription")
         self.assertEqual(event.text, "A concise English response.")
         self.assertEqual(debug, ["Gemini response start", "Gemini turn complete"])
+        await sink.aclose()
+
+    async def test_gemini_input_transcription_is_visible_in_debug(self):
+        session = FakeGeminiSession()
+        debug = []
+        session.received.append(SimpleNamespace(server_content=SimpleNamespace(
+            input_transcription=SimpleNamespace(text="the captured speech"),
+            output_transcription=None, model_turn=None, turn_complete=False)))
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value, debug_callback=debug.append)
+        event = await sink.events().__anext__()
+        self.assertIsNone(event.text)
+        self.assertEqual(debug, ["Gemini heard: the captured speech"])
+        await sink.aclose()
+
+    async def test_gemini_interim_input_transcription_is_visible_in_debug(self):
+        session = FakeGeminiSession()
+        debug = []
+        session.received.append(SimpleNamespace(server_content=SimpleNamespace(
+            input_transcription=None,
+            interim_input_transcription=SimpleNamespace(text="still listening"),
+            output_transcription=None, model_turn=None, turn_complete=False,
+            interrupted=False)))
+        sink = GeminiLiveSink(
+            session, blob_factory=lambda **value: value, debug_callback=debug.append)
+        event = await sink.events().__anext__()
+        self.assertIsNone(event.text)
+        self.assertEqual(debug, ["Gemini hearing: still listening"])
         await sink.aclose()
 
     async def test_gemini_receives_multiple_turn_bounded_iterators(self):
@@ -1001,14 +1058,304 @@ class ReferenceProviderOutputTests(unittest.IsolatedAsyncioTestCase):
             player = self.module.RuntimeResponsePlayer(client, "default", debug=False)
             await player.write(ProviderEvent(
                 provider, "audio", audio=b"\x01\x02", audio_format=audio_format))
-            self.assertEqual(client.calls, [("default", audio_format)])
-            self.assertEqual(client.output.writes, [b"\x01\x02"])
             with self.assertRaises(RuntimeError):
                 await player.write(ProviderEvent(
                     provider, "audio", audio=b"\0\0",
                     audio_format=AudioFormat.speech_16k()))
             await player.close()
+            self.assertEqual(client.calls, [("default", audio_format)])
+            minimum_bytes = max(1, audio_format.sample_rate // 1_000) * 2
+            self.assertEqual(
+                client.output.writes,
+                [b"\x01\x02" + b"\0" * (minimum_bytes - 2)],
+            )
             self.assertEqual(client.output.close_drains, [True])
+
+    async def test_slow_playback_does_not_block_provider_receive_loop(self):
+        from sonexis.providers import ProviderEvent
+
+        release = asyncio.Event()
+
+        class Output:
+            info = SimpleNamespace(id="output", destination_id="virtual")
+            metrics = SimpleNamespace(frames_rendered=0)
+
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.writes = []
+                self.close_drains = []
+
+            async def write(self, value):
+                self.started.set()
+                await release.wait()
+                self.writes.append(bytes(value))
+
+            async def aclose(self, *, drain):
+                self.close_drains.append(drain)
+
+        class Client:
+            def __init__(self):
+                self.output = Output()
+
+            async def playback(self, *, destination, format):
+                return self.output
+
+        client = Client()
+        player = self.module.RuntimeResponsePlayer(
+            client, "virtual", debug=False, close_timeout=0.1)
+        payload = b"\x01\x02" * 1_200
+        event = ProviderEvent(
+            "gemini", "audio", audio=payload,
+            audio_format=AudioFormat.gemini_live_output())
+        await asyncio.wait_for(player.write(event), timeout=0.05)
+        await client.output.started.wait()
+        await asyncio.wait_for(player.write(event), timeout=0.05)
+        release.set()
+        await player.close()
+        self.assertEqual(client.output.writes, [payload, payload])
+        self.assertEqual(client.output.close_drains, [True])
+
+    async def test_response_playback_queue_is_bounded(self):
+        from sonexis.providers import ProviderEvent
+
+        class Client:
+            async def playback(self, *, destination, format):
+                raise AssertionError("worker should not run before overflow check")
+
+        player = self.module.RuntimeResponsePlayer(
+            Client(), "virtual", debug=False, max_pending_bytes=2,
+            max_pending_chunks=1, close_timeout=0.01)
+        event = ProviderEvent(
+            "gemini", "audio", audio=b"\x01\x02",
+            audio_format=AudioFormat.gemini_live_output())
+        await player.write(event)
+        with self.assertRaisesRegex(RuntimeError, "queue is full"):
+            await player.write(event)
+        await player.close()
+
+    async def test_response_playback_worker_reports_failure(self):
+        from sonexis.providers import ProviderEvent
+
+        failed = asyncio.Event()
+        failures = []
+
+        class Client:
+            async def playback(self, *, destination, format):
+                raise RuntimeError("destination vanished")
+
+        def on_failure(error):
+            failures.append(error)
+            failed.set()
+
+        player = self.module.RuntimeResponsePlayer(
+            Client(), "virtual", debug=False, on_failure=on_failure)
+        await player.write(ProviderEvent(
+            "gemini", "audio", audio=b"\x01\x02" * 1_200,
+            audio_format=AudioFormat.gemini_live_output()))
+        await asyncio.wait_for(failed.wait(), timeout=0.1)
+        self.assertEqual(str(failures[0]), "destination vanished")
+        with self.assertRaisesRegex(RuntimeError, "playback failed"):
+            await player.write(ProviderEvent(
+                "gemini", "audio", audio=b"\x01\x02",
+                audio_format=AudioFormat.gemini_live_output()))
+        await player.close()
+
+    async def test_response_playback_close_cancels_stalled_output(self):
+        from sonexis.providers import ProviderEvent
+
+        class Output:
+            info = SimpleNamespace(id="output", destination_id="virtual")
+            metrics = SimpleNamespace(frames_rendered=0)
+
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.close_drains = []
+
+            async def write(self, value):
+                self.started.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self, *, drain):
+                self.close_drains.append(drain)
+
+        class Client:
+            def __init__(self):
+                self.output = Output()
+
+            async def playback(self, *, destination, format):
+                return self.output
+
+        client = Client()
+        player = self.module.RuntimeResponsePlayer(
+            client, "virtual", debug=False, close_timeout=0.01)
+        await player.write(ProviderEvent(
+            "gemini", "audio", audio=b"\x01\x02" * 1_200,
+            audio_format=AudioFormat.gemini_live_output()))
+        await client.output.started.wait()
+        await asyncio.wait_for(player.close(), timeout=0.1)
+        self.assertTrue(player._worker.done())
+        self.assertEqual(client.output.close_drains, [False])
+
+    async def test_turn_complete_event_flushes_short_tail(self):
+        from sonexis.providers import ProviderEvent
+
+        class Player:
+            def __init__(self):
+                self.writes = []
+                self.finishes = 0
+
+            async def write(self, event):
+                self.writes.append(event.audio)
+
+            async def finish_response(self):
+                self.finishes += 1
+
+        class Sink:
+            async def events(self):
+                yield ProviderEvent(
+                    "gemini", "audio", audio=b"\x01\x02",
+                    audio_format=AudioFormat.gemini_live_output())
+                yield ProviderEvent(
+                    "gemini", "message", response_completed=True)
+
+        player = Player()
+        await self.module.print_provider_events(
+            Sink(), asyncio.Event(), response_player=player)
+        self.assertEqual(player.writes, [b"\x01\x02"])
+        self.assertEqual(player.finishes, 1)
+
+    async def test_tiny_provider_tail_is_padded_and_flushed_once(self):
+        from sonexis.providers import ProviderEvent
+
+        audio_format = AudioFormat.gemini_live_output()
+
+        class Output:
+            info = SimpleNamespace(id="output", destination_id="virtual")
+            metrics = SimpleNamespace(frames_rendered=0)
+
+            def __init__(self):
+                self.writes = []
+
+            async def write(self, value):
+                frame_size = 2
+                self.assert_valid = len(value) % frame_size == 0
+                if len(value) < 48:
+                    raise AssertionError("sub-millisecond output write")
+                self.writes.append(bytes(value))
+
+            async def aclose(self, *, drain):
+                pass
+
+        class Client:
+            def __init__(self):
+                self.output = Output()
+
+            async def playback(self, *, destination, format):
+                return self.output
+
+        client = Client()
+        player = self.module.RuntimeResponsePlayer(client, "virtual", debug=False)
+        await player.write(ProviderEvent(
+            "gemini", "audio", audio=b"\x11\x22" * 4,
+            audio_format=audio_format))
+        await player.finish_response()
+        await player.close()
+        self.assertTrue(client.output.assert_valid)
+        self.assertEqual(
+            b"".join(client.output.writes),
+            b"\x11\x22" * 4 + b"\0" * 40,
+        )
+
+    async def test_randomized_provider_chunk_stress_preserves_pcm_and_paces(self):
+        from sonexis.providers import ProviderEvent
+
+        audio_format = AudioFormat.gemini_live_output()
+
+        class FakeTime:
+            def __init__(self):
+                self.now = 100.0
+                self.sleeps = []
+
+            def clock(self):
+                return self.now
+
+            async def sleep(self, duration):
+                self.sleeps.append(duration)
+                self.now += duration
+
+        class Output:
+            info = SimpleNamespace(id="output", destination_id="virtual")
+            metrics = SimpleNamespace(frames_rendered=0)
+
+            def __init__(self):
+                self.writes = []
+
+            async def write(self, value):
+                if len(value) % 2 or len(value) < 48:
+                    raise AssertionError("invalid output packet boundary")
+                if len(value) > 2_400:
+                    raise AssertionError("output packet exceeded 50 milliseconds")
+                self.writes.append(bytes(value))
+
+            async def aclose(self, *, drain):
+                pass
+
+        class Client:
+            def __init__(self):
+                self.output = Output()
+
+            async def playback(self, *, destination, format):
+                return self.output
+
+        fake_time = FakeTime()
+        client = Client()
+        player = self.module.RuntimeResponsePlayer(
+            client,
+            "virtual",
+            debug=False,
+            max_pending_bytes=16 * 1024 * 1024,
+            max_pending_chunks=8_192,
+            clock=fake_time.clock,
+            sleep=fake_time.sleep,
+        )
+        expected = bytearray()
+        for turn in range(250):
+            frame_count = 4 + (turn * 791) % 5_000
+            payload = b"".join(
+                struct.pack("<h", (turn * 97 + frame) % 32_767)
+                for frame in range(frame_count)
+            )
+            offset = 0
+            chunk_index = 1
+            while offset < len(payload):
+                chunk_frames = 1 + ((turn + chunk_index * 43) % 1_337)
+                end = min(len(payload), offset + chunk_frames * 2)
+                await player.write(ProviderEvent(
+                    "gemini",
+                    "audio",
+                    audio=payload[offset:end],
+                    audio_format=audio_format,
+                ))
+                offset = end
+                chunk_index += 1
+                if chunk_index % 16 == 0:
+                    await asyncio.sleep(0)
+            await player.finish_response()
+            expected.extend(payload)
+            final_chunk_bytes = len(payload) % 2_400
+            if 0 < final_chunk_bytes < 48:
+                expected.extend(b"\0" * (48 - final_chunk_bytes))
+            if turn % 16 == 0:
+                await asyncio.sleep(0)
+        await player.close()
+        rendered = b"".join(client.output.writes)
+        self.assertEqual(rendered, bytes(expected))
+        self.assertTrue(fake_time.sleeps)
+        rendered_seconds = len(rendered) / 2 / audio_format.sample_rate
+        self.assertLessEqual(
+            rendered_seconds - sum(fake_time.sleeps),
+            0.150_001,
+        )
 
 
 if __name__ == "__main__":
