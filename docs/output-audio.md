@@ -147,7 +147,7 @@ retained ring and never waits on this lock.
 from sonexis import AudioFormat, Sonexis
 
 async with Sonexis() as sx:
-    loopback = await sx.get_output_destination("BlackHole 2ch")
+    loopback = await sx.get_output_destination("AudioPlane Input")
     async with await sx.playback(
         destination=loopback,
         format=AudioFormat.gemini_live_output(),
@@ -177,7 +177,7 @@ cannot retract the current device quantum already handed to Core Audio.
 
 ```typescript
 const sx = await Sonexis.connect();
-const destination = await sx.getOutputDestination("BlackHole 2ch");
+const destination = await sx.getOutputDestination("AudioPlane Input");
 const output = await sx.playback({
   destination,
   format: AudioFormats.openAIRealtimeOutput(),
@@ -197,7 +197,8 @@ The TypeScript `findOutputDestinations`, `getOutputDestination`, and
 ```sh
 sonexisctl outputs
 sonexisctl play /path/to/response.wav --destination default --debug
-sonexisctl play /path/to/response.wav --destination 'coreaudio:BlackHole2ch_UID' --debug
+sonexisctl play /path/to/response.wav \
+  --destination 'coreaudio:com.audioplane.input.device' --debug
 sonexisctl output-status SESSION --json
 sonexisctl output-stop SESSION
 ```

@@ -109,6 +109,9 @@ do {
         name: "BlackHole 2ch", uid: "BlackHole2ch_UID", hasInput: true) == .virtualInput,
         "BlackHole was not classified as a virtual input")
     expect(RuntimeHALPlaybackBackend.classifyDestination(
+        name: "AudioPlane Input", uid: "com.audioplane.input.device", hasInput: true)
+        == .virtualInput, "AudioPlane Input was not classified as a virtual input")
+    expect(RuntimeHALPlaybackBackend.classifyDestination(
         name: "BlackHole 2ch", uid: "BlackHole2ch_UID", hasInput: false) == .playback,
         "output-only device was classified as a virtual input")
     expect(RuntimeHALPlaybackBackend.classifyDestination(

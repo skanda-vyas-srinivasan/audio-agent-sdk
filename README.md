@@ -32,6 +32,7 @@ Runtime and use the same public audio APIs as any other client.
 - Timestamped, sequenced binary PCM frames with discontinuity/drop metadata
 - Multiple simultaneous sources, sessions, and clients
 - Default-device, physical-device, and installed loopback playback
+- Buildable first-party `AudioPlane Input` virtual microphone (manual install)
 - Bounded capture, playback, jitter, and backpressure queues
 - Source, capture, output, device, and Runtime lifecycle events
 - Python async SDK, typed TypeScript SDK, CLI, and control-only MCP server
@@ -168,9 +169,29 @@ sonexisctl outputs
 sonexisctl play /path/to/audio.wav --destination default --debug
 ```
 
-Use an installed loopback device such as BlackHole when audio must appear as a
-microphone input to Discord, Zoom, or another application. AudioPlane does not
-install a virtual audio driver.
+To make generated audio appear as a microphone input to Discord, Zoom, or
+another application, build AudioPlane's first-party virtual device:
+
+```bash
+make -C AudioPlaneHALDriver clean all test inspect
+./Scripts/install-audioplane-input.sh
+```
+
+Installation is an explicit system change: the script visibly invokes `sudo`
+to copy the exact signed bundle into `/Library/Audio/Plug-Ins/HAL`, but never
+changes the default input/output device or restarts Core Audio. Restart the Mac,
+select **AudioPlane Input** inside the receiving application, then locate its
+exact destination ID:
+
+```bash
+audioplane outputs
+sonexisctl play /path/to/audio.wav \
+  --destination coreaudio:com.audioplane.input.device --debug
+```
+
+BlackHole remains supported as a fallback. The first-party driver is currently
+a source-built developer preview and still requires the documented manual
+end-to-end validation before a packaged release.
 
 ## Multiple labeled sources
 
@@ -200,6 +221,7 @@ sample-accurate synchronization between independent application processes.
 | `SDKs/python` | Primary async SDK, provider adapters, replay, activity/VAD, and duplex APIs |
 | `SDKs/typescript` | Typed Node.js client with capture, output, events, and duplex APIs |
 | `SonexisAudioEngine` | Repository-owned low-level Swift capture engine used by the Runtime |
+| `AudioPlaneHALDriver` | First-party `AudioPlane Input` virtual microphone driver |
 
 The previous `sonexis` Python import remains available as a compatibility alias.
 New applications should use:
@@ -307,7 +329,8 @@ See the full [security model](docs/sonexis-runtime.md#security-and-trust-model).
 - Python and TypeScript packages are not published to public registries yet
 - The Runtime/CLI Swift executable names still use compatibility-era naming
 - No built-in acoustic echo cancellation
-- Loopback microphone routing requires an installed third-party device
+- `AudioPlane Input` requires explicit system-wide installation and a reboot;
+  BlackHole remains the validated fallback
 - Live TCC, physical playback, and provider tests require manual interaction or
   external credentials
 
@@ -316,6 +339,8 @@ See the full [security model](docs/sonexis-runtime.md#security-and-trust-model).
 - [Runtime architecture, protocol, CLI, and troubleshooting](docs/sonexis-runtime.md)
 - [Python/AI integration](docs/ai-integration.md)
 - [Output and duplex audio](docs/output-audio.md)
+- [AudioPlane Input design](docs/audioplane-input-design.md)
+- [AudioPlane Input manual validation](docs/audioplane-input-manual-validation.md)
 - [Benchmarks](docs/runtime-benchmarks.md)
 - [Manual validation](docs/runtime-v1.0-manual-validation.md)
 - [Runtime 1.0 report](RUNTIME_V1_0_REPORT.md)

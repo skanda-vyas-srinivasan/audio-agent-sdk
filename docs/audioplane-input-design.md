@@ -63,13 +63,14 @@ Stable identifiers:
 ## Audio format
 
 The initial device presents one two-channel interleaved Float32 input stream and
-one matching hidden injection/output stream at 48 kHz. The Runtime already
+one matching injection/output stream at 48 kHz by default, with 44.1 kHz also
+available through the retained Apple property model. The Runtime already
 converts supported client formats (PCM16/Float32, mono/stereo, supported sample
 rates) to a destination's native format before entering its realtime IOProc.
 
-Keeping the driver format fixed reduces state transitions and makes the first
-version easier to validate. Additional sample rates can be considered after the
-48 kHz path is live-tested.
+Keeping the format surface to the two standard rates reduces state transitions
+and makes the first version easier to validate. Additional formats can be
+considered after the 48 kHz path is live-tested.
 
 ## Realtime boundary
 

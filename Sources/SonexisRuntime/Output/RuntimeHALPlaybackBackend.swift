@@ -264,7 +264,8 @@ public final class RuntimeHALPlaybackBackend: RuntimeOutputBackend, @unchecked S
                                     hasInput: Bool) -> RuntimeOutputDestinationKindDTO {
         guard hasInput else { return .playback }
         let signature = "\(name) \(uid)".lowercased()
-        return signature.contains("sonexis") || signature.contains("blackhole")
+        return signature.contains("audioplane") || signature.contains("sonexis")
+            || signature.contains("blackhole")
             || signature.contains("loopback") || signature.contains("soundflower")
             ? .virtualInput : .playback
     }
