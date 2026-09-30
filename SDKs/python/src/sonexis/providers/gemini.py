@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, List, Optional
 
 from ..activity import (ActivityDetectionConfig, ActivityState,
-                        AudioActivityDetector, VoiceActivityDetector)
+                        AudioActivityDetector, VoiceActivityDetector, measure_activity)
 from ..diagnostics import AudioSendReceipt, send_receipt
 from ..errors import ProviderError, sanitized_provider_error
 from ..models import AudioFormat, AudioFrame
@@ -22,6 +22,7 @@ class GeminiTurnDetectionConfig(ActivityDetectionConfig):
 
     enabled: bool = True
     allow_response_interruptions: bool = False
+    onset_gap_ms: float = 100.0
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -110,6 +111,7 @@ class GeminiLiveSink:
                 activity_end_threshold=self._turn_detection.activity_end_threshold,
                 minimum_activity_ms=self._turn_detection.minimum_activity_ms,
                 silence_duration_ms=self._turn_detection.silence_duration_ms,
+                onset_gap_ms=self._turn_detection.onset_gap_ms,
             ),
             voice_activity_detector=voice_activity_detector,
         )
@@ -122,6 +124,8 @@ class GeminiLiveSink:
         self._response_in_progress = False
         self._last_turn_finalized_at: Optional[int] = None
         self._events_active = False
+        self._debug_input_frames = 0
+        self._debug_next_level_frame = self.required_format.sample_rate
 
     @classmethod
     async def connect(
@@ -312,6 +316,16 @@ class GeminiLiveSink:
             if self._closed:
                 raise ProviderError("provider_closed", "Gemini session closed during send")
             self._validator.commit(frame)
+            if self._debug_callback is not None:
+                self._debug_input_frames += frame.frame_count
+                if self._debug_input_frames >= self._debug_next_level_frame:
+                    self._debug_next_level_frame = (
+                        self._debug_input_frames + self.required_format.sample_rate)
+                    level = measure_activity(frame)
+                    self._debug(
+                        f"input level rms={level.rms:.4f} peak={level.peak:.4f} "
+                        f"local_state={self._activity_detector.state.value} "
+                        f"silence_ms={self._activity_detector.silence_duration_ms:.0f}")
         return send_receipt("gemini", frame, payload_bytes=payload_bytes)
 
     async def events(self) -> AsyncIterator[ProviderEvent]:

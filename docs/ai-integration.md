@@ -117,8 +117,33 @@ resumes. Runtime-sized input packets are coalesced into approximately 100 ms
 provider chunks before transmission, and the final partial chunk is flushed
 before the turn-ending signal. This follows Gemini Live's realtime PCM chunking
 guidance without changing Runtime capture framing. `GeminiTurnDetectionConfig` controls start/end RMS thresholds, minimum
-activity, and silence duration, and applications can inject a
-`VoiceActivityDetector` when energy detection is insufficient. Output audio
+activity, tolerated onset gaps, and silence duration, and applications can inject a
+`VoiceActivityDetector` when energy detection is insufficient. The packaged
+`audioplane agent --provider gemini` now uses `WebRTCVoiceActivityDetector` by
+default, installed by the `gemini` extra. It classifies speech rather than
+requiring background sound to fall below a fixed loudness threshold. The
+reference CLI uses 100 ms of confirmed speech, tolerates 100 ms onset gaps,
+and finalizes after 1,200 ms of non-speech. The gap window is bounded so sparse
+clicks cannot accumulate indefinitely. The sink's direct API retains its energy
+detector unless a classifier is supplied; its default confirmed activity is
+250 ms with 100 ms tolerated onset gaps.
+
+Use `--gemini-vad-mode 0` through `3` to configure WebRTC aggressiveness (default
+`2`), `--gemini-min-activity-ms`, `--gemini-onset-gap-ms`, and
+`--gemini-silence-ms` to configure debounce. `--gemini-vad energy` explicitly
+selects the legacy loudness detector; `--gemini-start-threshold` and
+`--gemini-end-threshold` apply only in that mode. Server automatic VAD remains
+enabled in both modes. WebRTC accepts complete 10 ms mono PCM16 blocks; the SDK
+reblocks variable Runtime packets without resampling, retains at most one
+partial block, and resets classifier history on discontinuities. Everything
+runs on the consumer task, outside the Runtime/audio callback.
+
+With `--debug`, once per second the adapter prints input RMS/peak, local state,
+and accumulated non-speech duration. This distinguishes a silent microphone,
+an onset that never confirms, and an input that never reaches a local pause.
+These diagnostics contain no PCM or credentials.
+
+Output audio
 transcription is enabled so the reference application prints readable model
 responses even when the response modality is audio. Input transcription is
 also enabled and appears only in `--debug` output, making it possible to verify

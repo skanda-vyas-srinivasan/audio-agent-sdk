@@ -191,3 +191,65 @@ Automated release criteria are satisfied. Release action is intentionally
 paused. The recommended next human action is the authenticated Gemini barge-in
 matrix above, followed by review of the generated validation JSON. Only after
 that should a tag, push, registry publication, or GitHub release be considered.
+
+## Live acceptance finding: first utterance / missing local end (2026-09-29)
+
+The developer's subsequent microphone test showed live audio with zero Runtime
+or provider-queue drops, but sometimes no response until a later utterance.
+In a failed run, the visible `audio_stream_end` appeared only after Ctrl-C.
+That is a failed live acceptance result; earlier automated qualification does
+not prove that the conversation path is reliable in the developer's room.
+
+An offline regression reproduced a concrete onset defect: five 200 ms voiced
+intervals separated by 40 ms quieter intervals resulted in **zero bytes sent**
+to Gemini, while a subsequent 400 ms sustained interval was sent. The onset
+counter previously reset on every quiet packet. Separately, the legacy fixed
+energy end threshold can keep an active turn open in ambient noise, which is
+consistent with finalization occurring only at shutdown. The logs do not prove
+which condition affected every unsuccessful live attempt.
+
+The local fix adds bounded onset-gap tolerance and an optional WebRTC speech
+classifier using the existing public VAD extension. The packaged Gemini CLI
+defaults to speech classification, confirms 100 ms of speech, tolerates 100 ms
+onset gaps, and finalizes after 1,200 ms of non-speech while retaining Gemini's
+server automatic VAD. The direct sink API retains energy detection by default.
+Debug input-level/state output is rate-limited to once per second. No Runtime
+capture/data-plane or HAL implementation changed.
+
+Validation for this fix:
+
+- onset regression, arbitrary PCM packet boundaries, bounded sparse-noise
+  buffering, noise-held-open turn prevention with injected classification,
+  reopening, and optional dependency/configuration tests: **PASSED**;
+- real WebRTC native classifier over 1,000 variable-size silent packets:
+  **PASSED** in the developer virtual environment;
+- offline macOS synthesized speech (4.03 seconds) at 16 kHz, fed in 171-sample
+  packets with silence and seeded stationary noise at RMS 0.012: **PASSED**,
+  one start and one end before cleanup in each case. This exercises the actual
+  WebRTC library and adapter but is not an authenticated provider test;
+- final microphone/Gemini retest after this fix: **NOT RUN**.
+
+The final SDK suite in the actual developer virtual environment passed **137
+tests**, with both native speech tests enabled. The existing seeded agent
+torture gate passed **1,009,497 transitions**, **1,000 response turns**, and
+**1,000 interruptions** in 2.88 seconds. The offline native speech test is
+repeatable with `./Scripts/test-gemini-speech-vad.sh`; it synthesizes public
+test words to temporary files, checks the real WebRTC classifier with silence
+and seeded noise, and deletes its fixtures. No private microphone recordings
+were collected for these tests.
+
+Rerun with the same terminal's existing `GEMINI_API_KEY` and headphones selected
+as the macOS output:
+
+```sh
+cd /Users/skandavyas/audio-agent-sdk
+.venv/bin/audioplane agent \
+  --provider gemini \
+  --source 'MacBook Pro Microphone' \
+  --response-output default \
+  --gemini-vad webrtc \
+  --gemini-barge-in \
+  --validate-live \
+  --validation-json /tmp/audioplane-final-validation.json \
+  --debug
+```

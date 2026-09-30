@@ -36,11 +36,12 @@ audioplane-mcp = "sonexis.mcp_server:main"
 
 [project.optional-dependencies]
 openai = ["openai[realtime]>=2; python_version >= '3.10'"]
-gemini = ["google-genai>=1; python_version >= '3.10'"]
+gemini = ["google-genai>=1; python_version >= '3.10'", "webrtcvad-wheels>=2.0.14,<3"]
 mcp = ["mcp>=2,<3; python_version >= '3.10'"]
 ai = [
   "openai[realtime]>=2; python_version >= '3.10'",
   "google-genai>=1; python_version >= '3.10'",
+  "webrtcvad-wheels>=2.0.14,<3",
 ]
 
 [tool.setuptools.packages.find]

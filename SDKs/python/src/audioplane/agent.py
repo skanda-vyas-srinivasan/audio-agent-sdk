@@ -26,6 +26,7 @@ from sonexis import (
     SampleFormat,
     Sonexis,
     SonexisError,
+    WebRTCVoiceActivityDetector,
 )
 from .providers import (
     GeminiLiveSink,
@@ -865,10 +866,16 @@ def add_agent_arguments(
                         help="normalized RMS required to begin local Gemini activity")
     parser.add_argument("--gemini-end-threshold", type=float, default=0.008,
                         help="normalized RMS below which Gemini silence accumulates")
-    parser.add_argument("--gemini-min-activity-ms", type=float, default=250.0,
+    parser.add_argument("--gemini-min-activity-ms", type=float, default=100.0,
                         help="activity required before opening a Gemini turn")
     parser.add_argument("--gemini-silence-ms", type=float, default=1_200.0,
                         help="continuous local silence required to finalize a Gemini turn")
+    parser.add_argument("--gemini-onset-gap-ms", type=float, default=100.0,
+                        help="brief non-speech gaps tolerated while confirming an onset")
+    parser.add_argument("--gemini-vad", choices=("webrtc", "energy"), default="webrtc",
+                        help="local speech classifier (default: webrtc; energy is loudness only)")
+    parser.add_argument("--gemini-vad-mode", type=int, choices=(0, 1, 2, 3), default=2,
+                        help="WebRTC noise filtering aggressiveness, from 0 to 3 (default: 2)")
     parser.add_argument(
         "--gemini-barge-in", action="store_true",
         help="allow new source activity to interrupt an active Gemini response")
@@ -900,14 +907,28 @@ async def create_sink(
             activity_end_threshold=args.gemini_end_threshold,
             minimum_activity_ms=args.gemini_min_activity_ms,
             silence_duration_ms=args.gemini_silence_ms,
+            onset_gap_ms=args.gemini_onset_gap_ms,
             allow_response_interruptions=args.gemini_barge_in,
         )
         debug_callback = ((lambda message: print(f"\nGemini debug: {message}"))
                           if args.debug else None)
+        detector = None
+        if args.gemini_vad == "webrtc":
+            try:
+                detector = WebRTCVoiceActivityDetector(mode=args.gemini_vad_mode)
+            except ImportError as error:
+                raise ProviderError("missing_dependency", str(error)) from error
+        if debug_callback is not None:
+            debug_callback(
+                f"local detector={args.gemini_vad} "
+                f"onset_ms={args.gemini_min_activity_ms:g} "
+                f"onset_gap_ms={args.gemini_onset_gap_ms:g} "
+                f"pause_ms={args.gemini_silence_ms:g}")
         return await GeminiLiveSink.connect(
             model=args.gemini_model,
             system_instruction=GEMINI_SYSTEM_INSTRUCTION,
             turn_detection=turn_detection,
+            voice_activity_detector=detector,
             debug_callback=debug_callback,
             lifecycle_callback=lifecycle_callback,
         )

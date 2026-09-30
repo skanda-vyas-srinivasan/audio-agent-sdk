@@ -322,6 +322,25 @@ after a debounced local pause. Silence after finalization is not transmitted,
 and new meaningful activity reopens the stream. Configure start/end RMS,
 minimum activity, and silence duration with `GeminiTurnDetectionConfig`, or
 inject the SDK's `VoiceActivityDetector` extension for speech-aware detection.
+`WebRTCVoiceActivityDetector` is a provided optional classifier, installed with
+the Gemini extra. The packaged Gemini agent uses it by default to avoid waiting
+for literal silence in a noisy room. It confirms 100 ms of speech, tolerates
+100 ms onset gaps, and ends after 1,200 ms of non-speech. Configure it with
+`--gemini-vad-mode`, `--gemini-min-activity-ms`, `--gemini-onset-gap-ms`, and
+`--gemini-silence-ms`. Choose `--gemini-vad energy` for the legacy RMS detector;
+RMS start/end options affect only that mode. For direct sink usage:
+
+```python
+from audioplane import WebRTCVoiceActivityDetector
+from audioplane.providers import GeminiLiveSink
+
+model = await GeminiLiveSink.connect(
+    voice_activity_detector=WebRTCVoiceActivityDetector(mode=2),
+)
+```
+
+`--debug` prints input levels and detector state once per second. The classifier
+retains less than one 10 ms block and runs outside the Runtime/audio callback.
 
 For the complete packaged capture/provider/playback lifecycle, use the same
 entry point installed by the wheel:

@@ -5,6 +5,7 @@ from .client import (CaptureSession, EventSubscription, OutputDestinationSelecto
 from .output import AudioOutput
 from .activity import (ActivityDetectionConfig, ActivityEvent, ActivityState,
                        AudioActivity, AudioActivityDetector, VoiceActivityDetector,
+                       WebRTCVoiceActivityDetector,
                        measure_activity)
 from .diagnostics import AudioSendReceipt, LatencySummary, LatencyTracker
 from .errors import (AmbiguousOutputDestinationError, AmbiguousSourceError,
@@ -39,5 +40,6 @@ __all__ = [
     "SessionLimitError", "SlowConsumerError",
     "SessionMetrics", "Sonexis", "SonexisClient", "SonexisConnectionError", "SonexisError",
     "SonexisProtocolError", "SourceNotFoundError", "SourceUnavailableError",
-    "UnsupportedFormatError", "VoiceActivityDetector", "__version__", "measure_activity",
+    "UnsupportedFormatError", "VoiceActivityDetector", "WebRTCVoiceActivityDetector",
+    "__version__", "measure_activity",
 ]
