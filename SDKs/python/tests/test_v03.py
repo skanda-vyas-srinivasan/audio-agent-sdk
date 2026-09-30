@@ -264,6 +264,50 @@ class DelayedCaptureClient:
 
 
 class MultiSourceRaceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_label_remains_reserved_until_cancelled_removal_finishes(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class Capture:
+            def __init__(self, delayed):
+                self.delayed = delayed
+                self.closed = asyncio.Event()
+
+            def __aiter__(self):
+                async def frames():
+                    yield AudioFrame("stream", 0, 0, 16, AudioFormat(), b"\0\0" * 16)
+                    await self.closed.wait()
+                return frames()
+
+            async def aclose(self):
+                if self.delayed:
+                    entered.set()
+                    await release.wait()
+                self.closed.set()
+
+        class Client:
+            async def capture(self, selector, *, format):
+                return Capture(delayed=selector == "old")
+
+        group = MultiSourceSession(Client())
+        await group.add("media", "old")
+        removal = asyncio.create_task(group.remove("media"))
+        await asyncio.wait_for(entered.wait(), 1.0)
+        removal.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await removal
+        with self.assertRaises(ValueError):
+            await group.add("media", "new")
+        release.set()
+        await group.remove("media")
+        replacement = await group.add("media", "new")
+        iterator = group.frames()
+        frame = await asyncio.wait_for(iterator.__anext__(), 1.0)
+        self.assertEqual(frame.label, "media")
+        self.assertEqual(group.labels, ("media",))
+        await iterator.aclose()
+        await group.aclose()
+        self.assertTrue(replacement.closed.is_set())
+
     async def test_concurrent_duplicate_label_is_rejected_before_second_capture(self):
         client = DelayedCaptureClient()
         group = MultiSourceSession(client)

@@ -168,7 +168,15 @@ waiting for an explicit refresh.
 
 `await output.flush()` discards pending response audio and creates a fresh
 stream epoch. `await output.cancel()` stops immediately. `await output.aclose()`
-sends EOS and drains. `sx.duplex(...)` is only an ownership convenience; the
+rejects new writes, finishes the write already holding the operation
+lock, then sends EOS and drains. Writes waiting for that lock are rejected.
+Cancellation can override an already-running graceful close. SDKs bound the
+complete graceful drain to three seconds, including
+waiting for writes, sending EOS, and polling Runtime status; on expiry they
+discard the remaining output. Cleanup requests and transport teardown also
+have bounded waits. `flush()` serializes behind writes; to interrupt a stalled
+write, cancel its output and create a new session. The reference agent handles
+this recreation automatically. `sx.duplex(...)` is only an ownership convenience; the
 application still decides model, feedback, turn-taking, and barge-in policy.
 Flush quiesces an in-flight ring read before advancing the software cursor, but
 cannot retract the current device quantum already handed to Core Audio.

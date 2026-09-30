@@ -276,6 +276,53 @@ test("multi-source queue uses packet name with frame-name compatibility", async 
   assert.throws(() => client.session({ maxQueuePackets: 4, maxQueueFrames: 4 }), TypeError);
 });
 
+test("source waits bound active lookups and respond to abort during lookup", async () => {
+  const client = new Sonexis("/unused");
+  client.getSource = async () => new Promise(() => undefined);
+  await assert.rejects(client.waitForSource("Test", { timeoutMs: 10 }), (error: unknown) =>
+    error instanceof SonexisError && error.code === "source_wait_timeout");
+  const controller = new AbortController();
+  const waiting = client.waitForSource("Test", { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(waiting, (error: unknown) =>
+    error instanceof SonexisError && error.code === "cancelled");
+  client.getSource = async () => source("app.test", "Test", "example.test", 1);
+  assert.equal((await client.waitForSource("Test", { timeoutMs: 0 })).id, "app.test");
+});
+
+test("removal reserves its label through cleanup and replacement retains its queue", async () => {
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const value = frame(source("app.test", "Test", "example.test", 1), "session",
+    "00112233-4455-6677-8899-aabbccddeeff");
+  const client = { capture: async (selector: string) => {
+    let end!: () => void;
+    const closed = new Promise<void>((resolve) => { end = resolve; });
+    return {
+      close: async () => {
+        if (selector === "old") { enter(); await gate; }
+        end();
+      },
+      async *[Symbol.asyncIterator]() { yield value; await closed; },
+    } as unknown as CaptureStream;
+  } } as unknown as Sonexis;
+  const group = new MultiSourceSession(client);
+  await group.add("media", "old");
+  const removing = group.remove("media");
+  await entered;
+  await assert.rejects(group.add("media", "new"), (error: unknown) =>
+    error instanceof SonexisError && error.code === "invalid_label");
+  release();
+  await removing;
+  await group.add("media", "new");
+  const frames = group.frames();
+  assert.equal((await frames.next()).value?.label, "media");
+  assert.deepEqual(group.labels, ["media"]);
+  await frames.return?.();
+});
+
 function frame(audioSource: AudioSource, sessionId: string, streamId: string): AudioFrame {
   return {
     streamId,

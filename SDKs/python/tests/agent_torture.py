@@ -47,6 +47,8 @@ class HashingOutput:
         self.fail_after = fail_after
 
     async def write(self, value):
+        if self.closes:
+            raise AssertionError("cancelled output session was reused")
         if self.fail_after is not None and self.writes >= self.fail_after:
             raise RuntimeError("injected output disappearance")
         if len(value) < 48 or len(value) > 2_400 or len(value) % 2:
@@ -56,6 +58,8 @@ class HashingOutput:
         self.digest.update(value)
 
     async def flush(self):
+        if self.closes:
+            raise AssertionError("cancelled output session was flushed")
         self.flushes += 1
 
     async def aclose(self, *, drain):
@@ -168,26 +172,48 @@ async def stress_output_chunking(turns, seed):
 
 
 async def stress_interruptions(cycles):
-    output = HashingOutput()
+    class RecreatingOutputClient:
+        def __init__(self):
+            self.outputs = []
+
+        async def playback(self, *, destination, format):
+            output = HashingOutput()
+            self.outputs.append(output)
+            return output
+
+    client = RecreatingOutputClient()
+    clock = FakeClock()
     player = RuntimeResponsePlayer(
-        OutputClient(output), "virtual", debug=False,
+        client, "virtual", debug=False,
         max_pending_bytes=8 * 1024 * 1024,
         max_pending_chunks=8_192,
+        clock=clock.clock, sleep=clock.sleep,
     )
     payload = b"\x01\x02" * 2_400
     for cycle in range(cycles):
         await player.write(ProviderEvent(
             "gemini", "audio", audio=payload,
             audio_format=AudioFormat.gemini_live_output()))
-        await asyncio.sleep(0)
+        if cycle % 2 == 0:
+            # Idle outputs retain their session and rotate through flush.
+            await player._queue.join()
+        else:
+            # Force interruption while the write task owns the stream epoch.
+            async def wait_for_write():
+                while player._active_write is None:
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(wait_for_write(), 1.0)
         await player.interrupt_response()
-        if cycle % 16 == 0:
-            await asyncio.sleep(0)
+        await player._queue.join()
     await player.close()
     if not player._worker.done():
         raise AssertionError("interruption playback worker leaked")
-    if not 1 <= output.flushes <= cycles:
-        raise AssertionError("barge-in never flushed Runtime playback")
+    flushes = sum(output.flushes for output in client.outputs)
+    cancellations = sum(output.closes.count(False) for output in client.outputs)
+    if flushes != (cycles + 1) // 2 or cancellations != cycles // 2:
+        raise AssertionError(f"interruption modes were not exercised: {flushes=}, {cancellations=}")
+    if player._pending_bytes or player._discard_tasks:
+        raise AssertionError("interruption playback retained queued bytes or cleanup tasks")
     return cycles * 2
 
 

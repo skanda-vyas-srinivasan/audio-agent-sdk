@@ -49,6 +49,7 @@ class MicrophonePassthrough:
         self._pump_task: Optional[asyncio.Task] = None
         self._close_task: Optional[asyncio.Task] = None
         self._state = "new"
+        self._lifecycle_lock = asyncio.Lock()
         self._metrics = MicrophonePassthroughMetrics()
 
     @property
@@ -56,40 +57,41 @@ class MicrophonePassthrough:
         return self._metrics
 
     async def __aenter__(self) -> "MicrophonePassthrough":
-        if self._state != "new":
-            raise RuntimeError(f"Microphone passthrough cannot start while {self._state}")
-        self._state = "opening"
-        try:
-            self.source = (
-                await self.client.default_microphone()
-                if self.input_source is None
-                else await self.client.get_source(self.input_source)
-            )
-            if self.source.kind != "microphone":
-                raise SonexisError(
-                    "not_a_microphone",
-                    f"{self.source.name!r} is a {self.source.kind} source, not a microphone",
-                    details={"source_id": self.source.id},
+        async with self._lifecycle_lock:
+            if self._state != "new":
+                raise RuntimeError(f"Microphone passthrough cannot start while {self._state}")
+            self._state = "opening"
+            try:
+                self.source = (
+                    await self.client.default_microphone()
+                    if self.input_source is None
+                    else await self.client.get_source(self.input_source)
                 )
-            destination = await self.client.get_output_destination(self.output_destination)
-            self._reject_direct_feedback(self.source, destination.active_device_id)
-            self.output = await self.client.playback(
-                destination=destination,
-                format=self.format,
-                target_buffer_milliseconds=self.target_buffer_milliseconds,
-            )
-            self.capture = await self.client.capture(self.source, format=self.format)
-        except BaseException:
-            if self.output is not None:
-                await self.output.aclose(drain=False)
-                self.output = None
-            self._state = "closed"
-            raise
+                if self.source.kind != "microphone":
+                    raise SonexisError(
+                        "not_a_microphone",
+                        f"{self.source.name!r} is a {self.source.kind} source, not a microphone",
+                        details={"source_id": self.source.id},
+                    )
+                destination = await self.client.get_output_destination(self.output_destination)
+                self._reject_direct_feedback(self.source, destination.active_device_id)
+                self.output = await self.client.playback(
+                    destination=destination,
+                    format=self.format,
+                    target_buffer_milliseconds=self.target_buffer_milliseconds,
+                )
+                self.capture = await self.client.capture(self.source, format=self.format)
+            except BaseException:
+                if self.output is not None:
+                    await self.output.aclose(drain=False)
+                    self.output = None
+                self._state = "closed"
+                raise
 
-        self._state = "open"
-        self._pump_task = asyncio.create_task(
-            self._pump(), name="sonexis-microphone-passthrough")
-        return self
+            self._state = "open"
+            self._pump_task = asyncio.create_task(
+                self._pump(), name="sonexis-microphone-passthrough")
+            return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         await self.aclose(drain=exc_type is None)
@@ -102,12 +104,13 @@ class MicrophonePassthrough:
 
     async def aclose(self, *, drain: bool = False) -> None:
         """Stop forwarding and close both Runtime sessions deterministically."""
-        if self._close_task is None:
-            self._state = "closing"
-            self._close_task = asyncio.create_task(
-                self._finish_close(drain=drain),
-                name="sonexis-microphone-passthrough-cleanup",
-            )
+        async with self._lifecycle_lock:
+            if self._close_task is None:
+                self._state = "closing"
+                self._close_task = asyncio.create_task(
+                    self._finish_close(drain=drain),
+                    name="sonexis-microphone-passthrough-cleanup",
+                )
         await asyncio.shield(self._close_task)
 
     async def _pump(self) -> None:

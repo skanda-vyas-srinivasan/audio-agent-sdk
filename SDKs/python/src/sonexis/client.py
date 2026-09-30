@@ -50,7 +50,10 @@ class Sonexis:
     """A reusable asynchronous connection to the local Sonexis Runtime."""
 
     def __init__(self, socket_path: Optional[str] = None, *, client_name: str = "sonexis-python",
-                 client_version: str = "1.0.0") -> None:
+                 client_version: str = "1.0.0", request_timeout: float = 10.0) -> None:
+        if not math.isfinite(request_timeout) or request_timeout <= 0:
+            raise ValueError("request_timeout must be finite and positive")
+        self.request_timeout = request_timeout
         configured = socket_path or os.environ.get("SONEXIS_RUNTIME_SOCKET")
         current = os.path.join(tempfile.gettempdir(), f"sx-{os.getuid()}", "control.sock")
         legacy = f"/tmp/sonexis-runtime-{os.getuid()}/control.sock"
@@ -70,6 +73,7 @@ class Sonexis:
         self._events: Set["EventSubscription"] = set()
         self._outputs: Set["AudioOutput"] = set()
         self._close_task: Optional[asyncio.Task] = None
+        self._connection_generation = 0
 
     async def __aenter__(self) -> "Sonexis":
         await self.connect()
@@ -79,6 +83,11 @@ class Sonexis:
         await self.close()
 
     async def connect(self, *, reconnect_attempts: int = 0) -> Handshake:
+        if self._close_task is not None:
+            closing = self._close_task
+            await asyncio.shield(closing)
+            if self._close_task is closing:
+                self._close_task = None
         if self._writer is not None and self.handshake is not None:
             return self.handshake
         if self._connect_task is None:
@@ -147,6 +156,7 @@ class Sonexis:
         return await self.connect(reconnect_attempts=attempts)
 
     async def close(self) -> None:
+        self._connection_generation += 1
         connect_task = self._connect_task
         if (connect_task is not None and connect_task is not asyncio.current_task()
                 and not connect_task.done()):
@@ -177,9 +187,9 @@ class Sonexis:
         if writer is not None:
             writer.close()
             try:
-                await writer.wait_closed()
-            except (OSError, ConnectionError):
-                pass
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+            except (OSError, ConnectionError, asyncio.TimeoutError):
+                writer.transport.abort()
         task, self._reader_task = self._reader_task, None
         if task is not None and task is not asyncio.current_task():
             task.cancel()
@@ -191,6 +201,13 @@ class Sonexis:
         self._pending.clear()
         self._discarded_request_ids.clear()
         self.handshake = None
+
+    def _check_connection_generation(self, generation: int) -> None:
+        if (generation != self._connection_generation or self._writer is None
+                or self._close_task is not None):
+            raise SonexisConnectionError(
+                "disconnected", "Runtime connection closed while attaching a resource",
+                retryable=True)
 
     async def sources(self) -> List[AudioSource]:
         """Return the Runtime's current application-source snapshot."""
@@ -315,7 +332,16 @@ class Sonexis:
         deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
         while True:
             try:
-                return await self.get_source(selector)
+                if deadline is None or timeout == 0:
+                    return await self.get_source(selector)
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                return await asyncio.wait_for(self.get_source(selector), remaining)
+            except asyncio.TimeoutError as error:
+                raise SourceNotFoundError(
+                    "source_wait_timeout", f"Timed out waiting for audio source {selector!r}",
+                    retryable=True) from error
             except SourceNotFoundError:
                 if deadline is not None:
                     remaining = deadline - asyncio.get_running_loop().time()
@@ -358,6 +384,7 @@ class Sonexis:
         source: Optional[AudioSource] = None,
     ) -> "CaptureSession":
         """Attach the PCM plane for an existing same-user Runtime capture."""
+        generation = self._connection_generation
         info: CaptureInfo
         if isinstance(capture, str):
             value = await self.status(capture)
@@ -367,14 +394,22 @@ class Sonexis:
             info = capture
         resolved = source or await self.get_source(info.source_id)
         session = CaptureSession(self, info, resolved)
-        await session._open()
+        try:
+            self._check_connection_generation(generation)
+            await session._open()
+            self._check_connection_generation(generation)
+        except BaseException:
+            await session.aclose(stop_runtime=False)
+            raise
         self._captures.add(session)
         return session
 
     async def capture(self, source: SourceSelector, *,
                       format: AudioFormat = AudioFormat()) -> "CaptureSession":
         """Resolve one source, start capture, and attach its binary PCM stream."""
+        generation = self._connection_generation
         resolved = await self.get_source(source)
+        self._check_connection_generation(generation)
         response = await self._request("start_capture", source_id=resolved.id,
                                        format=format.to_wire())
         try:
@@ -384,8 +419,11 @@ class Sonexis:
             raise SonexisProtocolError("invalid_session", "Runtime sent a malformed session") from error
         try:
             await capture._open()
+            self._check_connection_generation(generation)
         except BaseException:
-            await self._cleanup_request("stop_capture", session_id=capture.info.id)
+            await capture.aclose(stop_runtime=False)
+            if generation == self._connection_generation:
+                await self._cleanup_request("stop_capture", session_id=capture.info.id)
             raise
         self._captures.add(capture)
         return capture
@@ -461,6 +499,8 @@ class Sonexis:
 
     async def events(self, event_types: Optional[Iterable[str]] = None) -> "EventSubscription":
         """Subscribe to a bounded Runtime lifecycle event stream."""
+        generation = self._connection_generation
+        self._check_connection_generation(generation)
         params: Dict[str, Any] = {
             "event_types": list(RUNTIME_EVENT_TYPES if event_types is None else event_types)
         }
@@ -472,8 +512,11 @@ class Sonexis:
                                        "Runtime sent a malformed event subscription") from error
         try:
             await subscription._open()
+            self._check_connection_generation(generation)
         except BaseException:
-            await self._cleanup_request("unsubscribe_events", subscription_id=subscription.id)
+            await subscription.aclose(unsubscribe=False)
+            if generation == self._connection_generation:
+                await self._cleanup_request("unsubscribe_events", subscription_id=subscription.id)
             raise
         self._events.add(subscription)
         return subscription
@@ -590,7 +633,18 @@ class Sonexis:
         deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
         while True:
             try:
-                return await self.get_output_destination(selector, kind=kind)
+                if deadline is None or timeout == 0:
+                    return await self.get_output_destination(selector, kind=kind)
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                return await asyncio.wait_for(
+                    self.get_output_destination(selector, kind=kind), remaining)
+            except asyncio.TimeoutError as error:
+                raise OutputDestinationNotFoundError(
+                    "output_destination_wait_timeout",
+                    f"Timed out waiting for output destination {selector!r}",
+                    retryable=True) from error
             except OutputDestinationNotFoundError:
                 if deadline is not None:
                     remaining = deadline - asyncio.get_running_loop().time()
@@ -613,10 +667,12 @@ class Sonexis:
         """Create and attach a bounded client-to-Runtime PCM output stream."""
         from .output import AudioOutput
 
+        generation = self._connection_generation
         self._require_output_capability()
         if not 20 <= target_buffer_milliseconds <= 250:
             raise ValueError("target_buffer_milliseconds must be between 20 and 250")
         resolved_destination = await self.get_output_destination(destination)
+        self._check_connection_generation(generation)
         if (resolved_destination.supported_formats
                 and format not in resolved_destination.supported_formats):
             raise UnsupportedFormatError(
@@ -637,8 +693,11 @@ class Sonexis:
                 "invalid_output_session", "Runtime sent a malformed output session") from error
         try:
             await output._open()
+            self._check_connection_generation(generation)
         except BaseException:
-            await self._cleanup_request("stop_output", output_session_id=output.info.id)
+            await output.aclose(drain=False, stop_runtime=False)
+            if generation == self._connection_generation:
+                await self._cleanup_request("stop_output", output_session_id=output.info.id)
             raise
         self._outputs.add(output)
         return output
@@ -702,12 +761,21 @@ class Sonexis:
             raise SonexisProtocolError("message_too_large", "Control request exceeds 64 KiB")
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
+        async def send_and_receive() -> Dict[str, Any]:
+            try:
+                async with self._write_lock:
+                    writer.write(payload)
+                    await writer.drain()
+                return await future
+            except asyncio.CancelledError:
+                # Record before yielding back to wait_for, so a simultaneous
+                # late response cannot be mistaken for an unknown request.
+                self._discarded_request_ids.add(request_id)
+                raise
+
         try:
-            async with self._write_lock:
-                writer.write(payload)
-                await writer.drain()
-            return await future
-        except asyncio.CancelledError:
+            return await asyncio.wait_for(send_and_receive(), timeout=self.request_timeout)
+        except (asyncio.CancelledError, asyncio.TimeoutError) as error:
             # A mutating request may already be in the kernel buffer. Protocol
             # v2 has no request-cancellation command, so terminate the owning
             # connection and let Runtime clean up every resource for this owner.
@@ -718,14 +786,23 @@ class Sonexis:
                 # the transport immediately, then reconcile wrappers after the
                 # cancelled stack has unwound and released its locks.
                 writer.close()
+                writer.transport.abort()
                 if self._close_task is None:
+                    self._connection_generation += 1
                     self._close_task = asyncio.create_task(
                         self._finish_close(), name="sonexis-client-cancel-cleanup")
+            if isinstance(error, asyncio.TimeoutError):
+                raise SonexisConnectionError(
+                    "request_timeout", f"{command} timed out", retryable=True) from error
             raise
         except (OSError, ConnectionError) as error:
             raise SonexisConnectionError("connection_lost", str(error), retryable=True) from error
         finally:
             self._pending.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()
             if len(self._discarded_request_ids) > 1024:
                 self._discarded_request_ids.clear()
 
@@ -775,7 +852,7 @@ class Sonexis:
                     raise SonexisProtocolError("invalid_response", "Runtime sent an invalid response envelope")
                 request_id = response.get("request_id")
                 future = self._pending.get(request_id)
-                if future is None and request_id in self._discarded_request_ids:
+                if request_id in self._discarded_request_ids:
                     self._discarded_request_ids.discard(request_id)
                     continue
                 if future is None or future.done():
@@ -789,6 +866,7 @@ class Sonexis:
         except BaseException as error:
             sdk_error = error if isinstance(error, SonexisError) else SonexisConnectionError(
                 "connection_lost", str(error), retryable=True)
+            self._connection_generation += 1
             for future in list(self._pending.values()):
                 if not future.done():
                     future.set_exception(sdk_error)
@@ -798,7 +876,11 @@ class Sonexis:
             self.handshake = None
             if writer is not None:
                 writer.close()
+                writer.transport.abort()
             self._reader_task = None
+            if self._close_task is None:
+                self._close_task = asyncio.create_task(
+                    self._finish_close(), name="sonexis-disconnect-cleanup")
 
 
 class CaptureSession(AsyncIterator[AudioFrame]):

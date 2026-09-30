@@ -1023,6 +1023,58 @@ do {
     eventPressure.stop()
     eventPressureClient.close()
 
+    // Freeze delivery, fill admission capacity, and reject a newer packet.
+    // Reflection controls the private queue without adding a production test API.
+    let orderedPlane = RuntimeDataPlane(
+        path: directory.appendingPathComponent("ordered-drops.sock").path, streamID: UUID())
+    try orderedPlane.start()
+    let orderedClient = try UnixSocketSystem.connect(path: orderedPlane.path)
+    defer { orderedClient.close(); orderedPlane.stop() }
+    try orderedClient.setReceiveTimeout(milliseconds: 1000)
+    for _ in 0..<100 where orderedPlane.metrics().connectedClients != 1 { usleep(1_000) }
+    expect(orderedPlane.metrics().connectedClients == 1, "ordered-drop subscriber did not attach")
+    let deliveryQueue = Mirror(reflecting: orderedPlane).children
+        .first { $0.label == "queue" }!.value as! DispatchQueue
+    let orderedConnections = Mirror(reflecting: orderedPlane).children
+        .first { $0.label == "clients" }!.value as! [UUID: UnixSocketConnection]
+    let orderedFD = Mirror(reflecting: orderedConnections.values.first!).children
+        .first { $0.label == "descriptor" }!.value as! Int32
+    var sendBuffer: Int32 = 262_144
+    expect(setsockopt(orderedFD, SOL_SOCKET, SO_SNDBUF, &sendBuffer,
+                     socklen_t(MemoryLayout<Int32>.size)) == 0, "cannot size test socket buffer")
+    let enteredDelivery = DispatchSemaphore(value: 0)
+    let releaseDelivery = DispatchSemaphore(value: 0)
+    deliveryQueue.async { enteredDelivery.signal(); releaseDelivery.wait() }
+    expect(enteredDelivery.wait(timeout: .now() + 1) == .success, "delivery queue did not pause")
+    let orderedFormat = RuntimePCMFormatDTO(sampleRate: 16_000, channelCount: 1)
+    func offerOrdered(_ sequence: UInt64, upstreamDrops: UInt32 = 0) {
+        orderedPlane.offer(RuntimeBackendAudioFrame(payload: Data(repeating: 0, count: 32),
+            sequence: sequence, timestampNanoseconds: sequence * 1_000_000,
+            frameCount: 16, format: orderedFormat, droppedFramesBefore: upstreamDrops))
+    }
+    for sequence in UInt64(0)..<64 { offerOrdered(sequence) }
+    offerOrdered(64, upstreamDrops: 8)
+    releaseDelivery.signal()
+    deliveryQueue.sync {}
+    var orderedDecoder = RuntimePCMStreamDecoder(expectedStreamID: orderedPlane.streamID)
+    for sequence in UInt64(0)..<64 {
+        let bytes = try orderedClient.readExactly(64)
+        let header = try RuntimePCMFrameCodec.decodeHeader(bytes)
+        let payload = try orderedClient.readExactly(Int(header.payloadByteCount))
+        expect(header.sequence == sequence && !header.flags.contains(.discontinuity)
+               && header.droppedFramesBefore == 0, "loss was attributed to an earlier queued packet")
+        _ = try orderedDecoder.append(bytes + payload)
+    }
+    offerOrdered(65)
+    deliveryQueue.sync {}
+    let recoveredBytes = try orderedClient.readExactly(64)
+    let recoveredHeader = try RuntimePCMFrameCodec.decodeHeader(recoveredBytes)
+    let recoveredPayload = try orderedClient.readExactly(Int(recoveredHeader.payloadByteCount))
+    expect(recoveredHeader.sequence == 65 && recoveredHeader.flags.contains(.discontinuity)
+           && recoveredHeader.droppedFramesBefore == 24,
+           "first accepted packet after loss must include local and upstream drops")
+    _ = try orderedDecoder.append(recoveredBytes + recoveredPayload)
+
     let pressurePath = directory.appendingPathComponent("pressure.sock").path
     let pressurePlane = RuntimeDataPlane(path: pressurePath, streamID: UUID(), maximumSubscribers: 1)
     try pressurePlane.start()

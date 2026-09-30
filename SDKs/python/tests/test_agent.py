@@ -119,6 +119,58 @@ class AgentCLIAndDiagnosticsTests(unittest.TestCase):
 
 
 class AgentPlaybackLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_interruption_aborts_blocked_write_and_recreates_output(self):
+        started = asyncio.Event()
+
+        class Output:
+            info = SimpleNamespace(id="output", destination_id="virtual")
+            metrics = SimpleNamespace(frames_rendered=0)
+
+            def __init__(self, blocked):
+                self.blocked = blocked
+                self.closed = False
+                self.writes = []
+
+            async def write(self, value):
+                if self.blocked:
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        await self.aclose(drain=False)
+                        raise
+                self.writes.append(bytes(value))
+
+            async def flush(self):
+                raise AssertionError("flush cannot overtake a blocked write")
+
+            async def aclose(self, *, drain):
+                self.closed = True
+
+        class Client:
+            def __init__(self):
+                self.outputs = []
+
+            async def playback(self, *, destination, format):
+                output = Output(blocked=not self.outputs)
+                self.outputs.append(output)
+                return output
+
+        client = Client()
+        player = RuntimeResponsePlayer(client, "virtual", debug=False)
+        event = ProviderEvent("gemini", "audio", audio=b"\1\2" * 1_200,
+                              audio_format=AudioFormat.gemini_live_output())
+        await player.write(event)
+        await asyncio.wait_for(started.wait(), 1.0)
+        await asyncio.wait_for(player.interrupt_response(), 0.2)
+        self.assertTrue(client.outputs[0].closed)
+        self.assertFalse(client.outputs[0].writes)
+        await player.write(event)
+        await asyncio.wait_for(player.close(), 1.0)
+        self.assertEqual(len(client.outputs), 2)
+        self.assertEqual(client.outputs[1].writes, [event.audio])
+        self.assertIsNone(player._failure)
+
     async def test_gemini_lifecycle_is_edge_triggered_and_privacy_safe(self):
         class Session:
             def __init__(self):
@@ -197,7 +249,7 @@ class AgentPlaybackLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await player.write(ProviderEvent(
             "gemini", "audio", audio=b"\1\2" * 1_200,
             audio_format=AudioFormat.gemini_live_output()))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(player._queue.join(), 1.0)
         await player.interrupt_response()
         for _ in range(20):
             if client.output.flushes:

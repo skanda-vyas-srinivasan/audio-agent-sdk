@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -134,15 +135,22 @@ class FakeRuntime:
         header = PCM_HEADER.pack(PCM_MAGIC, 2, FLAG_DISCONTINUITY, 64, len(payload),
             self.stream_id.bytes, 0, 0, 16000, 160, 1, 1, 7)
         packet = header + payload
-        for index in range(0, len(packet), 7):
-            writer.write(packet[index:index + 7])
+        try:
+            for index in range(0, len(packet), 7):
+                writer.write(packet[index:index + 7])
+                await writer.drain()
+            eos = PCM_HEADER.pack(PCM_MAGIC, 2, FLAG_EOS, 64, 0, self.stream_id.bytes,
+                                  1, 10_000_000, 0, 0, 0, 1, 0)
+            writer.write(eos)
             await writer.drain()
-        eos = PCM_HEADER.pack(PCM_MAGIC, 2, FLAG_EOS, 64, 0, self.stream_id.bytes,
-                              1, 10_000_000, 0, 0, 0, 1, 0)
-        writer.write(eos)
-        await writer.drain()
-        writer.close()
-        await writer.wait_closed()
+        except (ConnectionError, OSError):
+            pass  # A rejected late attachment closes while the fake is sending.
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
 
     async def _events(self, reader, writer):
         event = {"protocol_version": 2, "event_id": "event-1", "type": "runtime_warning",
@@ -160,6 +168,38 @@ class FakeRuntime:
 
 
 class SDKTests(unittest.IsolatedAsyncioTestCase):
+    async def test_late_capture_and_event_attachments_reject_old_connection(self):
+        for resource_type in (CaptureSession, EventSubscription):
+            with self.subTest(resource_type=resource_type.__name__):
+                client = Sonexis(self.runtime.control_path)
+                await client.connect()
+                entered, release = asyncio.Event(), asyncio.Event()
+                original = resource_type._open
+                opened = []
+
+                async def delayed_open(resource):
+                    entered.set()
+                    await release.wait()
+                    await original(resource)
+                    opened.append(resource)
+
+                with patch.object(resource_type, "_open", delayed_open):
+                    creation = asyncio.create_task(
+                        client.capture("app.test") if resource_type is CaptureSession
+                        else client.events())
+                    await asyncio.wait_for(entered.wait(), 1.0)
+                    await client.close()
+                    await client.connect()
+                    release.set()
+                    with self.assertRaises(SonexisConnectionError):
+                        await creation
+                self.assertTrue(opened[0]._closed)
+                self.assertIsNone(opened[0]._writer)
+                self.assertFalse(client._captures or client._events)
+                self.assertIsNotNone(client.handshake)
+                await client.status()
+                await client.close()
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.runtime = FakeRuntime(self.temp.name)
@@ -238,6 +278,51 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
                 await request
             await asyncio.sleep(0.03)
             self.assertEqual((await client.sources())[0].id, "app.test")
+
+    async def test_request_deadline_ignores_late_read_only_response(self):
+        async with Sonexis(self.runtime.control_path, request_timeout=0.01) as client:
+            with self.assertRaises(SonexisConnectionError) as caught:
+                await client._request("ping")
+            self.assertEqual(caught.exception.code, "request_timeout")
+            await asyncio.sleep(0.03)
+            self.assertFalse(client._pending)
+            self.assertEqual((await client.sources())[0].id, "app.test")
+
+    async def test_timed_out_mutation_reconciles_its_owner(self):
+        self.runtime.delay_start_capture = 0.05
+        client = Sonexis(self.runtime.control_path, request_timeout=0.01)
+        await client.connect()
+        with self.assertRaises(SonexisConnectionError) as caught:
+            await client.capture("app.test")
+        self.assertEqual(caught.exception.code, "request_timeout")
+        await client.close()
+        self.assertIsNone(client.handshake)
+        self.assertFalse(client._pending or client._captures)
+
+    def test_request_deadline_rejects_invalid_configuration(self):
+        for value in (0, -1, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                Sonexis(request_timeout=value)
+
+    async def test_source_wait_deadline_includes_stalled_lookup(self):
+        client = Sonexis()
+        cancelled = asyncio.Event()
+
+        async def stalled_lookup(_selector):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        with patch.object(client, "get_source", stalled_lookup):
+            with self.assertRaises(SonexisError) as caught:
+                await asyncio.wait_for(client.wait_for_source("app.test", timeout=0.01), 0.2)
+        self.assertEqual(caught.exception.code, "source_wait_timeout")
+        self.assertTrue(cancelled.is_set())
+
+    async def test_zero_source_wait_performs_one_snapshot(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            self.assertEqual((await client.wait_for_source("app.test", timeout=0)).id, "app.test")
 
     async def test_cancelled_mutating_request_closes_owner_connection(self):
         self.runtime.delay_start_capture = 0.05

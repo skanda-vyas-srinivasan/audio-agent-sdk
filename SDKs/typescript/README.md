@@ -62,6 +62,11 @@ here and in the [API inventory](../../docs/runtime-api-stability.md).
 
 ## Source selection
 
+Positive source/destination wait timeouts cover in-flight discovery lookups as
+well as polling. Abort signals release a wait during a lookup. For compatibility,
+`timeoutMs: 0` performs one snapshot lookup under the normal control-request
+deadline and raises a wait-timeout error if no match exists.
+
 `getSource()` resolves only unambiguous exact selectors. It tries source ID, bundle identifier,
 exact application name, and then an exact case-insensitive application name. A numeric selector is
 a PID. It raises `SourceNotFoundError` or `AmbiguousSourceError`; it never guesses between two

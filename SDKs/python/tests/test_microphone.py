@@ -135,6 +135,31 @@ class SourceResolutionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MicrophonePassthroughTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_during_opening_cannot_resurrect_passthrough(self):
+        capture = FakeCapture(block=True)
+        client = FakeClient(microphone(), destination(), capture)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_capture(source, *, format):
+            entered.set()
+            await release.wait()
+            return capture
+
+        client.capture = delayed_capture
+        passthrough = MicrophonePassthrough(
+            client, input_source=None, output_destination="virtual_input",
+            format=FORMAT, target_buffer_milliseconds=60)
+        opening = asyncio.create_task(passthrough.__aenter__())
+        await asyncio.wait_for(entered.wait(), 1.0)
+        closing = asyncio.create_task(passthrough.aclose())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(opening, closing)
+        self.assertEqual(passthrough._state, "closed")
+        self.assertTrue(capture.closed)
+        self.assertTrue(client.output.closed)
+        self.assertIsNone(passthrough._pump_task)
+
     async def test_forwards_frames_and_discontinuities(self):
         frames = [
             AudioFrame("stream", 0, 10, 2, FORMAT, b"\x00\x01\x02\x03"),

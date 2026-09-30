@@ -40,6 +40,14 @@ tar -tzf "$PYTHON_SDIST" | grep -E '/LICENSE$' >/dev/null
 "$TEST_DIR/python-wheel-env/bin/python" -m pip install --no-deps "$PYTHON_WHEEL" >/dev/null
 env -u PYTHONPATH "$TEST_DIR/python-wheel-env/bin/python" -c \
     "import audioplane, audioplane.agent, audioplane.providers, importlib.metadata, sonexis, sonexis.mcp_server; assert audioplane.__version__ == '$VERSION'; assert audioplane.AudioPlane is sonexis.Sonexis; assert importlib.metadata.version('audioplane') == '$VERSION'; assert 'python-wheel-env' in sonexis.__file__"
+"$TEST_DIR/python-wheel-env/bin/python" - <<'PY'
+from importlib.metadata import requires
+from pip._vendor.packaging.requirements import Requirement
+requirements = [Requirement(item) for item in requires("audioplane") or []]
+for extra in ("gemini", "ai"):
+    assert any(item.name == "webrtcvad-wheels" and item.marker.evaluate({"extra": extra})
+               for item in requirements), "speech VAD dependency missing from " + extra
+PY
 "$TEST_DIR/python-wheel-env/bin/audioplane" version | grep -F "AudioPlane $VERSION" >/dev/null
 "$TEST_DIR/python-wheel-env/bin/audioplane" agent --help >/dev/null
 test -x "$TEST_DIR/python-wheel-env/bin/audioplane-mcp"

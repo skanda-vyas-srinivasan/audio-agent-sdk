@@ -30,6 +30,8 @@ public final class RuntimeDataPlane: @unchecked Sendable {
     private var slowDisconnects: UInt64 = 0
     private var transmittedBytes: UInt64 = 0
     private var pendingDroppedFrames: UInt64 = 0
+    // Only the delivery queue owns losses discovered after admission.
+    private var deliveryDroppedFrames: UInt64 = 0
     private var lastSequence: UInt64 = 0
     private var lastTimestamp: UInt64 = 0
 
@@ -63,14 +65,19 @@ public final class RuntimeDataPlane: @unchecked Sendable {
     /// subscriber whose nonblocking socket cannot accept a complete packet is
     /// disconnected, preserving framing for every remaining subscriber.
     public func offer(_ frame: RuntimeBackendAudioFrame) {
+        // Admission, loss attribution, and submission share one ordering lock.
+        // An older queued packet must never consume a later rejected packet's loss.
+        metricsLock.lock()
         guard capacity.wait(timeout: .now()) == .success else {
-            recordQueueDrop(frame.frameCount)
+            queueDropped &+= UInt64(frame.frameCount)
+            pendingDroppedFrames &+= UInt64(frame.frameCount) &+ UInt64(frame.droppedFramesBefore)
+            metricsLock.unlock()
             return
         }
-        metricsLock.lock()
+        let admissionDrops = pendingDroppedFrames
+        pendingDroppedFrames = 0
         queuedPackets += 1
         queueHighWater = max(queueHighWater, queuedPackets)
-        metricsLock.unlock()
         queue.async { [weak self] in
             defer {
                 self?.metricsLock.lock()
@@ -82,16 +89,21 @@ public final class RuntimeDataPlane: @unchecked Sendable {
             self.clients = self.clients.filter { !$0.value.isPeerClosed() }
             guard !self.clients.isEmpty else {
                 self.recordNoSubscriber(frame.frameCount)
+                self.deliveryDroppedFrames &+= admissionDrops &+ UInt64(frame.frameCount)
+                    &+ UInt64(frame.droppedFramesBefore)
                 return
             }
 
-            let pendingDrops = self.takePendingDrops()
+            let pendingDrops = admissionDrops &+ self.deliveryDroppedFrames
+            self.deliveryDroppedFrames = 0
             var flags: RuntimePCMFrameFlags = frame.discontinuity || pendingDrops > 0 ? [.discontinuity] : []
             let totalDropped = UInt64(frame.droppedFramesBefore) &+ pendingDrops
             if totalDropped > 0 { flags.insert(.discontinuity) }
             do {
                 guard frame.payload.count <= Int(UInt32.max) else {
                     self.recordQueueDrop(frame.frameCount)
+                    self.deliveryDroppedFrames &+= pendingDrops &+ UInt64(frame.frameCount)
+                        &+ UInt64(frame.droppedFramesBefore)
                     return
                 }
                 let header = RuntimePCMFrameHeader(flags: flags,
@@ -120,17 +132,18 @@ public final class RuntimeDataPlane: @unchecked Sendable {
                     self.transmittedBytes &+= UInt64(encoded.count * successfulWrites)
                 } else {
                     self.noSubscriber &+= UInt64(frame.frameCount)
-                    self.pendingDroppedFrames &+= pendingDrops &+ UInt64(frame.frameCount)
+                    self.deliveryDroppedFrames &+= totalDropped &+ UInt64(frame.frameCount)
                 }
                 self.metricsLock.unlock()
                 if !dead.isEmpty { self.warningHandler(dead.count) }
                 self.lastSequence = frame.sequence
                 self.lastTimestamp = frame.timestampNanoseconds
             } catch {
-                self.restorePendingDrops(pendingDrops &+ UInt64(frame.frameCount))
-                self.recordQueueDrop(frame.frameCount, addToPending: false)
+                self.deliveryDroppedFrames &+= totalDropped &+ UInt64(frame.frameCount)
+                self.recordQueueDrop(frame.frameCount)
             }
         }
+        metricsLock.unlock()
     }
 
     public func stop() {
@@ -162,31 +175,15 @@ public final class RuntimeDataPlane: @unchecked Sendable {
             connectedClients: clientCount, queueHighWaterMark: counters.5)
     }
 
-    private func recordQueueDrop(_ frames: UInt32, addToPending: Bool = true) {
+    private func recordQueueDrop(_ frames: UInt32) {
         metricsLock.lock()
         queueDropped &+= UInt64(frames)
-        if addToPending { pendingDroppedFrames &+= UInt64(frames) }
         metricsLock.unlock()
     }
 
     private func recordNoSubscriber(_ frames: UInt32) {
         metricsLock.lock()
         noSubscriber &+= UInt64(frames)
-        pendingDroppedFrames &+= UInt64(frames)
-        metricsLock.unlock()
-    }
-
-    private func takePendingDrops() -> UInt64 {
-        metricsLock.lock()
-        let value = pendingDroppedFrames
-        pendingDroppedFrames = 0
-        metricsLock.unlock()
-        return value
-    }
-
-    private func restorePendingDrops(_ frames: UInt64) {
-        metricsLock.lock()
-        pendingDroppedFrames &+= frames
         metricsLock.unlock()
     }
 }

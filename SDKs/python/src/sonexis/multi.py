@@ -81,6 +81,7 @@ class MultiSourceSession:
         self._captures: Dict[str, CaptureSession] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
         self._pending_labels: Set[str] = set()
+        self._removals: Dict[str, asyncio.Task] = {}
         self._closed = False
         self._iterator_active = False
         self._close_task: Optional[asyncio.Task] = None
@@ -125,17 +126,35 @@ class MultiSourceSession:
             self._pending_labels.discard(label)
 
     async def remove(self, label: str) -> None:
-        capture = self._captures.pop(label, None)
-        task = self._tasks.pop(label, None)
+        removal = self._removals.get(label)
+        if removal is None:
+            capture = self._captures.get(label)
+            if capture is None:
+                return
+            # Reserve the label until its old pump and all queue state are gone.
+            self._pending_labels.add(label)
+            self._captures.pop(label)
+            task = self._tasks.pop(label, None)
+            removal = asyncio.create_task(
+                self._finish_remove(label, capture, task), name=f"sonexis-remove-{label}")
+            self._removals[label] = removal
+        await asyncio.shield(removal)
+
+    async def _finish_remove(self, label: str, capture: CaptureSession,
+                             task: Optional[asyncio.Task]) -> None:
         if task is not None:
             task.cancel()
-        if capture is not None:
+        try:
             await capture.aclose()
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
-        self._queues.pop(label, None)
-        self._pending_drops.pop(label, None)
-        self._terminals.pop(label, None)
+        finally:
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            self._queues.pop(label, None)
+            self._pending_drops.pop(label, None)
+            self._terminals.pop(label, None)
+            self._removals.pop(label, None)
+            self._pending_labels.discard(label)
+            self._available.set()
 
     async def _pump(self, label: str, capture: CaptureSession) -> None:
         error: Optional[BaseException] = None
@@ -168,9 +187,10 @@ class MultiSourceSession:
         except BaseException as caught:
             error = caught
         finally:
-            if error is not None and not self.fail_fast:
-                self._errors_by_label[label] = error
-            self._terminals[label] = _StreamEnded(label, error)
+            if self._captures.get(label) is capture:
+                if error is not None and not self.fail_fast:
+                    self._errors_by_label[label] = error
+                self._terminals[label] = _StreamEnded(label, error)
             self._available.set()
 
     async def frames(self) -> AsyncIterator[LabeledAudioFrame]:
@@ -218,5 +238,5 @@ class MultiSourceSession:
 
     async def _finish_close(self) -> None:
         labels = list(self._captures)
-        for label in labels:
-            await self.remove(label)
+        await asyncio.gather(*(self.remove(label) for label in labels),
+                             *list(self._removals.values()))

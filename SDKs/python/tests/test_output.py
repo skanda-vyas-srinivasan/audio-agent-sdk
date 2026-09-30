@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -150,7 +151,11 @@ class FakeOutputRuntime:
                 except asyncio.IncompleteReadError:
                     break
                 values = PCM_HEADER.unpack(raw)
-                payload = await reader.readexactly(values[4])
+                try:
+                    payload = await reader.readexactly(values[4])
+                except asyncio.IncompleteReadError:
+                    # Immediate output cancellation may abort a partial packet.
+                    break
                 self.packets[index].append((values, payload))
                 if values[2] & FLAG_EOS:
                     break
@@ -224,6 +229,76 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.commands.count("stop_output"), 0)
         self.assertGreaterEqual(self.runtime.commands.count("output_status"), 1)
 
+    async def test_graceful_close_finishes_active_write_but_rejects_waiting_writes(self):
+        payload = b"\x12\x34" * 9_600
+        async with Sonexis(self.runtime.control_path) as client:
+            output = await client.playback()
+            writer = output._writer
+            original_drain = writer.drain
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def pause_first_packet():
+                if not entered.is_set():
+                    entered.set()
+                    await release.wait()
+                await original_drain()
+
+            with patch.object(writer, "drain", pause_first_packet):
+                writing = asyncio.create_task(output.write(payload))
+                await asyncio.wait_for(entered.wait(), 1.0)
+                queued = asyncio.create_task(output.write(b"\0\0" * 240))
+                await asyncio.sleep(0)  # Queued write is waiting for the active operation.
+                closing = asyncio.create_task(output.aclose())
+                try:
+                    await asyncio.sleep(0)
+                    self.assertTrue(output.closed)
+                    self.assertFalse(closing.done())
+                    with self.assertRaises(SonexisError) as rejected:
+                        await output.write(b"\0\0" * 240)
+                    self.assertEqual(rejected.exception.code, "output_closed")
+                    release.set()
+                    results = await asyncio.wait_for(asyncio.gather(
+                        writing, queued, closing, return_exceptions=True), 1.0)
+                finally:
+                    release.set()
+                    await output.cancel()
+                    await asyncio.gather(writing, queued, closing, return_exceptions=True)
+            self.assertIsNone(results[0], "Graceful close truncated the active write")
+            self.assertIsInstance(results[1], SonexisError)
+            self.assertEqual(results[1].code, "output_closed")
+            self.assertIsNone(results[2])
+
+        await asyncio.wait_for(self.runtime.stream_closed[0].wait(), 1.0)
+        packets = self.runtime.packets[0]
+        self.assertEqual(b"".join(packet[1] for packet in packets), payload)
+        self.assertEqual([packet[0][9] for packet in packets], [4_800, 4_800, 0])
+        self.assertEqual([packet[0][6] for packet in packets], [0, 1, 2])
+        self.assertEqual([packet[0][7] for packet in packets],
+                         [0, 200_000_000, 400_000_000])
+        self.assertTrue(packets[-1][0][2] & FLAG_EOS)
+
+    async def test_destination_wait_deadline_includes_stalled_lookup(self):
+        client = Sonexis()
+        cancelled = asyncio.Event()
+
+        async def stalled_lookup(_selector, *, kind):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        with patch.object(client, "get_output_destination", stalled_lookup):
+            with self.assertRaises(OutputDestinationNotFoundError) as caught:
+                await asyncio.wait_for(client.wait_for_output_destination(
+                    "default", timeout=0.01), 0.2)
+        self.assertEqual(caught.exception.code, "output_destination_wait_timeout")
+        self.assertTrue(cancelled.is_set())
+
+    async def test_zero_destination_wait_performs_one_snapshot(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            destination = await client.wait_for_output_destination("default", timeout=0)
+            self.assertEqual(destination.id, "default")
+
     async def test_drain_surfaces_runtime_output_failure(self):
         self.runtime.status_state = "failed"
         async with Sonexis(self.runtime.control_path) as client:
@@ -232,6 +307,178 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
                 await output.aclose()
             self.assertEqual(caught.exception.code, "output_device_change_failed")
             self.assertTrue(caught.exception.retryable)
+
+    async def test_large_write_redistributes_submillisecond_tail(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            output = await client.playback(format=AudioFormat.openai_realtime())
+            payload = bytes(range(256)) * 37 + b"\x01\x02" * 65
+            self.assertEqual(len(payload), 4_801 * 2)
+            await output.write(payload)
+            await output.aclose()
+        await asyncio.wait_for(self.runtime.stream_closed[0].wait(), 1.0)
+        packets = self.runtime.packets[0][:-1]
+        self.assertTrue(all(24 <= header[9] <= 4_800 for header, _ in packets))
+        self.assertEqual(b"".join(data for _, data in packets), payload)
+        self.assertEqual(packets[1][0][7], packets[0][0][9] * 1_000_000_000 // 24_000)
+
+    async def test_cancel_escalates_close_blocked_sending_eos(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            output = await client.playback()
+            writer = output._writer
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def stalled_drain():
+                entered.set()
+                await release.wait()
+
+            with patch.object(writer, "drain", stalled_drain):
+                closing = asyncio.create_task(output.aclose())
+                await asyncio.wait_for(entered.wait(), 1.0)
+                try:
+                    await asyncio.wait_for(output.cancel(), 0.2)
+                    self.assertTrue(writer.is_closing())
+                    self.assertIn("stop_output", self.runtime.commands)
+                finally:
+                    release.set()
+                    await closing
+
+    async def test_cancel_escalates_graceful_close_waiting_for_active_write(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            output = await client.playback()
+            writer = output._writer
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def stalled_drain():
+                entered.set()
+                await release.wait()
+
+            with patch.object(writer, "drain", stalled_drain):
+                writing = asyncio.create_task(output.write(b"\0\0" * 9_600))
+                await asyncio.wait_for(entered.wait(), 1.0)
+                closing = asyncio.create_task(output.aclose())
+                try:
+                    await asyncio.sleep(0)
+                    await asyncio.wait_for(output.cancel(), 0.2)
+                    self.assertTrue(writer.is_closing())
+                    self.assertIn("stop_output", self.runtime.commands)
+                    release.set()
+                    with self.assertRaises(SonexisError) as interrupted:
+                        await asyncio.wait_for(writing, 0.2)
+                    self.assertEqual(interrupted.exception.code, "output_closed")
+                    self.assertEqual(output._sequence, 1)
+                finally:
+                    release.set()
+                    await output.cancel()
+                    await asyncio.gather(writing, closing, return_exceptions=True)
+        await asyncio.wait_for(self.runtime.stream_closed[0].wait(), 1.0)
+        self.assertFalse(any(packet[0][2] & FLAG_EOS for packet in self.runtime.packets[0]))
+
+    async def test_graceful_close_deadline_interrupts_active_write(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            output = await client.playback()
+            writer = output._writer
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def stalled_drain():
+                entered.set()
+                await release.wait()
+
+            with patch.object(writer, "drain", stalled_drain), patch.object(
+                    output, "_DRAIN_TIMEOUT_SECONDS", 0.02):
+                writing = asyncio.create_task(output.write(b"\0\0" * 9_600))
+                await asyncio.wait_for(entered.wait(), 1.0)
+                try:
+                    await asyncio.wait_for(output.aclose(), 0.2)
+                    self.assertTrue(writer.is_closing())
+                    self.assertIn("stop_output", self.runtime.commands)
+                    release.set()
+                    with self.assertRaises(SonexisError) as interrupted:
+                        await asyncio.wait_for(writing, 0.2)
+                    self.assertEqual(interrupted.exception.code, "output_closed")
+                    self.assertEqual(output._sequence, 1)
+                finally:
+                    release.set()
+                    await output.cancel()
+                    await asyncio.gather(writing, return_exceptions=True)
+        await asyncio.wait_for(self.runtime.stream_closed[0].wait(), 1.0)
+        self.assertFalse(any(packet[0][2] & FLAG_EOS for packet in self.runtime.packets[0]))
+
+    async def test_cancel_aborts_actual_socket_backpressure(self):
+        release = asyncio.Event()
+        original_stream = self.runtime._stream
+
+        async def stalled_consumer(index, reader, writer):
+            await release.wait()
+            await original_stream(index, reader, writer)
+
+        with patch.object(self.runtime, "_stream", stalled_consumer):
+            async with Sonexis(self.runtime.control_path) as client:
+                output = await client.playback()
+                writer = output._writer
+                writing = asyncio.create_task(output.write(b"\0\0" * 24_000 * 100))
+
+                async def wait_for_backpressure():
+                    _, high = writer.transport.get_write_buffer_limits()
+                    while writer.transport.get_write_buffer_size() <= high:
+                        if writing.done():
+                            self.fail("write did not encounter socket backpressure")
+                        await asyncio.sleep(0)
+
+                try:
+                    await asyncio.wait_for(wait_for_backpressure(), 1.0)
+                    await asyncio.wait_for(output.cancel(), 0.2)
+                    await asyncio.wait_for(writer.wait_closed(), 0.2)
+                    result = await asyncio.wait_for(
+                        asyncio.gather(writing, return_exceptions=True), 1.0)
+                    self.assertIsInstance(result[0], SonexisError)
+                    self.assertEqual(writer.transport.get_write_buffer_size(), 0)
+                finally:
+                    release.set()
+                    await output.cancel()
+                    await asyncio.gather(writing, return_exceptions=True)
+        await asyncio.wait_for(self.runtime.stream_closed[0].wait(), 1.0)
+
+    async def test_complete_drain_deadline_includes_stalled_status_request(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            output = await client.playback()
+            entered = asyncio.Event()
+
+            async def stalled_status(_session_id):
+                entered.set()
+                await asyncio.Event().wait()
+
+            with patch.object(client, "output_status", stalled_status), patch.object(
+                    output, "_DRAIN_TIMEOUT_SECONDS", 0.02):
+                await asyncio.wait_for(output.aclose(), 0.2)
+            self.assertTrue(entered.is_set())
+            self.assertIn("stop_output", self.runtime.commands)
+            self.assertIsNone(output._writer)
+
+
+    async def test_output_attachment_cannot_publish_after_client_close(self):
+        client = Sonexis(self.runtime.control_path)
+        await client.connect()
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = AudioOutput._open
+        opened = []
+
+        async def delayed_open(output):
+            entered.set()
+            await release.wait()
+            await original(output)
+            opened.append(output)
+
+        with patch.object(AudioOutput, "_open", delayed_open):
+            creation = asyncio.create_task(client.playback())
+            await asyncio.wait_for(entered.wait(), 1.0)
+            await client.close()
+            release.set()
+            with self.assertRaises(SonexisConnectionError):
+                await creation
+        self.assertTrue(opened[0].closed)
+        self.assertIsNone(opened[0]._writer)
+        self.assertFalse(client._outputs)
 
     async def test_explicit_timestamp_offsets_only_within_write(self):
         async with Sonexis(self.runtime.control_path) as client:
@@ -261,6 +508,29 @@ class OutputSDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_header[6], 0)
         self.assertEqual(uuid.UUID(bytes=second_header[5]), self.runtime.stream_ids[1])
         self.assertEqual(self.runtime.commands.count("flush_output"), 1)
+
+    async def test_cancel_during_flush_rejects_late_replacement_socket(self):
+        async with Sonexis(self.runtime.control_path) as client:
+            output = await client.playback()
+            original = client._flush_output
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def delayed_response(session_id):
+                info = await original(session_id)
+                entered.set()
+                await release.wait()
+                return info
+
+            with patch.object(client, "_flush_output", delayed_response):
+                flushing = asyncio.create_task(output.flush())
+                await asyncio.wait_for(entered.wait(), 1.0)
+                await asyncio.wait_for(output.cancel(), 0.2)
+                release.set()
+                with self.assertRaises(SonexisError) as caught:
+                    await flushing
+                self.assertEqual(caught.exception.code, "output_closed")
+            self.assertIsNone(output._writer)
+            self.assertFalse(client._outputs)
 
     async def test_cancelling_delayed_flush_closes_owner_without_deadlock(self):
         client = Sonexis(self.runtime.control_path)

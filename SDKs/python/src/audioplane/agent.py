@@ -14,7 +14,7 @@ import wave
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable, Deque, Dict, List, Optional
+from typing import AsyncIterator, Awaitable, Callable, Deque, Dict, List, Optional, Set
 
 from sonexis import (
     AudioFormat,
@@ -536,6 +536,7 @@ class _QueuedProviderAudio:
     finish_response: bool = False
     interrupt_response: bool = False
     epoch: int = 0
+    cleanup: Optional[asyncio.Task] = None
 
 
 class RuntimeResponsePlayer:
@@ -580,6 +581,8 @@ class RuntimeResponsePlayer:
         self._playback_cursor: Optional[float] = None
         self._response_epoch = 0
         self._output_started_epoch: Optional[int] = None
+        self._active_write: Optional[asyncio.Task] = None
+        self._discard_tasks: Set[asyncio.Task] = set()
         self._pending_bytes = 0
         self._queue: "asyncio.Queue[Optional[_QueuedProviderAudio]]" = (
             asyncio.Queue(maxsize=max_pending_chunks))
@@ -637,6 +640,8 @@ class RuntimeResponsePlayer:
 
     async def interrupt_response(self) -> None:
         """Discard queued/generated speech after a provider barge-in event."""
+        if self._closed:
+            raise RuntimeError("provider response playback is closed")
         if self._format is None:
             return
         self._response_epoch += 1
@@ -648,9 +653,33 @@ class RuntimeResponsePlayer:
             if item is not None:
                 self._pending_bytes -= len(item.data)
             self._queue.task_done()
+        cleanup = None
+        writing = self._active_write
+        if writing is not None and not writing.done():
+            # A flush cannot acquire the SDK's operation lock behind this write.
+            # Cancellation ends its uncertain stream epoch; reopen on new audio.
+            output, self._output = self._output, None
+            writing.cancel()
+            cleanup = asyncio.create_task(self._discard_output(output, writing))
+            self._discard_tasks.add(cleanup)
+            cleanup.add_done_callback(self._discard_finished)
         await self._enqueue(_QueuedProviderAudio(
             "provider", b"", self._format, interrupt_response=True,
-            epoch=self._response_epoch))
+            epoch=self._response_epoch, cleanup=cleanup))
+        if cleanup is not None:
+            await asyncio.shield(cleanup)
+
+    async def _discard_output(self, output, writing: asyncio.Task) -> None:
+        try:
+            if output is not None:
+                await output.aclose(drain=False)
+        finally:
+            await asyncio.gather(writing, return_exceptions=True)
+
+    def _discard_finished(self, task: asyncio.Task) -> None:
+        self._discard_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     async def _enqueue(self, item: _QueuedProviderAudio) -> None:
         if self._closed:
@@ -709,7 +738,19 @@ class RuntimeResponsePlayer:
                 self._playback_cursor = now
         if epoch != self._response_epoch:
             return False
-        await self._output.write(data)
+        writing = asyncio.create_task(self._output.write(data))
+        self._active_write = writing
+        try:
+            await writing
+        except asyncio.CancelledError:
+            if epoch != self._response_epoch and not self._closed:
+                return False
+            raise
+        finally:
+            if self._active_write is writing:
+                self._active_write = None
+        if epoch != self._response_epoch:
+            return False
         self._playback_cursor += duration
         if self._output_started_epoch != epoch:
             self._output_started_epoch = epoch
@@ -770,7 +811,9 @@ class RuntimeResponsePlayer:
                         pending.clear()
                         self._playback_cursor = None
                         self._output_started_epoch = None
-                        if self._output is not None:
+                        if item.cleanup is not None:
+                            await asyncio.shield(item.cleanup)
+                        elif self._output is not None:
                             await self._output.flush()
                         self._lifecycle("output_flushed", epoch=item.epoch)
                         continue
@@ -823,6 +866,7 @@ class RuntimeResponsePlayer:
                 self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
         output, self._output = self._output, None
+        await asyncio.gather(*tuple(self._discard_tasks), return_exceptions=True)
         if output is not None:
             await output.aclose(drain=drain)
             if self._debug:

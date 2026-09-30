@@ -14,6 +14,7 @@ import {
   AudioOutputDestination,
   CaptureStream,
   DuplexSession,
+  EventStream,
   MicrophonePassthrough,
   encodeOutputFrame,
   OutputInfo,
@@ -92,7 +93,23 @@ interface FakeRuntimeOptions {
   malformedSession?: boolean;
   startError?: boolean;
   pauseData?: boolean;
+  pauseStatus?: boolean;
 }
+
+test("destination waits bound active lookups and respond to abort during lookup", async () => {
+  const client = new Sonexis("/unused");
+  client.outputDestinations = async () => new Promise(() => undefined);
+  await assert.rejects(within(client.waitForOutputDestination("default", { timeoutMs: 10 }), 200),
+    (error: unknown) => error instanceof SonexisError && error.code === "output_destination_wait_timeout");
+  const controller = new AbortController();
+  const waiting = client.waitForOutputDestination("default", { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(within(waiting, 200), (error: unknown) =>
+    error instanceof SonexisError && error.code === "cancelled");
+  client.outputDestinations = async () => [{ id: "default", name: "Default", kind: "playback",
+    is_available: true, is_default: true, follows_system_default: true, supported_formats: [] }];
+  assert.equal((await client.waitForOutputDestination("default", { timeoutMs: 0 })).id, "default");
+});
 
 class FakeOutputRuntime {
   readonly controlPath: string;
@@ -203,7 +220,18 @@ class FakeOutputRuntime {
             response.error = { code: "unsupported_format", message: "bad format", retryable: false };
           } else response.output_session = this.outputSession();
         } else if (command === "output_status") {
+          if (this.options.pauseStatus) continue;
           response.output_session = this.outputSession();
+        } else if (command === "list_sources") {
+          response.sources = [{ id: "app.test", kind: "application", name: "Test",
+            process_ids: [1], process_state: "running", is_available: true }];
+        } else if (command === "start_capture") {
+          response.session = { id: "capture-session", stream_id: this.streamIds[0],
+            source_id: "app.test", state: "capturing", format: AudioFormats.speech16k(),
+            data_socket_path: this.streamPaths[0], started_at_nanoseconds: 0, metrics: {} };
+        } else if (command === "subscribe_events") {
+          response.subscription = { id: "subscription", event_socket_path: this.streamPaths[0],
+            event_types: [] };
         } else if (command === "flush_output") {
           this.epoch = 1;
           this.state = "ready";
@@ -322,6 +350,56 @@ test("splits writes at 200 ms with ordered timestamps and sends one EOS", async 
   await client.close();
 });
 
+test("graceful close finishes the active write and rejects waiting and new writes", async (context) => {
+  const runtime = await startRuntime(context);
+  const client = await Sonexis.connect(runtime.controlPath);
+  context.after(() => client.close());
+  const output = await client.playback();
+  const socket = (output as unknown as { socket: Socket }).socket;
+  const originalWrite = socket.write;
+  const payload = Buffer.alloc(9_600 * 2, 0x12);
+  let firstPacketOffered = false;
+  socket.write = ((packet: Uint8Array) => {
+    const accepted = originalWrite.call(socket, packet);
+    if (!firstPacketOffered) {
+      firstPacketOffered = true;
+      return false; // Hold the active write between its two PCM packets.
+    }
+    return accepted;
+  }) as typeof socket.write;
+  const writing = output.write(payload);
+  await eventually(() => firstPacketOffered);
+  const queued = output.write(Buffer.alloc(480));
+  const closing = output.close();
+  const results = Promise.allSettled([writing, queued, closing]);
+  try {
+    assert.ok(output.closed);
+    await assert.rejects(output.write(Buffer.alloc(480)), (error: unknown) =>
+      error instanceof SonexisError && error.code === "output_closed");
+    socket.emit("drain");
+    const settled = await within(results, 1000);
+    assert.equal(settled[0].status, "fulfilled");
+    assert.equal(settled[1].status, "rejected");
+    if (settled[1].status === "rejected") {
+      assert.ok(settled[1].reason instanceof SonexisError);
+      assert.equal(settled[1].reason.code, "output_closed");
+    }
+    assert.equal(settled[2].status, "fulfilled");
+    await eventually(() => runtime.packets[0].length === 3);
+    const packets = runtime.packets[0];
+    assert.deepEqual(Buffer.concat(packets.map((packet) => packet.subarray(64))), payload);
+    assert.deepEqual(packets.map((packet) => packet.readUInt32BE(52)), [4_800, 4_800, 0]);
+    assert.deepEqual(packets.map((packet) => packet.readBigUInt64BE(32)), [0n, 1n, 2n]);
+    assert.deepEqual(packets.map((packet) => packet.readBigUInt64BE(40)),
+      [0n, 200_000_000n, 400_000_000n]);
+    assert.equal(packets[2].readUInt16BE(6), 2);
+  } finally {
+    socket.write = originalWrite;
+    await output.cancel();
+    await results;
+  }
+});
+
 test("flush rotates the socket and resets sequence and timestamp epochs", async (context) => {
   const runtime = await startRuntime(context);
   const client = await Sonexis.connect(runtime.controlPath);
@@ -339,6 +417,29 @@ test("flush rotates the socket and resets sequence and timestamp epochs", async 
   await client.close();
 });
 
+test("cancel during flush cannot leave a late replacement socket open", async (context) => {
+  const runtime = await startRuntime(context);
+  const client = await Sonexis.connect(runtime.controlPath);
+  context.after(() => client.close());
+  const output = await client.playback();
+  const original = client.flushOutput.bind(client);
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  client.flushOutput = async (id) => {
+    const info = await original(id); enter(); await gate; return info;
+  };
+  const flushing = output.flush();
+  await entered;
+  await within(output.cancel(), 500);
+  release();
+  await assert.rejects(flushing, (error: unknown) =>
+    error instanceof SonexisError && error.code === "output_closed");
+  await eventually(() => runtime.connections.size === 1);
+  assert.ok(output.closed);
+});
+
 test("cancel sends no EOS and client close cleans up every tracked output", async (context) => {
   const runtime = await startRuntime(context);
   const client = await Sonexis.connect(runtime.controlPath);
@@ -350,6 +451,95 @@ test("cancel sends no EOS and client close cleans up every tracked output", asyn
   await client.playback();
   await client.close();
   assert.equal(runtime.commands.filter((value) => value === "stop_output").length, 3);
+});
+
+test("large writes preserve PCM while redistributing a submillisecond tail", async (context) => {
+  const runtime = await startRuntime(context);
+  const client = await Sonexis.connect(runtime.controlPath);
+  context.after(() => client.close());
+  const output = await client.playback({ format: AudioFormats.openAIRealtime() });
+  const payload = Buffer.alloc(4_801 * 2);
+  for (let index = 0; index < payload.length; index++) payload[index] = index % 256;
+  await output.write(payload);
+  await output.close();
+  await eventually(() => runtime.packets[0].length === 3);
+  const packets = runtime.packets[0].slice(0, -1);
+  assert.ok(packets.every((packet) => packet.readUInt32BE(52) >= 24
+    && packet.readUInt32BE(52) <= 4800));
+  assert.deepEqual(Buffer.concat(packets.map((packet) => packet.subarray(64))), payload);
+  assert.equal(packets[1].readBigUInt64BE(40),
+    BigInt(packets[0].readUInt32BE(52)) * 1_000_000_000n / 24_000n);
+});
+
+test("cancel escalates graceful close stalled sending EOS", async (context) => {
+  const runtime = await startRuntime(context);
+  const client = await Sonexis.connect(runtime.controlPath);
+  context.after(() => client.close());
+  const output = await client.playback();
+  const socket = (output as unknown as { socket: Socket }).socket;
+  let eosOffered = false;
+  socket.write = (() => { eosOffered = true; return false; }) as typeof socket.write;
+  const closing = output.close();
+  await eventually(() => eosOffered);
+  try {
+    await within(output.cancel(), 500);
+    await closing;
+    assert.ok(socket.destroyed);
+    assert.ok(runtime.commands.includes("stop_output"));
+  } finally { socket.destroy(); }
+});
+
+test("complete output drain deadline includes a stalled control request", async (context) => {
+  const runtime = await startRuntime(context, { pauseStatus: true });
+  const client = await Sonexis.connect(runtime.controlPath);
+  context.after(() => client.close());
+  const output = await client.playback();
+  await within(output.close(), 4500);
+  assert.ok(runtime.commands.includes("output_status"));
+  assert.ok(runtime.commands.includes("stop_output"));
+});
+
+test("late attachments cannot publish into a reconnected client", async (context) => {
+  const runtime = await startRuntime(context);
+  const client = await Sonexis.connect(runtime.controlPath);
+  context.after(() => client.close());
+  for (const kind of ["capture", "output", "events"] as const) {
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const captureOpen = CaptureStream.open;
+    const outputOpen = AudioOutput.open;
+    const eventsOpen = EventStream.open;
+    let resource: CaptureStream | AudioOutput | EventStream | undefined;
+    CaptureStream.open = async (...args) => {
+      resource = await captureOpen(...args); enter(); await gate; return resource;
+    };
+    AudioOutput.open = async (...args) => {
+      resource = await outputOpen(...args); enter(); await gate; return resource;
+    };
+    EventStream.open = async (...args) => {
+      resource = await eventsOpen(...args); enter(); await gate; return resource;
+    };
+    const creation = kind === "capture" ? client.capture("app.test")
+      : kind === "output" ? client.playback() : client.events();
+    try {
+      await within(entered, 1000);
+      await client.close();
+      await client.connect();
+      release();
+      await assert.rejects(creation, (error: unknown) =>
+        error instanceof SonexisError && error.code === "disconnected");
+      assert.ok((resource as unknown as { socket: Socket }).socket.destroyed);
+      assert.ok(client.handshake);
+      await client.outputDestinations();
+    } finally {
+      release();
+      CaptureStream.open = captureOpen;
+      AudioOutput.open = outputOpen;
+      EventStream.open = eventsOpen;
+    }
+  }
 });
 
 test("a stalled consumer applies socket backpressure and cancellation unblocks write", async (context) => {
@@ -492,6 +682,48 @@ test("concurrent duplex close callers join the same cleanup", async () => {
   await Promise.all([first, second]);
 });
 
+test("microphone shutdown closes output before joining a backpressured forwarding pump", async () => {
+  const source = { id: "microphone:physical", name: "Microphone", kind: "microphone",
+    process_ids: [], process_state: "running", is_available: true };
+  const destination: AudioOutputDestination = {
+    id: "coreaudio:virtual", name: "Virtual", kind: "virtual_input", is_available: true,
+    is_default: false, follows_system_default: false, active_device_id: "coreaudio:virtual",
+    supported_formats: [AudioFormats.pcm48kMono()],
+  };
+  let start!: () => void;
+  let release!: () => void;
+  let stopInput!: () => void;
+  const started = new Promise<void>((resolve) => { start = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const inputClosed = new Promise<void>((resolve) => { stopInput = resolve; });
+  let outputClosed = false;
+  const input = {
+    close: async () => { stopInput(); },
+    async *[Symbol.asyncIterator]() {
+      yield { data: Buffer.alloc(96), timestampNs: 0n, frameCount: 48,
+        discontinuity: false, droppedFramesBefore: 0 } as AudioFrame;
+      await inputClosed;
+    },
+  } as unknown as CaptureStream;
+  const output = {
+    write: async () => {
+      start(); await gate;
+      throw new SonexisError("output_stream_closed", "cancelled by close");
+    },
+    close: async () => { outputClosed = true; release(); },
+  } as unknown as AudioOutput;
+  const client = { defaultMicrophone: async () => source,
+    getOutputDestination: async () => destination, playback: async () => output,
+    capture: async () => input } as unknown as Sonexis;
+  const passthrough = await MicrophonePassthrough.open(client);
+  await started;
+  try {
+    await within(passthrough.close(), 200);
+    assert.ok(outputClosed);
+    await passthrough.wait();
+  } finally { release(); }
+});
+
 test("microphone passthrough forwards source-aware frames and blocks self-loops", async () => {
   const format = AudioFormats.pcm48kMono();
   const microphone = {
@@ -579,4 +811,13 @@ async function eventually(predicate: () => boolean, timeoutMs = 1000): Promise<v
     if (Date.now() >= deadline) throw new Error("Timed out waiting for fake Runtime");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer!: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("operation did not complete before deadline")), timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
 }

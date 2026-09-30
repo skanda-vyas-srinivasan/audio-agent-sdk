@@ -123,6 +123,13 @@ Use context managers as the canonical ownership boundary:
 Cancellation of a mutating request closes its owning control connection when
 the result is ambiguous, allowing Runtime cleanup to remain authoritative.
 Read-only request cancellation leaves an otherwise healthy connection usable.
+Control requests have a 10-second deadline covering socket backpressure and the
+response wait. Set `AudioPlane(request_timeout=30.0)` to change it. A timeout
+raises `SonexisConnectionError` with code `request_timeout`; timed-out mutating
+requests reconcile ownership by closing the control connection.
+Positive source/destination wait timeouts also cover an in-flight discovery
+lookup. For compatibility, a zero timeout performs one snapshot lookup under
+the normal control-request deadline and raises a wait-timeout error if no match exists.
 
 `capture` accepts a Runtime source ID, bundle identifier, PID passed as a Python
 `int`, exact application name, or `AudioSource`. A numeric string remains a
@@ -167,8 +174,10 @@ applies Unix-socket backpressure; the SDK does not add an unbounded queue.
 Supply `timestamp_ns=` when a producer has a stream-relative presentation
 timestamp. Otherwise the SDK derives continuous timestamps from frames sent.
 
-Normal context-manager exit sends EOS and waits briefly for the Runtime to
-drain. `await output.cancel()` is the barge-in primitive: it closes the stream
+Normal context-manager exit rejects new and waiting writes, finishes the active
+write, then sends EOS and waits for the Runtime to drain. The three-second drain
+deadline includes the active write; expiry discards remaining output.
+`await output.cancel()` can override graceful close immediately: it closes the stream
 without EOS and asks the Runtime to discard buffered playback. `flush()`
 discards queued audio while keeping the logical session, attaches the new
 stream epoch returned by the Runtime, and resets sequence/timestamp state.

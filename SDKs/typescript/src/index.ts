@@ -739,6 +739,7 @@ export class Sonexis extends EventEmitter {
   private socket?: Socket;
   private controlBuffer = Buffer.alloc(0);
   private connectPromise?: Promise<Handshake>;
+  private closePromise?: Promise<void>;
   private connectionGeneration = 0;
   private readonly discardedRequestIds = new Set<string>();
   private readonly pending = new Map<string, {
@@ -760,6 +761,10 @@ export class Sonexis extends EventEmitter {
   }
 
   async connect(): Promise<Handshake> {
+    if (this.closePromise) {
+      await this.closePromise;
+      this.closePromise = undefined;
+    }
     if (this.socket && this.handshake) return this.handshake;
     this.connectPromise ??= this.finishConnect();
     try { return await this.connectPromise; }
@@ -814,8 +819,15 @@ export class Sonexis extends EventEmitter {
     }
   }
 
-  async close(): Promise<void> {
-    this.connectionGeneration++;
+  close(): Promise<void> {
+    if (!this.closePromise) {
+      this.connectionGeneration++;
+      this.closePromise = this.finishClose();
+    }
+    return this.closePromise;
+  }
+
+  private async finishClose(): Promise<void> {
     await Promise.allSettled([
       ...[...this.captures].map((capture) => capture.close()),
       ...[...this.eventStreams].map((events) => events.close()),
@@ -886,7 +898,10 @@ export class Sonexis extends EventEmitter {
     while (true) {
       if (options.signal?.aborted) throw abortError();
       try {
-        return await this.getSource(selector);
+        return await waitForSnapshot(() => this.getSource(selector),
+          options.timeoutMs === 0 ? undefined : deadline, options.signal,
+          () => new SourceNotFoundError(
+            `Timed out waiting for audio source ${formatSelector(selector)}`, "source_wait_timeout"));
       } catch (error) {
         if (!(error instanceof SourceNotFoundError)) throw error;
         const remaining = deadline === undefined ? undefined : deadline - Date.now();
@@ -916,7 +931,9 @@ export class Sonexis extends EventEmitter {
 
   async capture(source: SourceSelector,
                 format: AudioFormat = AudioFormats.speech16k()): Promise<CaptureStream> {
+    const generation = this.connectionGeneration;
     const resolved = await this.getSource(source);
+    this.checkConnectionGeneration(generation);
     const response = await this.request("start_capture", { source_id: resolved.id, format });
     let info: CaptureInfo;
     try { info = parseCaptureInfo(response.session); }
@@ -925,9 +942,17 @@ export class Sonexis extends EventEmitter {
         "invalid_session", false,
         { cause: error instanceof Error ? error.message : String(error) });
     }
-    try { return await CaptureStream.open(this, info, resolved); }
+    let capture: CaptureStream | undefined;
+    try {
+      capture = await CaptureStream.open(this, info, resolved);
+      this.checkConnectionGeneration(generation);
+      return capture;
+    }
     catch (error) {
-      try { await this.cleanupCapture(info.id); } catch { /* bounded cleanup */ }
+      if (capture) capture.runtimeDisconnected(error instanceof Error ? error : new Error(String(error)));
+      if (generation === this.connectionGeneration) {
+        try { await this.cleanupCapture(info.id); } catch { /* bounded cleanup */ }
+      }
       throw error;
     }
   }
@@ -979,7 +1004,11 @@ export class Sonexis extends EventEmitter {
     while (true) {
       if (options.signal?.aborted) throw abortError();
       try {
-        const destinations = await this.outputDestinations();
+        const destinations = await waitForSnapshot(() => this.outputDestinations(),
+          options.timeoutMs === 0 ? undefined : deadline, options.signal,
+          () => new OutputDestinationNotFoundError(
+            `Timed out waiting for output destination ${JSON.stringify(selector)}`,
+            "output_destination_wait_timeout"));
         if (options.signal?.aborted) throw abortError();
         return resolveOutputDestination(destinations, selector, options.kind);
       }
@@ -999,6 +1028,7 @@ export class Sonexis extends EventEmitter {
 
   /** Create and attach a bounded client-to-Runtime PCM output stream. */
   async createOutput(options: OutputOptions = {}): Promise<AudioOutput> {
+    const generation = this.connectionGeneration;
     this.requireOutputCapability();
     const targetBufferMilliseconds = options.targetBufferMilliseconds ?? 60;
     if (!Number.isInteger(targetBufferMilliseconds)
@@ -1006,6 +1036,7 @@ export class Sonexis extends EventEmitter {
       throw new RangeError("targetBufferMilliseconds must be an integer between 20 and 250");
     }
     const destination = await this.getOutputDestination(options.destination ?? "default");
+    this.checkConnectionGeneration(generation);
     const format = options.format ?? AudioFormats.speech16k();
     if (destination.supported_formats.length
         && !destination.supported_formats.some((candidate) => sameAudioFormat(candidate, format))) {
@@ -1024,12 +1055,15 @@ export class Sonexis extends EventEmitter {
       throw new SonexisError("invalid_output_session", "Runtime sent a malformed output session",
         false, { cause: error instanceof Error ? error.message : String(error) });
     }
+    let output: AudioOutput | undefined;
     try {
-      const output = await AudioOutput.open(this, info, destination);
+      output = await AudioOutput.open(this, info, destination);
+      this.checkConnectionGeneration(generation);
       this.outputs.add(output);
       return output;
     } catch (error) {
-      await this.cleanupOutput(info.id);
+      if (output) output.runtimeDisconnected(error instanceof Error ? error : new Error(String(error)));
+      if (generation === this.connectionGeneration) await this.cleanupOutput(info.id);
       throw error;
     }
   }
@@ -1071,14 +1105,24 @@ export class Sonexis extends EventEmitter {
   }
 
   async events(eventTypes?: string[]): Promise<EventStream> {
+    const generation = this.connectionGeneration;
+    this.checkConnectionGeneration(generation);
     const response = await this.request("subscribe_events",
       { event_types: eventTypes ?? [...RuntimeEventTypes] });
     const subscription = response.subscription as {
       id: string; event_socket_path: string; event_types: string[];
     };
-    try { return await EventStream.open(this, subscription); }
+    let events: EventStream | undefined;
+    try {
+      events = await EventStream.open(this, subscription);
+      this.checkConnectionGeneration(generation);
+      return events;
+    }
     catch (error) {
-      try { await this.cleanupSubscription(subscription.id); } catch { }
+      if (events) events.runtimeDisconnected(error instanceof Error ? error : new Error(String(error)));
+      if (generation === this.connectionGeneration) {
+        try { await this.cleanupSubscription(subscription.id); } catch { }
+      }
       throw error;
     }
   }
@@ -1175,6 +1219,7 @@ export class Sonexis extends EventEmitter {
 
   private handleDisconnect(socket: Socket, error: Error): void {
     if (this.socket !== socket) return;
+    this.connectionGeneration++;
     this.socket = undefined;
     this.handshake = undefined;
     this.controlBuffer = Buffer.alloc(0);
@@ -1231,6 +1276,12 @@ export class Sonexis extends EventEmitter {
   /** @internal SDK ownership hook; not part of the supported public API. */
   untrackEventStream(events: EventStream): void { this.eventStreams.delete(events); }
 
+  private checkConnectionGeneration(generation: number): void {
+    if (generation !== this.connectionGeneration || !this.socket || this.closePromise) {
+      throw new SonexisError("disconnected", "Runtime connection closed while attaching a resource", true);
+    }
+  }
+
   private requireOutputCapability(): void {
     if (!this.handshake) throw new SonexisError("not_connected", "Connect first");
     if (!this.handshake.capabilities.includes("output_sessions")) {
@@ -1249,6 +1300,7 @@ export class AudioOutput extends EventEmitter {
   private operationTail: Promise<void> = Promise.resolve();
   private closePromise?: Promise<void>;
   private closing = false;
+  private readonly closeAbort = new AbortController();
   private resolvingStreamFailure = false;
   private terminalError?: Error;
   private rotatingSocket?: Socket;
@@ -1300,14 +1352,17 @@ export class AudioOutput extends EventEmitter {
         const format = this.info.format;
         const maximumFrames = Math.max(1,
           Math.floor(format.sample_rate * AudioOutput.MAX_PACKET_MILLISECONDS / 1000));
-        const maximumBytes = maximumFrames * frameSize;
+        const minimumFrames = Math.max(1, Math.floor(format.sample_rate / 1000));
         let offset = 0;
         let framesWritten = 0n;
         const firstTimestamp = explicitTimestamp ?? this.nextTimestampNs;
         while (offset < bytes.length) {
           if (options.signal?.aborted) throw abortError();
-          const byteCount = Math.min(maximumBytes, bytes.length - offset);
-          const frameCount = byteCount / frameSize;
+          const remainingFrames = (bytes.length - offset) / frameSize;
+          let frameCount = Math.min(maximumFrames, remainingFrames);
+          const tail = remainingFrames - frameCount;
+          if (tail > 0 && tail < minimumFrames) frameCount -= minimumFrames - tail;
+          const byteCount = frameCount * frameSize;
           const timestampNs = firstTimestamp
             + framesWritten * 1_000_000_000n / BigInt(format.sample_rate);
           const packet = encodeOutputFrame({
@@ -1365,6 +1420,10 @@ export class AudioOutput extends EventEmitter {
       }
       try {
         const socket = await openSocket(info.data_socket_path);
+        if (this.closing) {
+          socket.destroy();
+          throw new SonexisError("output_closed", "Audio output closed while attaching");
+        }
         this.info = info;
         this.socket = socket;
         this.sequence = 0n;
@@ -1392,10 +1451,13 @@ export class AudioOutput extends EventEmitter {
 
   /** Send EOS and drain by default, or stop immediately with `drain: false`. */
   close(options: { drain?: boolean } = {}): Promise<void> {
+    const drain = options.drain ?? true;
+    if (!drain) {
+      this.closeAbort.abort();
+      this.socket.destroy();
+    }
     if (!this.closePromise) {
-      const drain = options.drain ?? true;
       this.closing = true;
-      if (!drain) this.socket.destroy();
       this.closePromise = this.finishClose(drain);
     }
     return this.closePromise;
@@ -1403,7 +1465,11 @@ export class AudioOutput extends EventEmitter {
 
   /** @internal Runtime ownership hook. */
   runtimeDisconnected(error: Error): void {
-    if (this.closing) return;
+    if (this.closing) {
+      this.closeAbort.abort();
+      this.socket.destroy();
+      return;
+    }
     this.closing = true;
     this.terminalError = error;
     this.socket.destroy();
@@ -1413,8 +1479,12 @@ export class AudioOutput extends EventEmitter {
   }
 
   private async finishClose(drain: boolean): Promise<void> {
+    const signal = this.closeAbort.signal;
+    // The deadline includes waiting for old writes, sending EOS, and status requests.
+    const deadline = setTimeout(() => this.closeAbort.abort(), 3000);
+    let completed = false;
     try {
-      if (drain) {
+      if (drain && !signal.aborted) {
         await this.runExclusive(async () => {
           const packet = encodeOutputFrame({
             streamId: this.info.stream_id,
@@ -1425,32 +1495,33 @@ export class AudioOutput extends EventEmitter {
             data: Buffer.alloc(0),
             endOfStream: true,
           });
-          await writeWithBackpressure(this.socket, packet);
+          await writeWithBackpressure(this.socket, packet, signal);
           this.socket.end();
-        });
-        await this.waitForRuntimeDrain();
-      } else {
-        await this.runExclusive(async () => undefined);
-        await this.client.cleanupOutput(this.info.id);
+        }, signal);
+        await this.waitForRuntimeDrain(signal);
+        completed = true;
       }
     } catch (error) {
-      if (drain) await this.client.cleanupOutput(this.info.id);
-      if (!this.terminalError) {
-        this.terminalError = error instanceof Error ? error : new Error(String(error));
+      if (!signal.aborted) {
+        if (!this.terminalError) {
+          this.terminalError = error instanceof Error ? error : new Error(String(error));
+        }
+        throw this.terminalError;
       }
-      throw this.terminalError;
     } finally {
+      clearTimeout(deadline);
       this.socket.destroy();
+      if (!completed) await this.client.cleanupOutput(this.info.id);
       this.client.untrackOutput(this);
       this.emit("closed", this.info);
     }
   }
 
-  private async waitForRuntimeDrain(): Promise<void> {
+  private async waitForRuntimeDrain(signal: AbortSignal): Promise<void> {
     const deadline = Date.now() + 3000;
     while (Date.now() < deadline) {
       let info: OutputInfo;
-      try { info = await this.client.outputStatus(this.info.id); }
+      try { info = await waitForPromise(this.client.outputStatus(this.info.id), signal); }
       catch (error) {
         if (error instanceof SonexisError
             && ["session_not_found", "output_not_found", "output_session_not_found"]
@@ -1460,7 +1531,7 @@ export class AudioOutput extends EventEmitter {
       this.info = info;
       if (info.state === "failed") throw outputFailure(info);
       if (info.state === "stopped" || info.state === "cancelled") return;
-      await delay(20);
+      await delay(20, signal);
     }
     await this.client.cleanupOutput(this.info.id);
   }
@@ -1906,12 +1977,12 @@ async function writeWithBackpressure(socket: Socket, packet: Buffer,
   });
 }
 
-async function waitForPromise(promise: Promise<void>, signal?: AbortSignal): Promise<void> {
+async function waitForPromise<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
   if (signal.aborted) throw abortError();
   let onAbort!: () => void;
   try {
-    await Promise.race([
+    return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
         onAbort = () => reject(abortError());
@@ -1921,6 +1992,23 @@ async function waitForPromise(promise: Promise<void>, signal?: AbortSignal): Pro
   } finally {
     signal.removeEventListener("abort", onAbort);
   }
+}
+
+async function waitForSnapshot<T>(lookup: () => Promise<T>, deadline: number | undefined,
+                                  signal: AbortSignal | undefined,
+                                  timeoutError: () => Error): Promise<T> {
+  if (signal?.aborted) throw abortError();
+  if (deadline === undefined) return waitForPromise(lookup(), signal);
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw timeoutError();
+  let timer!: ReturnType<typeof setTimeout>;
+  try {
+    return await waitForPromise(Promise.race([
+      lookup(), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(timeoutError()), remaining);
+      }),
+    ]), signal);
+  } finally { clearTimeout(timer); }
 }
 
 function outputFailure(info: OutputInfo): OutputFailedError {
@@ -2169,6 +2257,7 @@ export class MicrophonePassthrough {
   };
   private pump: Promise<void>;
   private closePromise?: Promise<void>;
+  private closing = false;
 
   private constructor(readonly source: AudioSource, readonly input: CaptureStream,
                       readonly output: AudioOutput) {
@@ -2222,17 +2311,26 @@ export class MicrophonePassthrough {
 
   /** Stop immediately by default; pass true only when queued audio should drain. */
   close(drainOutput = false): Promise<void> {
+    this.closing = true;
+    if (!drainOutput && this.closePromise) void this.output.cancel().catch(() => undefined);
     this.closePromise ??= this.finishClose(drainOutput);
     return this.closePromise;
   }
 
   private async forward(): Promise<void> {
     for await (const frame of this.input) {
+      if (this.closing) return;
       const discontinuity = frame.discontinuity || frame.droppedFramesBefore > 0;
-      await this.output.write(frame.data, {
-        timestampNs: frame.timestampNs,
-        discontinuity,
-      });
+      try {
+        await this.output.write(frame.data, {
+          timestampNs: frame.timestampNs,
+          discontinuity,
+        });
+      } catch (error) {
+        if (this.closing && error instanceof SonexisError
+            && ["output_closed", "output_stream_closed", "cancelled"].includes(error.code)) return;
+        throw error;
+      }
       this.metrics.framesForwarded += frame.frameCount;
       this.metrics.bytesForwarded += frame.data.length;
       if (discontinuity) this.metrics.discontinuitiesForwarded++;
@@ -2240,12 +2338,12 @@ export class MicrophonePassthrough {
   }
 
   private async finishClose(drainOutput: boolean): Promise<void> {
-    const inputResult = await Promise.allSettled([this.input.close()]);
-    const pumpResult = await Promise.allSettled([this.pump]);
-    const outputResult = await Promise.allSettled([
-      this.output.close({ drain: drainOutput }),
+    // Output teardown must wake a pump blocked in write before we join it.
+    const resources = await Promise.allSettled([
+      this.input.close(), this.output.close({ drain: drainOutput }),
     ]);
-    const failure = [...inputResult, ...pumpResult, ...outputResult]
+    const pumpResult = await Promise.allSettled([this.pump]);
+    const failure = [...resources, ...pumpResult]
       .find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failure) throw failure.reason;
   }
@@ -2265,6 +2363,7 @@ export class MultiSourceSession {
   private readonly captures = new Map<string, CaptureStream>();
   private readonly pumps = new Map<string, Promise<void>>();
   private readonly pendingLabels = new Set<string>();
+  private readonly removals = new Map<string, Promise<void>>();
   private readonly queues = new Map<string, LabeledAudioFrame[]>();
   private readonly pendingDrops = new Map<string, number>();
   private readonly ends = new Map<string, MultiSourceEnd>();
@@ -2314,16 +2413,30 @@ export class MultiSourceSession {
   }
 
   async remove(label: string): Promise<void> {
+    const existing = this.removals.get(label);
+    if (existing) return existing;
     const capture = this.captures.get(label);
+    if (!capture) return;
     const pump = this.pumps.get(label);
+    this.pendingLabels.add(label);
     this.captures.delete(label);
     this.pumps.delete(label);
-    if (capture) await capture.close();
-    if (pump) await pump;
-    this.queues.delete(label);
-    this.pendingDrops.delete(label);
-    this.ends.delete(label);
-    this.wake();
+    const removal = (async () => {
+      try { await capture.close(); }
+      finally {
+        try { if (pump) await pump; }
+        finally {
+          this.queues.delete(label);
+          this.pendingDrops.delete(label);
+          this.ends.delete(label);
+          this.pendingLabels.delete(label);
+          this.removals.delete(label);
+          this.wake();
+        }
+      }
+    })();
+    this.removals.set(label, removal);
+    await removal;
   }
 
   async *frames(): AsyncIterableIterator<LabeledAudioFrame> {
@@ -2373,6 +2486,7 @@ export class MultiSourceSession {
     const captures = [...this.captures.values()];
     this.captures.clear();
     await Promise.allSettled(captures.map((capture) => capture.close()));
+    await Promise.allSettled([...this.removals.values()]);
     await Promise.allSettled([...this.pumps.values()]);
     this.pumps.clear();
     this.queues.clear();
