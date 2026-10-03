@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 #if canImport(SonexisAudioEngine)
@@ -229,6 +230,11 @@ do {
         print("sonexis-runtime \(RuntimeProtocolInfo.runtimeVersion) (protocol \(RuntimeProtocolInfo.protocolVersion))")
         exit(EXIT_SUCCESS)
     }
+    // AppKit application snapshots update only while the main run loop runs.
+    // Initialize NSWorkspace here, before discovery starts on IPC workers.
+    let application = NSApplication.shared
+    application.setActivationPolicy(.prohibited)
+    _ = NSWorkspace.shared
     let server = SonexisRuntimeServer(socketDirectory: arguments.socketDirectory,
         backend: SonexisCaptureBackend(), outputBackend: RuntimeHALPlaybackBackend())
     try server.start()
@@ -238,15 +244,18 @@ do {
     signal(SIGTERM, SIG_IGN)
     let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     let terminate = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+    var shutdownRequested = false
     let shutdown = {
-        server.stop()
-        exit(EXIT_SUCCESS)
+        guard !shutdownRequested else { return }
+        shutdownRequested = true
+        performRuntimeShutdown(stop: { server.stop() }, completed: { exit(EXIT_SUCCESS) })
     }
     interrupt.setEventHandler(handler: shutdown)
     terminate.setEventHandler(handler: shutdown)
     interrupt.resume()
     terminate.resume()
-    dispatchMain()
+    // dispatchMain services GCD but does not advance NSWorkspace's snapshots.
+    application.run()
 } catch {
     fputs("sonexis-runtime: \(error.localizedDescription)\n", stderr)
     exit(EXIT_FAILURE)

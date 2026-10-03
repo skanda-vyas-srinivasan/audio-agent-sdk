@@ -31,8 +31,14 @@ public final class AudioSourceRegistry {
         let ownBundleID = Bundle.main.bundleIdentifier
         var applicationsByBundleID: [String: [NSRunningApplication]] = [:]
 
-        for app in NSWorkspace.shared.runningApplications {
-            guard app.activationPolicy == .regular,
+        // Read the workspace snapshot on the main run loop that updates it.
+        // HAL discovery/conversion remains outside the realtime callback.
+        let applications = Thread.isMainThread
+            ? NSWorkspace.shared.runningApplications
+            : DispatchQueue.main.sync { NSWorkspace.shared.runningApplications }
+        for app in applications {
+            guard !app.isTerminated,
+                  app.activationPolicy == .regular,
                   app.processIdentifier != ownPID,
                   let bundleID = app.bundleIdentifier,
                   bundleID != ownBundleID else { continue }

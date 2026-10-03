@@ -8,6 +8,9 @@ swift build --package-path "$ROOT_DIR" -c debug
 swift test --package-path "$ROOT_DIR/SonexisAudioEngine"
 "$ROOT_DIR/.build/debug/sonexis-runtime" --version
 "$ROOT_DIR/.build/debug/sonexisctl" --version
+if [ "${AUDIOPLANE_TEST_GUI_DISCOVERY:-0}" = "1" ]; then
+    "$ROOT_DIR/Scripts/test-runtime-discovery.sh"
+fi
 
 "$ROOT_DIR/Scripts/test-runtime-protocol.sh"
 "$ROOT_DIR/Scripts/test-runtime-core.sh"

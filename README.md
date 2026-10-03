@@ -332,6 +332,11 @@ The development install lives under:
 
 ## Development and tests
 
+In a logged-in macOS GUI session, `./Scripts/test-runtime-discovery.sh`
+checks application launch, termination, and relaunch against the actual Runtime
+without capturing audio. Set `AUDIOPLANE_TEST_GUI_DISCOVERY=1` to include it in
+the standalone/release gate; headless gates leave this GUI check out.
+
 Build the native products and engine package:
 
 ```bash
