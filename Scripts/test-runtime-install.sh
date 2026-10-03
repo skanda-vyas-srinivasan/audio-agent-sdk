@@ -3,7 +3,8 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 PRODUCTS="$ROOT_DIR/.build/signed-dev/bin"
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sonexis-install-test.XXXXXX")
+# Darwin TMPDIR can leave enough sun_path space for control but not sessions.
+TEST_ROOT=$(mktemp -d "/tmp/sonexis-install-test.XXXXXX")
 PREFIX="$TEST_ROOT/install"
 STATE="$TEST_ROOT/state"
 SOCKETS="$TEST_ROOT/sockets"

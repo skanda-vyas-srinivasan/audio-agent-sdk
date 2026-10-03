@@ -281,6 +281,46 @@ let server = SonexisRuntimeServer(socketDirectory: directory, backend: captureBa
     outputBackend: outputBackend, handshakeTimeoutMilliseconds: 100)
 
 do {
+    // The control socket fits here, but a UUID-bearing PCM/event socket does not.
+    let longDirectory = directory.appendingPathComponent(String(repeating: "x", count: 25))
+    let longServer = SonexisRuntimeServer(socketDirectory: longDirectory, backend: FakeBackend())
+    defer { longServer.stop(); try? FileManager.default.removeItem(at: longDirectory) }
+    do {
+        try longServer.start()
+        longServer.stop()
+        fatalError("Runtime accepted a directory that cannot hold its session sockets")
+    } catch let error as RuntimeErrorDTO {
+        expect(error.code == "invalid_socket_directory", "wrong long-directory startup error")
+        expect(error.message.contains("shorter"), "long-directory error needs actionable guidance")
+    }
+    expect(!FileManager.default.fileExists(atPath: longDirectory.path),
+           "invalid directory validation must precede filesystem mutation")
+
+    let sampleID = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    let maximumDirectoryBytes = MemoryLayout.size(ofValue: sockaddr_un().sun_path) - 1
+        - "/i-\(sampleID).sock".utf8.count
+    let boundary = directory.appendingPathComponent(String(repeating: "b",
+        count: maximumDirectoryBytes - directory.path.utf8.count - 1))
+    try RuntimeSocketPaths(directory: boundary).prepareDirectory()
+    defer { try? FileManager.default.removeItem(at: boundary) }
+    for prefix in ["i", "o", "e"] {
+        let path = boundary.appendingPathComponent("\(prefix)-\(sampleID).sock").path
+        let listener = UnixSocketListener(path: path,
+            queue: DispatchQueue(label: "RuntimeIntegration.PathBoundary"))
+        try listener.start { $0.close() }
+        listener.stop()
+    }
+    for invalid in [URL(fileURLWithPath: boundary.path + "x"),
+                    directory.appendingPathComponent(String(repeating: "é", count: 15))] {
+        do {
+            try RuntimeSocketPaths(directory: invalid).prepareDirectory()
+            fatalError("oversized UTF-8 socket directory passed validation")
+        } catch let error as RuntimeErrorDTO {
+            expect(error.code == "invalid_socket_directory", "wrong UTF-8 path error")
+        }
+        expect(!FileManager.default.fileExists(atPath: invalid.path), "invalid path created a directory")
+    }
+
     let duplicateCoordinator = RuntimeSessionCoordinator(backend: DuplicateSourceBackend(),
         socketDirectory: directory)
     do {

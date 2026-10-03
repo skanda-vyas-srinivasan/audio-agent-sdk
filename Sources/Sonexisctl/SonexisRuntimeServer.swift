@@ -72,6 +72,19 @@ public struct RuntimeSocketPaths: Equatable, Sendable {
     }
 
     public func prepareDirectory() throws {
+        let compactID = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let sessionNames = ["i-\(compactID).sock", "o-\(compactID).sock", "e-\(compactID).sock"]
+        do {
+            for name in ["control.sock"] + sessionNames {
+                try UnixSocketSystem.validatePath(directory.appendingPathComponent(name).path)
+            }
+        } catch UnixSocketError.pathTooLong {
+            let maximumDirectoryBytes = UnixSocketSystem.maximumPathBytes
+                - sessionNames[0].utf8.count - 1
+            throw RuntimeErrorDTO(code: "invalid_socket_directory",
+                message: "Runtime socket directory is too long for PCM/event sockets. "
+                    + "Choose a shorter directory (at most \(maximumDirectoryBytes) UTF-8 bytes).")
+        }
         let manager = FileManager.default
         var status = stat()
         if lstat(directory.path, &status) == 0 {

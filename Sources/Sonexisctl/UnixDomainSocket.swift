@@ -242,6 +242,14 @@ public final class UnixSocketListener: @unchecked Sendable {
 }
 
 public enum UnixSocketSystem {
+    static var maximumPathBytes: Int {
+        MemoryLayout.size(ofValue: sockaddr_un().sun_path) - 1 // Include terminating NUL.
+    }
+
+    static func validatePath(_ path: String) throws {
+        _ = try socketAddress(path: path)
+    }
+
     public static func connect(path: String) throws -> UnixSocketConnection {
         let fd = try makeSocket()
         do {
