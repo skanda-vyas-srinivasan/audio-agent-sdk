@@ -341,6 +341,7 @@ Build the native products and engine package:
 
 ```bash
 swift build -c release
+swift test
 swift test --package-path SonexisAudioEngine
 ```
 

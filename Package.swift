@@ -30,6 +30,8 @@ let package = Package(
                 ], .when(platforms: [.macOS]))
             ]
         ),
-        .executableTarget(name: "Sonexisctl")
+        .executableTarget(name: "Sonexisctl"),
+        .testTarget(name: "SonexisRuntimeTests", dependencies: ["SonexisRuntime"],
+                    path: "Tests/RuntimeCapture")
     ]
 )

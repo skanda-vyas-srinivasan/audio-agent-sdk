@@ -52,11 +52,13 @@ final class AudioCaptureSession: @unchecked Sendable {
     private let deliveryCapacity = DispatchSemaphore(value: 32)
     private let queueKey = DispatchSpecificKey<UInt8>()
     private let target: AudioCaptureTarget
+    private let propertyListeners: CapturePropertyListeners
     private var tapEngine: TapCaptureEngine?
     private var ringBuffer: RealtimeRingBuffer?
     private var normalizer: RuntimeAudioNormalizer?
     private var drainTimer: DispatchSourceTimer?
     private var defaultOutputListener: AudioObjectPropertyListenerBlock?
+    private var formatObserver: CaptureDeviceFormatObserver?
     private var inputScratch: [Float] = []
     private var currentState: AudioCaptureSessionState = .starting
     private var terminalError: Error?
@@ -84,7 +86,8 @@ final class AudioCaptureSession: @unchecked Sendable {
         source: AudioSource,
         outputFormat: RuntimePCMFormat = .pcm16Mono16kHz,
         frameHandler: FrameHandler?,
-        onTermination: (@Sendable (UUID) -> Void)?
+        onTermination: (@Sendable (UUID) -> Void)?,
+        propertyListeners: CapturePropertyListeners = .live
     ) throws {
         guard source.kind == .application else {
             throw AudioCaptureError.unsupportedSource(source.kind)
@@ -95,6 +98,7 @@ final class AudioCaptureSession: @unchecked Sendable {
         self.target = try AudioCaptureTarget(source: source)
         self.frameHandler = frameHandler
         self.onTermination = onTermination
+        self.propertyListeners = propertyListeners
         self.queue = DispatchQueue(label: "Sonexis.RuntimeCapture.\(id.uuidString)", qos: .userInitiated)
         self.deliveryQueue = DispatchQueue(label: "Sonexis.RuntimeCaptureDelivery.\(id.uuidString)", qos: .userInitiated)
         queue.setSpecific(key: queueKey, value: 1)
@@ -240,6 +244,9 @@ final class AudioCaptureSession: @unchecked Sendable {
         nativeSampleRate = tapFormat.mSampleRate
         observedRingDroppedFrames = 0
 
+        try installDeviceFormatListeners(deviceID: outputDeviceID,
+            streamIDs: CoreAudioSupport.outputStreamIDs(outputDeviceID))
+
         try tap.createIOProc(ringBuffer: ring)
         startDrainTimer()
         do {
@@ -353,6 +360,8 @@ final class AudioCaptureSession: @unchecked Sendable {
     }
 
     private func teardownPipeline() {
+        formatObserver?.remove()
+        formatObserver = nil
         drainTimer?.setEventHandler {}
         drainTimer?.cancel()
         drainTimer = nil
@@ -378,8 +387,30 @@ final class AudioCaptureSession: @unchecked Sendable {
         inputScratch.removeAll(keepingCapacity: false)
     }
 
-    private func installDefaultOutputListener() throws {
-        var address = AudioObjectPropertyAddress(
+    func installDeviceFormatListeners(deviceID: AudioDeviceID, streamIDs: [AudioObjectID]) throws {
+        try performThrowingSync {
+            formatObserver?.remove()
+            let observer = CaptureDeviceFormatObserver(queue: queue, listeners: propertyListeners,
+                willChange: { [weak self] in self?.pauseForDeviceFormatChange() }) { [weak self] in
+                self?.rebuildForEnvironmentChange(notifyDeviceChange: true)
+            }
+            formatObserver = observer
+            try observer.install(deviceID: deviceID, streamIDs: streamIDs)
+        }
+    }
+
+    private func pauseForDeviceFormatChange() {
+        guard currentState == .running else { return }
+        // Do not normalize potentially changed native samples during debounce.
+        // This runs on the lifecycle queue, never on the realtime callback.
+        drainTimer?.setEventHandler {}
+        drainTimer?.cancel()
+        drainTimer = nil
+        tapEngine?.stop(log: false)
+    }
+
+    func installDefaultOutputListener() throws {
+        let address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
@@ -388,12 +419,7 @@ final class AudioCaptureSession: @unchecked Sendable {
             self?.rebuildForEnvironmentChange(notifyDeviceChange: true)
         }
         try checkOSStatus(
-            AudioObjectAddPropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                queue,
-                listener
-            ),
+            propertyListeners.add(AudioObjectID(kAudioObjectSystemObject), address, queue, listener),
             operation: "Install Runtime default-output listener"
         )
         defaultOutputListener = listener
@@ -401,17 +427,12 @@ final class AudioCaptureSession: @unchecked Sendable {
 
     private func removeDefaultOutputListener() {
         guard let listener = defaultOutputListener else { return }
-        var address = AudioObjectPropertyAddress(
+        let address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            queue,
-            listener
-        )
+        _ = propertyListeners.remove(AudioObjectID(kAudioObjectSystemObject), address, queue, listener)
         defaultOutputListener = nil
     }
 

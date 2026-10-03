@@ -5,6 +5,7 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 "$ROOT_DIR/Scripts/check-runtime-version.py"
 "$ROOT_DIR/Scripts/check-repository-independence.py"
 swift build --package-path "$ROOT_DIR" -c debug
+swift test --package-path "$ROOT_DIR"
 swift test --package-path "$ROOT_DIR/SonexisAudioEngine"
 "$ROOT_DIR/.build/debug/sonexis-runtime" --version
 "$ROOT_DIR/.build/debug/sonexisctl" --version
