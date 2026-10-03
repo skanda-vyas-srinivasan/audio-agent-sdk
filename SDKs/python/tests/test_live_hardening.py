@@ -92,3 +92,24 @@ class AdapterTimingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any('after turn end' in s for s in starts))
         await events.aclose()
         await sink.aclose()
+
+
+class ShutdownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_setup_failure_still_persists_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'validation.json'
+            args=agent.parse_args(['--replay', 'unused.wav', '--validation-json', str(path)])
+            with mock.patch.object(agent, 'create_sink', side_effect=RuntimeError('offline failure')):
+                with self.assertRaises(RuntimeError):
+                    await agent.run_agent(args)
+            self.assertTrue(path.exists())
+            self.assertIn('session failed', path.read_text())
+
+    async def test_provider_close_is_bounded_and_receive_task_is_cancelled(self):
+        class Sink:
+            async def aclose(self): await asyncio.Event().wait()
+        receive=asyncio.create_task(asyncio.Event().wait())
+        with mock.patch.object(agent, 'PROVIDER_CLOSE_TIMEOUT', 0.02, create=True):
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(agent.close_provider_session(Sink(), receive), 0.2)
+        self.assertTrue(receive.done())

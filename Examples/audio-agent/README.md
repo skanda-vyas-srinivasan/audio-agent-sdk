@@ -140,3 +140,20 @@ audioplane agent \
 
 `--debug` can print provider transcription and is therefore not privacy-safe
 for shared logs. Validation JSON never contains transcript or PCM content.
+
+Graceful `q`, Ctrl+C and SIGTERM persist validation metadata even if provider or
+output cleanup fails. Cleanup waits are bounded (provider close: 7 seconds,
+trailing events: 1 second, player close: 8 seconds, output client: 5 seconds;
+SDK capture/input cleanup has its own bounded waits). Setup/source-selection
+waits are also cancellable. SIGKILL, power loss, or a forcibly killed shell
+cannot guarantee a final report. The terminal can lose its final summary when
+plain `tee` exits on Ctrl+C; use `tee -i` to keep it alive through agent cleanup.
+The JSON report does not depend on stdout remaining open.
+
+Local activity segments are timing candidates, not provider turn IDs. Server
+VAD can answer before a local end; these responses have no finalized-input
+latency. Multiple candidate segments are reported as ambiguous, and segments
+may receive no response. A single candidate's interval measures time since
+local finalization; it does not prove provider causality. Validation summaries
+include `correlation` and candidate segment indices and never substitute zero
+for unknown or negative timing.

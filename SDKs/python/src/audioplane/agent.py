@@ -288,6 +288,7 @@ class LiveValidationTracker:
         self._active_response: Optional[TurnValidation] = None
         self._last_response: Optional[TurnValidation] = None
         self.lifecycle_warnings: List[str] = []
+        self.latest_stats: Optional[StreamStats] = None
 
     def lifecycle(self, event: ProviderLifecycleEvent) -> None:
         timestamp = event.timestamp_ns
@@ -1012,16 +1013,24 @@ def required_format(args: argparse.Namespace) -> AudioFormat:
     return AudioFormat(args.sample_rate, args.channels, SampleFormat.PCM_S16LE)
 
 
+PROVIDER_CLOSE_TIMEOUT = 7.0
+OUTPUT_CLOSE_TIMEOUT = 8.0
+
+
 async def close_provider_session(
     sink: RealtimeAudioSink,
     event_task: "asyncio.Task[None]",
 ) -> None:
     """Finalize provider input, then bound the wait for trailing responses."""
-    await sink.aclose()
     try:
-        await asyncio.wait_for(asyncio.shield(event_task), timeout=1.0)
-    except asyncio.TimeoutError:
-        event_task.cancel()
+        await asyncio.wait_for(sink.aclose(), timeout=PROVIDER_CLOSE_TIMEOUT)
+        try:
+            await asyncio.wait_for(asyncio.shield(event_task), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
+    finally:
+        if not event_task.done():
+            event_task.cancel()
         await asyncio.gather(event_task, return_exceptions=True)
 
 
@@ -1078,6 +1087,8 @@ async def print_provider_events(
                     and event.type not in {"session.started", "session.updated"}):
                 print(f"\nProvider event: {terminal_safe(event.type)}")
     except ProviderError as error:
+        if validation is not None:
+            validation.lifecycle_warnings.append("provider receive failed")
         print(f"\nProvider receive failed: {terminal_safe(error.message)} (retryable={error.retryable})")
         done.set()
     except (OSError, RuntimeError, SonexisError) as error:
@@ -1180,6 +1191,7 @@ async def run_live(
             source = await choose_source(client, selector)
             selector = None
             stats = StreamStats()
+            validation.latest_stats = stats
             sink = await create_sink(args, validation.lifecycle)
             def provider_input_failed(error: Exception) -> None:
                 if isinstance(error, ProviderError):
@@ -1228,8 +1240,10 @@ async def run_live(
                                 task.cancel()
                         await asyncio.gather(*tasks, return_exceptions=True)
             finally:
-                await input_forwarder.close()
-                await close_provider_session(sink, provider_events)
+                try:
+                    await input_forwarder.close()
+                finally:
+                    await close_provider_session(sink, provider_events)
             print(f"Final stream stats: {stats.line()}")
             if result == "switch":
                 continue
@@ -1247,6 +1261,7 @@ async def run_replay(
     sink: RealtimeAudioSink,
     output: OutputWriter,
     done: asyncio.Event,
+    validation: Optional[LiveValidationTracker] = None,
 ) -> StreamStats:
     assert args.replay is not None
     if args.replay.suffix.lower() == ".wav":
@@ -1261,6 +1276,8 @@ async def run_replay(
             f"Replay format {stream.format!r} does not match {args.provider} "
             f"format {sink.required_format!r}")
     stats = StreamStats()
+    if validation is not None:
+        validation.latest_stats = stats
     async with stream:
         print(f"Replaying {args.replay} as source {stream.source.id}")
         await consume(stream, sink, output, stats, done)
@@ -1272,8 +1289,17 @@ async def run_agent(args: argparse.Namespace) -> int:
     """Run one agent session from an already parsed configuration."""
     done = asyncio.Event()
     loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+    signal_received = False
+    def request_shutdown() -> None:
+        nonlocal signal_received
+        if not signal_received:
+            signal_received = True
+            done.set()
+            # Wake setup/source-selection/playback waits as well as capture.
+            main_task.cancel()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, done.set)
+        loop.add_signal_handler(sig, request_shutdown)
 
     response_client: Optional[Sonexis] = None
     response_player: Optional[RuntimeResponsePlayer] = None
@@ -1306,7 +1332,7 @@ async def run_agent(args: argparse.Namespace) -> int:
                     sink, done, debug=args.debug, response_player=response_player,
                     validation=validation))
                 try:
-                    final_stats = await run_replay(args, sink, output, done)
+                    final_stats = await run_replay(args, sink, output, done, validation)
                 finally:
                     await close_provider_session(sink, provider_events)
             else:
@@ -1315,14 +1341,41 @@ async def run_agent(args: argparse.Namespace) -> int:
         finally:
             done.set()
             output.close()
+    except asyncio.CancelledError:
+        if not signal_received:
+            validation.lifecycle_warnings.append("session cancelled")
+            raise
+    except BrokenPipeError:
+        # tee may exit on terminal SIGINT before the agent finishes cleanup.
+        # The private report is independent of the terminal output's lifetime.
+        done.set()
+    except BaseException:
+        validation.lifecycle_warnings.append("session failed")
+        raise
     finally:
+        done.set()
         try:
             if response_player is not None:
-                await response_player.close()
-        finally:
+                try:
+                    await asyncio.wait_for(response_player.close(), OUTPUT_CLOSE_TIMEOUT)
+                except Exception as error:
+                    validation.lifecycle_warnings.append(
+                        "output cleanup " + type(error).__name__)
             if response_client is not None:
-                await response_client.close()
-    validation.final_report(final_stats)
+                try:
+                    await asyncio.wait_for(response_client.close(), 5.0)
+                except Exception as error:
+                    validation.lifecycle_warnings.append(
+                        "output client cleanup " + type(error).__name__)
+        finally:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
+            # Persist even when setup, provider teardown or output cleanup fails.
+            # Write before printing: stdout may already have closed with tee.
+            try:
+                validation.final_report(final_stats or validation.latest_stats)
+            except BrokenPipeError:
+                pass
     return 0
 
 
@@ -1335,8 +1388,19 @@ def cli_main(argv=None) -> None:
     """Synchronous console-script entry point."""
     try:
         result = asyncio.run(main(argv))
+    except BrokenPipeError:
+        result = 0
     except (OSError, RuntimeError, SonexisError, ValueError) as error:
         raise SystemExit(f"error: {error}") from error
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Avoid another failure during the interpreter's buffered flush.
+        descriptor = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(descriptor, sys.stdout.fileno())
+        finally:
+            os.close(descriptor)
     raise SystemExit(result)
 
 
