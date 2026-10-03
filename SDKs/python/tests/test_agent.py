@@ -115,7 +115,7 @@ class AgentCLIAndDiagnosticsTests(unittest.TestCase):
             tracker.finish_provider_event(event)
         report = tracker.final_report()
         self.assertIn(
-            "provider response start exceeded 5000 ms",
+            "response arrived >5000 ms after the sole local finalization; correlation remains unproven",
             report["turns"][0]["warnings"],
         )
 

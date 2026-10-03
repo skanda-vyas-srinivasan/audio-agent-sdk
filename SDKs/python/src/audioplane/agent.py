@@ -383,7 +383,9 @@ class LiveValidationTracker:
             turn.input_finalized_ns, turn.response_started_ns)
             if turn.correlation == "single_segment_candidate" else None)
         if isinstance(response_ms, float) and response_ms > 5_000:
-            turn.warnings.append("provider response start exceeded 5000 ms")
+            turn.warnings.append(
+                "response arrived >5000 ms after the sole local finalization; "
+                "correlation remains unproven")
         summary = turn.summary()
         warnings = summary["warnings"]
         if self.enabled:

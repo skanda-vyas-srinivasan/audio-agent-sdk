@@ -120,6 +120,7 @@ class GeminiLiveSink:
         self._candidate_frames: List[AudioFrame] = []
         self._pending_audio = bytearray()
         self._segment_open = False
+        self._finalizing_segment = False
         self._terminal_send_error = False
         self._response_in_progress = False
         self._last_turn_finalized_at: Optional[int] = None
@@ -246,11 +247,14 @@ class GeminiLiveSink:
         # A cancelled/failed send has ambiguous remote state. Mark this segment
         # terminal before awaiting so close() cannot duplicate the edge.
         self._segment_open = False
+        self._finalizing_segment = True
         try:
             await self._session.send_realtime_input(audio_stream_end=True)
         except BaseException:
             self._terminal_send_error = True
             raise
+        finally:
+            self._finalizing_segment = False
         if not self._segment_responded:
             self._ambiguous_turn_timing |= self._last_turn_finalized_at is not None
             self._last_turn_finalized_at = time.monotonic_ns()
@@ -376,7 +380,8 @@ class GeminiLiveSink:
                     if response_started:
                         self._response_in_progress = True
                         timing = " (local timing unknown)"
-                        if self._segment_open or self._activity_detector.active:
+                        if (self._segment_open or self._finalizing_segment
+                                or self._activity_detector.active):
                             self._segment_responded = True
                             timing = (" (local timing ambiguous)"
                                       if self._last_turn_finalized_at is not None
