@@ -299,8 +299,8 @@ final class AudioCaptureSession: @unchecked Sendable {
                 let outputFrames = UInt32(pcm.count / outputFormat.bytesPerFrame)
                 let frame = AudioFrame(
                     sequence: sequence,
-                    timestampNanoseconds: normalizedFramesProduced * 1_000_000_000
-                        / UInt64(outputFormat.sampleRate),
+                    timestampNanoseconds: CaptureClock.nanoseconds(
+                        frames: normalizedFramesProduced, sampleRate: outputFormat.sampleRate),
                     frameCount: outputFrames,
                     format: outputFormat,
                     pcm: pcm,

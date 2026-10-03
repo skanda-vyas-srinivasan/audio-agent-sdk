@@ -5,6 +5,18 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 do {
+    for rate: UInt32 in [16_000, 24_000, 48_000] {
+        let boundary = UInt64.max / 1_000_000_000
+        for frames in [UInt64(0), UInt64(rate), boundary - 1, boundary, boundary + 1,
+                       UInt64(rate) * 60 * 60 * 24 * 30] {
+            let expected = (frames / UInt64(rate)) * 1_000_000_000
+                + (frames % UInt64(rate)) * 1_000_000_000 / UInt64(rate)
+            expect(CaptureClock.nanoseconds(frames: frames, sampleRate: rate) == expected,
+                   "capture clock changed media time at \(frames) frames / \(rate) Hz")
+        }
+        expect(CaptureClock.nanoseconds(frames: UInt64.max, sampleRate: rate) == UInt64.max,
+               "unrepresentable capture time must saturate rather than trap or wrap")
+    }
     let id = AudioSource.applicationID(bundleIdentifier: "com.example.player")
     let first = AudioSource(id: id, kind: .application, name: "Player",
         bundleIdentifier: "com.example.player", processIdentifiers: [400, 200], state: .active)

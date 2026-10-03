@@ -208,8 +208,8 @@ final class RuntimeMicrophoneCaptureSession: RuntimeBackendCaptureSession,
                 guard !pcm.isEmpty else { batches += 1; continue }
                 let frameCount = UInt32(pcm.count / outputFormat.bytesPerFrame)
                 onFrame(RuntimeBackendAudioFrame(payload: pcm, sequence: sequence,
-                    timestampNanoseconds: normalizedFramesProduced * 1_000_000_000
-                        / UInt64(outputFormat.sampleRate),
+                    timestampNanoseconds: CaptureClock.nanoseconds(
+                        frames: normalizedFramesProduced, sampleRate: outputFormat.sampleRate),
                     frameCount: frameCount, format: outputFormat,
                     discontinuity: pendingDiscontinuity,
                     droppedFramesBefore: UInt32(clamping: pendingDroppedOutputFrames)))
