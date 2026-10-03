@@ -17,6 +17,12 @@ SonexisAudioRingBuffer * _Nullable SonexisAudioRingBufferCreate(
 );
 void SonexisAudioRingBufferDestroy(SonexisAudioRingBuffer *ringBuffer);
 
+/// Allocate capture-only loss metadata on the control thread. Playback rings
+/// created with the original constructor do not allocate or write this metadata.
+SonexisAudioRingBuffer * _Nullable SonexisAudioRingBufferCreateForCapture(
+    uint32_t capacityFrames, uint32_t channels
+);
+
 uint32_t SonexisAudioRingBufferWriteFromAudioBufferList(
     SonexisAudioRingBuffer *ringBuffer,
     const AudioBufferList *inputData
@@ -37,6 +43,14 @@ uint32_t SonexisAudioRingBufferReadInterleaved(
     SonexisAudioRingBuffer *ringBuffer,
     float *outputSamples,
     uint32_t frames
+);
+
+/// Single-consumer capture read. Returns only real samples, stops before a gap,
+/// and reports lost native frames immediately before the first returned sample.
+/// Requires CreateForCapture; does not apply playback drift correction.
+uint32_t SonexisAudioRingBufferReadCaptureInterleaved(
+    SonexisAudioRingBuffer *ringBuffer, float *outputSamples, uint32_t frames,
+    uint64_t *droppedFramesBefore
 );
 
 /// C-only HAL output callback. `inClientData` must be a live

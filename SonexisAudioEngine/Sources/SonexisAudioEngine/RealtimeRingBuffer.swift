@@ -13,8 +13,15 @@ public final class RealtimeRingBuffer {
     public let capacityFrames: UInt32
     public let channels: UInt32
 
-    public init(capacityFrames: UInt32, channels: UInt32) throws {
-        guard let pointer = SonexisAudioRingBufferCreate(capacityFrames, channels) else {
+    public convenience init(capacityFrames: UInt32, channels: UInt32) throws {
+        try self.init(capacityFrames: capacityFrames, channels: channels, trackCaptureDrops: false)
+    }
+
+    public init(capacityFrames: UInt32, channels: UInt32, trackCaptureDrops: Bool) throws {
+        let allocated = trackCaptureDrops
+            ? SonexisAudioRingBufferCreateForCapture(capacityFrames, channels)
+            : SonexisAudioRingBufferCreate(capacityFrames, channels)
+        guard let pointer = allocated else {
             throw SonexisError(message: "Could not allocate realtime audio ring buffer")
         }
 
@@ -45,6 +52,15 @@ public final class RealtimeRingBuffer {
     public func readInterleaved(_ samples: UnsafeMutablePointer<Float>, frames: UInt32) -> UInt32 {
         guard let pointer else { return 0 }
         return SonexisAudioRingBufferReadInterleaved(pointer, samples, frames)
+    }
+
+    /// Returns a contiguous run of native capture samples and its preceding loss.
+    public func readCaptureInterleaved(_ samples: UnsafeMutablePointer<Float>, frames: UInt32,
+                                       droppedFramesBefore: inout UInt64) -> UInt32 {
+        droppedFramesBefore = 0
+        guard let pointer else { return 0 }
+        return SonexisAudioRingBufferReadCaptureInterleaved(
+            pointer, samples, frames, &droppedFramesBefore)
     }
 
     public func flush() -> UInt32 {

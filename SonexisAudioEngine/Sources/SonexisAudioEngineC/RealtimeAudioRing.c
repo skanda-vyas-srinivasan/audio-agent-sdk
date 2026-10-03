@@ -21,6 +21,8 @@ _Static_assert(
 
 struct SonexisAudioRingBuffer {
     float *samples;
+    uint64_t *captureDropTotals;
+    uint64_t captureDropsRead; // Owned by the single capture consumer.
     uint32_t capacityFrames;
     uint32_t channels;
     atomic_ullong writeFrame;
@@ -143,6 +145,24 @@ SonexisAudioRingBuffer *SonexisAudioRingBufferCreate(uint32_t capacityFrames, ui
     ringBuffer->rampRemainingFrames = 0;
     ringBuffer->appliedGainRampRequestID = 0;
 
+    return ringBuffer;
+}
+
+SonexisAudioRingBuffer *SonexisAudioRingBufferCreateForCapture(
+    uint32_t capacityFrames, uint32_t channels
+) {
+    if ((size_t)capacityFrames > SIZE_MAX / sizeof(uint64_t)) {
+        return NULL;
+    }
+    SonexisAudioRingBuffer *ringBuffer = SonexisAudioRingBufferCreate(capacityFrames, channels);
+    if (ringBuffer == NULL) {
+        return NULL;
+    }
+    ringBuffer->captureDropTotals = calloc(capacityFrames, sizeof(uint64_t));
+    if (ringBuffer->captureDropTotals == NULL) {
+        SonexisAudioRingBufferDestroy(ringBuffer);
+        return NULL;
+    }
     return ringBuffer;
 }
 
@@ -297,6 +317,7 @@ void SonexisAudioRingBufferDestroy(SonexisAudioRingBuffer *ringBuffer) {
         return;
     }
 
+    free(ringBuffer->captureDropTotals);
     free(ringBuffer->samples);
     free(ringBuffer);
 }
@@ -323,6 +344,10 @@ uint32_t SonexisAudioRingBufferWriteFromAudioBufferList(
     }
     uint32_t writableFrames = ringBuffer->capacityFrames - (uint32_t)readableFrameCount;
     uint32_t framesToWrite = incomingFrames < writableFrames ? incomingFrames : writableFrames;
+    // Accepted samples precede any rejected tail of this write. Publish their
+    // prior loss total alongside samples under the same writeFrame release.
+    uint64_t priorDrops = ringBuffer->captureDropTotals != NULL
+        ? atomic_load_explicit(&ringBuffer->droppedFrames, memory_order_relaxed) : 0;
 
     if (framesToWrite < incomingFrames) {
         atomic_fetch_add_explicit(
@@ -350,6 +375,9 @@ uint32_t SonexisAudioRingBufferWriteFromAudioBufferList(
 
     for (uint32_t frame = 0; frame < framesToWrite; ++frame) {
         uint32_t outputFrame = (uint32_t)((writeFrame + frame) % ringBuffer->capacityFrames);
+        if (ringBuffer->captureDropTotals != NULL) {
+            ringBuffer->captureDropTotals[outputFrame] = priorDrops;
+        }
         uint32_t outputBase = outputFrame * ringBuffer->channels;
         uint32_t outputChannel = 0;
         float frameGain = ringBuffer->currentGain;
@@ -435,6 +463,8 @@ uint32_t SonexisAudioRingBufferWriteInterleaved(
     }
     uint32_t writableFrames = ringBuffer->capacityFrames - (uint32_t)readableFrameCount;
     uint32_t framesToWrite = frames < writableFrames ? frames : writableFrames;
+    uint64_t priorDrops = ringBuffer->captureDropTotals != NULL
+        ? atomic_load_explicit(&ringBuffer->droppedFrames, memory_order_relaxed) : 0;
 
     if (framesToWrite < frames) {
         atomic_fetch_add_explicit(
@@ -462,6 +492,9 @@ uint32_t SonexisAudioRingBufferWriteInterleaved(
 
     for (uint32_t frame = 0; frame < framesToWrite; ++frame) {
         uint32_t outputFrame = (uint32_t)((writeFrame + frame) % ringBuffer->capacityFrames);
+        if (ringBuffer->captureDropTotals != NULL) {
+            ringBuffer->captureDropTotals[outputFrame] = priorDrops;
+        }
         uint32_t outputBase = outputFrame * ringBuffer->channels;
         float frameGain = ringBuffer->currentGain;
 
@@ -674,6 +707,37 @@ uint32_t SonexisAudioRingBufferReadInterleaved(
     );
     endRead(ringBuffer);
     return framesToCopy;
+}
+
+uint32_t SonexisAudioRingBufferReadCaptureInterleaved(
+    SonexisAudioRingBuffer *ringBuffer, float *outputSamples, uint32_t frames,
+    uint64_t *droppedFramesBefore
+) {
+    *droppedFramesBefore = 0;
+    if (ringBuffer == NULL || outputSamples == NULL || frames == 0 ||
+        ringBuffer->captureDropTotals == NULL || !beginRead(ringBuffer)) {
+        return 0;
+    }
+    uint64_t writeFrame = atomic_load_explicit(&ringBuffer->writeFrame, memory_order_acquire);
+    uint64_t readFrame = atomic_load_explicit(&ringBuffer->readFrame, memory_order_relaxed);
+    uint32_t available = (uint32_t)(writeFrame - readFrame);
+    uint32_t limit = frames < available ? frames : available;
+    uint32_t copied = 0;
+    if (limit > 0) {
+        uint64_t drops = ringBuffer->captureDropTotals[readFrame % ringBuffer->capacityFrames];
+        while (copied < limit && ringBuffer->captureDropTotals[
+                (readFrame + copied) % ringBuffer->capacityFrames] == drops) {
+            copyRingFrameToInterleaved(ringBuffer, outputSamples, copied, readFrame + copied);
+            ++copied;
+        }
+        *droppedFramesBefore = drops - ringBuffer->captureDropsRead;
+        ringBuffer->captureDropsRead = drops;
+        atomic_fetch_add_explicit(&ringBuffer->readFrames, copied, memory_order_relaxed);
+        atomic_fetch_add_explicit(&ringBuffer->renderedFrames, copied, memory_order_relaxed);
+        atomic_store_explicit(&ringBuffer->readFrame, readFrame + copied, memory_order_release);
+    }
+    endRead(ringBuffer);
+    return copied;
 }
 
 OSStatus SonexisAudioRingBufferIOProc(

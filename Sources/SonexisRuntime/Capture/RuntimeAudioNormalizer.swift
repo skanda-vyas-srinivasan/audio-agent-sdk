@@ -81,6 +81,10 @@ final class RuntimeAudioNormalizer {
         self.maxInputFrames = maxInputFrames
     }
 
+    func resetAfterDiscontinuity() {
+        converter.reset()
+    }
+
     func convert(samples: UnsafePointer<Float>, frameCount: UInt32) throws -> Data {
         guard frameCount > 0 else { return Data() }
         guard frameCount <= maxInputFrames else {

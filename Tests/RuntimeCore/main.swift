@@ -75,6 +75,13 @@ do {
                "normalizer did not preserve 100 ms duration for \(format)")
         expect(pcm.count % format.bytesPerFrame == 0, "output was not sample aligned")
         expect(!pcm.allSatisfy { $0 == 0 }, "normalizer emitted silence for a tone")
+        normalizer.resetAfterDiscontinuity()
+        let silence = [Float](repeating: 0, count: 2_048 * 2)
+        let resetPCM = try silence.withUnsafeBufferPointer {
+            try normalizer.convert(samples: $0.baseAddress!, frameCount: 2_048)
+        }
+        expect(!resetPCM.isEmpty && resetPCM.allSatisfy { $0 == 0 },
+               "converter carried pre-gap samples across a native discontinuity")
     }
 
     print("Runtime core tests passed")

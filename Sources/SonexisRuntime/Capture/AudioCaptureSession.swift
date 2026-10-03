@@ -225,7 +225,8 @@ final class AudioCaptureSession: @unchecked Sendable {
         }
 
         let capacityFrames = max(UInt32(tapFormat.mSampleRate * 2.0), 4_096)
-        let ring = try RealtimeRingBuffer(capacityFrames: capacityFrames, channels: tapFormat.mChannelsPerFrame)
+        let ring = try RealtimeRingBuffer(capacityFrames: capacityFrames,
+            channels: tapFormat.mChannelsPerFrame, trackCaptureDrops: true)
         ring.setGainImmediate(1)
         ring.setReadEnabled(true)
         let normalizer = try RuntimeAudioNormalizer(
@@ -261,27 +262,26 @@ final class AudioCaptureSession: @unchecked Sendable {
         guard currentState == .running || currentState == .starting,
               let ringBuffer, let normalizer else { return }
 
-        let ringDrops = ringBuffer.droppedFrames
-        if ringDrops > observedRingDroppedFrames {
-            let nativeDrops = ringDrops - observedRingDroppedFrames
-            let estimatedOutputDrops = nativeSampleRate > 0
-                ? UInt64((Double(nativeDrops) * Double(outputFormat.sampleRate) / nativeSampleRate).rounded())
-                : 0
-            pendingDroppedOutputFrames &+= estimatedOutputDrops
-            normalizedFramesProduced &+= estimatedOutputDrops
-            pendingDiscontinuity = true
-            observedRingDroppedFrames = ringDrops
-        }
-
         var batches = 0
         while batches < 32 {
             let framesToRead = min(ringBuffer.fillFrames, 2_048)
             guard framesToRead > 0 else { return }
+            var nativeDrops: UInt64 = 0
             let framesRead = inputScratch.withUnsafeMutableBufferPointer { buffer -> UInt32 in
                 guard let baseAddress = buffer.baseAddress else { return 0 }
-                return ringBuffer.readInterleaved(baseAddress, frames: framesToRead)
+                return ringBuffer.readCaptureInterleaved(baseAddress, frames: framesToRead,
+                    droppedFramesBefore: &nativeDrops)
             }
             guard framesRead > 0 else { return }
+            if nativeDrops > 0 {
+                observedRingDroppedFrames &+= nativeDrops
+                let outputDrops = UInt64((Double(nativeDrops) * Double(outputFormat.sampleRate)
+                    / nativeSampleRate).rounded())
+                pendingDroppedOutputFrames &+= outputDrops
+                normalizedFramesProduced &+= outputDrops
+                pendingDiscontinuity = true
+                normalizer.resetAfterDiscontinuity()
+            }
 
             let startedAt = DispatchTime.now().uptimeNanoseconds
             do {
@@ -364,8 +364,10 @@ final class AudioCaptureSession: @unchecked Sendable {
             completedNativeFrames &+= ringBuffer.writtenFrames
             completedDroppedFrames &+= ringBuffer.droppedFrames &+ unreadNativeFrames
             completedCaptureCallbacks &+= ringBuffer.writeOperations
-            if unreadNativeFrames > 0, nativeSampleRate > 0 {
-                let unreadOutputFrames = UInt64((Double(unreadNativeFrames)
+            let discardedNativeFrames = unreadNativeFrames
+                &+ (ringBuffer.droppedFrames &- observedRingDroppedFrames)
+            if discardedNativeFrames > 0, nativeSampleRate > 0 {
+                let unreadOutputFrames = UInt64((Double(discardedNativeFrames)
                     * Double(outputFormat.sampleRate) / nativeSampleRate).rounded())
                 pendingDroppedOutputFrames &+= unreadOutputFrames
                 normalizedFramesProduced &+= unreadOutputFrames

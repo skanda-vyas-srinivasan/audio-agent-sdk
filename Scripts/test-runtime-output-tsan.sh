@@ -26,3 +26,10 @@ xcrun clang -std=c11 -fsanitize=thread \
     "$ROOT_DIR/Tests/RuntimeOutputRingConcurrency/main.c" \
     -framework CoreAudio -o "$BUILD_DIR/runtime-output-ring-tsan"
 TSAN_OPTIONS="halt_on_error=1" "$BUILD_DIR/runtime-output-ring-tsan"
+
+xcrun clang -std=c11 -fsanitize=thread \
+    -I "$ROOT_DIR/SonexisAudioEngine/Sources/SonexisAudioEngineC/include" \
+    "$ROOT_DIR/SonexisAudioEngine/Sources/SonexisAudioEngineC/RealtimeAudioRing.c" \
+    "$ROOT_DIR/Tests/RuntimeCaptureRingConcurrency/main.c" \
+    -framework CoreAudio -o "$BUILD_DIR/runtime-capture-ring-tsan"
+TSAN_OPTIONS="halt_on_error=1" "$BUILD_DIR/runtime-capture-ring-tsan"

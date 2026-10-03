@@ -33,7 +33,6 @@ final class RuntimeMicrophoneCaptureSession: RuntimeBackendCaptureSession,
     private var normalizedFramesDelivered: UInt64 = 0
     private var conversionBatches: UInt64 = 0
     private var conversionNanoseconds: UInt64 = 0
-    private var observedRingDrops: UInt64 = 0
     private var pendingDroppedOutputFrames: UInt64 = 0
     private var pendingDiscontinuity = false
     private var nativeSampleRate: Double = 0
@@ -125,7 +124,7 @@ final class RuntimeMicrophoneCaptureSession: RuntimeBackendCaptureSession,
             sampleFormat: outputFormat.sampleFormat == .pcmS16LE ? .pcmS16LE : .float32LE)
         let nextRing = try RealtimeRingBuffer(
             capacityFrames: max(UInt32(format.mSampleRate * 2), 4_096),
-            channels: channels)
+            channels: channels, trackCaptureDrops: true)
         nextRing.setReadEnabled(true)
         nextRing.setGainImmediate(1)
         let nextNormalizer = try RuntimeAudioNormalizer(
@@ -152,7 +151,6 @@ final class RuntimeMicrophoneCaptureSession: RuntimeBackendCaptureSession,
         ioProcID = nextIOProc
         callbackRingRetain = retained
         nativeSampleRate = format.mSampleRate
-        observedRingDrops = 0
         try installDeviceListeners(streamID: streamID)
         startDrainTimer()
         let startStatus = AudioDeviceStart(deviceID, nextIOProc)
@@ -173,18 +171,6 @@ final class RuntimeMicrophoneCaptureSession: RuntimeBackendCaptureSession,
 
     private func drainAvailableAudio() {
         guard running, let ring, let normalizer else { return }
-        let ringDrops = ring.droppedFrames
-        if ringDrops > observedRingDrops {
-            let nativeDrops = ringDrops - observedRingDrops
-            let outputDrops = nativeSampleRate > 0
-                ? UInt64((Double(nativeDrops) * Double(outputFormat.sampleRate)
-                    / nativeSampleRate).rounded()) : 0
-            pendingDroppedOutputFrames &+= outputDrops
-            normalizedFramesProduced &+= outputDrops
-            pendingDiscontinuity = true
-            observedRingDrops = ringDrops
-        }
-
         var batches = 0
         while batches < 32 {
             let available = ring.fillFrames
@@ -192,11 +178,21 @@ final class RuntimeMicrophoneCaptureSession: RuntimeBackendCaptureSession,
                 UInt32((nativeSampleRate / 1_000).rounded(.up)))
             guard available >= minimumPacketFrames else { return }
             let framesToRead = min(available, 2_048)
+            var nativeDrops: UInt64 = 0
             let framesRead = scratch.withUnsafeMutableBufferPointer { buffer -> UInt32 in
                 guard let base = buffer.baseAddress else { return 0 }
-                return ring.readInterleaved(base, frames: framesToRead)
+                return ring.readCaptureInterleaved(base, frames: framesToRead,
+                    droppedFramesBefore: &nativeDrops)
             }
             guard framesRead > 0 else { return }
+            if nativeDrops > 0 {
+                let outputDrops = UInt64((Double(nativeDrops) * Double(outputFormat.sampleRate)
+                    / nativeSampleRate).rounded())
+                pendingDroppedOutputFrames &+= outputDrops
+                normalizedFramesProduced &+= outputDrops
+                pendingDiscontinuity = true
+                normalizer.resetAfterDiscontinuity()
+            }
             let started = DispatchTime.now().uptimeNanoseconds
             do {
                 let pcm = try scratch.withUnsafeBufferPointer { buffer -> Data in
