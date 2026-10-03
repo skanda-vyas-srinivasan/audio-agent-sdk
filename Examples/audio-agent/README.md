@@ -64,8 +64,8 @@ background audio opens turns; lower them when quiet speech is missed. Keep the
 end threshold below the start threshold. A custom `VoiceActivityDetector` can
 be supplied to `GeminiLiveSink` when energy thresholds are insufficient.
 
-The reference app defaults to `gemini-3.1-flash-live-preview` so each finalized
-application-audio turn requests a response. Select another model explicitly
+The reference app defaults to `gemini-3.1-flash-live-preview` for responsive live audio. Gemini server VAD owns response boundaries; local
+finalization does not guarantee one response per segment. Select another model explicitly
 with `--gemini-model MODEL` or `GEMINI_LIVE_MODEL`. Models with proactive audio
 may intentionally stay silent for passive commentary even after a valid turn.
 
@@ -157,3 +157,33 @@ may receive no response. A single candidate's interval measures time since
 local finalization; it does not prove provider causality. Validation summaries
 include `correlation` and candidate segment indices and never substitute zero
 for unknown or negative timing.
+
+Playback diagnostics in validation JSON are metadata only. They include provider
+chunk intervals, estimated supply gaps (an SDK clock estimate, not acoustic
+latency), pacing waits, longest write wait, coalescer timeout flushes, output
+session count, interruption discards/flushes, and sampled Runtime underrun,
+drop, route-change and buffer counters. A 250 ms control-plane poll keeps these
+separate from capture/provider-input drops. Sampling failures are counted;
+zero input drops or zero sampled underruns do not prove gap-free sound.
+`output_start_ms` measures SDK write acceptance, not speaker onset.
+
+Sub-50 ms chunks are released within the existing 50 ms coalescing window when
+the producer stalls. Runtime starts a nonempty partial render buffer after the
+existing target-buffer duration (plus up to one 50 ms metrics-timer tick), so
+short responses and resumed tails do not wait indefinitely for another chunk.
+Full buffers start immediately as before; queue sizes, 150 ms pacing lead and
+60 ms default priming target are unchanged. Ordered flush remains intentional;
+a blocked write is cancelled and its output closed before recreation.
+
+Run the real HAL short-response/re-prime regression with an already installed
+BlackHole device and an authorized signed Runtime:
+
+```sh
+AUDIOPLANE_TEST_LOOPBACK_RUNTIME="$PWD/.build/signed-dev/bin/sonexis-runtime" \
+PYTHONPATH="$PWD/SDKs/python/src" python -m unittest discover \
+  -s SDKs/python/tests -p test_agent_loopback.py -v
+```
+
+The fixture generates PCM in memory and does not save captured audio or alter
+the default device. Authenticated listening remains necessary to diagnose
+network/provider gaps and perceptual glitches.

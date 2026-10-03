@@ -287,8 +287,11 @@ class LiveValidationTracker:
         self._current_activity: Optional[TurnValidation] = None
         self._active_response: Optional[TurnValidation] = None
         self._last_response: Optional[TurnValidation] = None
+        self._responses: Dict[int, TurnValidation] = {}
+        self._response_index = 0
         self.lifecycle_warnings: List[str] = []
         self.latest_stats: Optional[StreamStats] = None
+        self.playback_diagnostics: Dict[str, object] = {}
 
     def lifecycle(self, event: ProviderLifecycleEvent) -> None:
         timestamp = event.timestamp_ns
@@ -321,10 +324,14 @@ class LiveValidationTracker:
                 self._awaiting_response.append(self._current_activity)
             self._current_activity = None
         elif event.type == "output_started":
-            if self._active_response is not None:
-                self._active_response.output_started_ns = timestamp
+            turn = (self._responses.get(event.details["response_index"])
+                    if "response_index" in event.details else self._active_response)
+            if turn is not None:
+                turn.output_started_ns = timestamp
         elif event.type == "output_flushed":
-            turn = self._active_response or self._last_response
+            turn = (self._responses.get(event.details["response_index"])
+                    if "response_index" in event.details
+                    else self._active_response or self._last_response)
             if turn is not None:
                 turn.output_flushed_ns = timestamp
 
@@ -356,6 +363,8 @@ class LiveValidationTracker:
             turn.candidate_segments = [candidate.index for candidate in candidates]
             turn.response_started_ns = timestamp
             self._active_response = turn
+            self._response_index += 1
+            self._responses[self._response_index] = turn
         if event.response_interrupted:
             if self._active_response is None:
                 self.lifecycle_warnings.append("response interruption without active response")
@@ -368,7 +377,13 @@ class LiveValidationTracker:
                 self._active_response.response_completed_ns = timestamp
 
     def response_playback_event(self, event: ProviderLifecycleEvent) -> None:
-        self.lifecycle(event)
+        if event.type == "playback_failed":
+            if "response playback failed" not in self.lifecycle_warnings:
+                self.lifecycle_warnings.append("response playback failed")
+        elif event.type == "playback_diagnostics":
+            self.playback_diagnostics = dict(event.details)
+        else:
+            self.lifecycle(event)
 
     def finish_provider_event(self, event: ProviderEvent) -> None:
         if ((event.response_completed or event.response_interrupted)
@@ -418,6 +433,7 @@ class LiveValidationTracker:
         payload: Dict[str, object] = {
             "status": "warn" if warnings or any(t.warnings for t in self.turns) else "pass",
             "turns": [turn.summary() for turn in self.turns],
+            "playback": dict(self.playback_diagnostics),
             "warnings": warnings,
         }
         if stats is not None:
@@ -564,6 +580,7 @@ class _QueuedProviderAudio:
     interrupt_response: bool = False
     epoch: int = 0
     cleanup: Optional[asyncio.Task] = None
+    response_index: int = 1
 
 
 class RuntimeResponsePlayer:
@@ -606,7 +623,9 @@ class RuntimeResponsePlayer:
         self._output = None
         self._format: Optional[AudioFormat] = None
         self._playback_cursor: Optional[float] = None
+        self._expecting_audio = False
         self._response_epoch = 0
+        self._response_index = 0
         self._output_started_epoch: Optional[int] = None
         self._active_write: Optional[asyncio.Task] = None
         self._discard_tasks: Set[asyncio.Task] = set()
@@ -615,7 +634,57 @@ class RuntimeResponsePlayer:
             asyncio.Queue(maxsize=max_pending_chunks))
         self._failure: Optional[Exception] = None
         self._closed = False
+        self._diagnostics = {
+            "provider_chunks": 0, "max_provider_chunk_interval_ms": 0.0,
+            "estimated_supply_gap_ms": 0.0, "pacing_wait_ms": 0.0,
+            "max_write_wait_ms": 0.0, "coalescer_timeout_flushes": 0,
+            "output_sessions": 0, "interruption_flushes": 0,
+            "interrupted_writes": 0, "padded_tail_frames": 0,
+            "interruption_discarded_bytes": 0, "runtime_underrun_frames": 0,
+            "runtime_underrun_events": 0, "runtime_dropped_frames": 0,
+            "runtime_flushed_frames": 0, "runtime_route_changes": 0,
+            "runtime_buffered_ms": 0.0, "runtime_target_buffer_ms": 0,
+            "runtime_metrics_samples": 0, "runtime_metrics_failures": 0,
+        }
+        self._last_chunk_at: Optional[float] = None
+        self._metrics_seen: Dict[str, int] = {}
+        self._metrics_task: Optional[asyncio.Task] = None
         self._worker = asyncio.create_task(self._run())
+
+    def _begin_response(self) -> None:
+        self._response_index += 1
+
+    @property
+    def diagnostics(self) -> Dict[str, object]:
+        """Bounded metadata only; estimated supply gaps are not measured sound."""
+        return dict(self._diagnostics)
+
+    def _sample_metrics(self, output) -> None:
+        metrics = output.metrics
+        for source, dest in (("underrun_frames", "runtime_underrun_frames"),
+                ("underrun_events", "runtime_underrun_events"),
+                ("dropped_frames", "runtime_dropped_frames"),
+                ("flushed_frames", "runtime_flushed_frames"),
+                ("route_changes", "runtime_route_changes")):
+            current = getattr(metrics, source, 0)
+            self._diagnostics[dest] += max(0, current - self._metrics_seen.get(source, 0))
+            self._metrics_seen[source] = current
+        self._diagnostics["runtime_buffered_ms"] = getattr(metrics, "buffered_milliseconds", 0)
+        self._diagnostics["runtime_target_buffer_ms"] = getattr(metrics, "target_buffer_milliseconds", 0)
+        self._diagnostics["runtime_metrics_samples"] += 1
+        self._lifecycle("playback_diagnostics", **self.diagnostics)
+
+    async def _poll_output_metrics(self) -> None:
+        while True:
+            await asyncio.sleep(.25)
+            output = self._output
+            if output is not None and hasattr(output, "refresh"):
+                try:
+                    await asyncio.wait_for(output.refresh(), 1.0)
+                    if self._output is output:
+                        self._sample_metrics(output)
+                except Exception:
+                    self._diagnostics["runtime_metrics_failures"] += 1
 
     def _lifecycle(self, event_type: str, **details: object) -> None:
         if self._lifecycle_callback is None:
@@ -643,15 +712,24 @@ class RuntimeResponsePlayer:
             raise RuntimeError(
                 f"provider response format changed from {self._format!r} "
                 f"to {event.audio_format!r}")
+        now = self._clock()
+        self._diagnostics["provider_chunks"] += 1
+        if self._last_chunk_at is not None:
+            self._diagnostics["max_provider_chunk_interval_ms"] = max(
+                self._diagnostics["max_provider_chunk_interval_ms"],
+                (now - self._last_chunk_at) * 1_000)
+        self._last_chunk_at = now
         data = bytes(event.audio)
         frame_size = (event.audio_format.channels
                       * event.audio_format.sample_format.bytes_per_sample)
         if len(data) % frame_size:
             raise RuntimeError(
                 f"{event.provider} returned a partial interleaved PCM frame")
+        if self._response_index == 0:
+            self._response_index = 1
         await self._enqueue(_QueuedProviderAudio(
             event.provider, data, event.audio_format,
-            epoch=self._response_epoch))
+            epoch=self._response_epoch, response_index=self._response_index))
         if self._debug:
             print(
                 f"\nOutput debug: buffered {len(data)} provider audio bytes "
@@ -661,9 +739,10 @@ class RuntimeResponsePlayer:
         """Flush a provider response's final sub-packet PCM tail."""
         if self._format is None:
             return
+        self._last_chunk_at = None
         await self._enqueue(_QueuedProviderAudio(
             "provider", b"", self._format, finish_response=True,
-            epoch=self._response_epoch))
+            epoch=self._response_epoch, response_index=self._response_index))
 
     async def interrupt_response(self) -> None:
         """Discard queued/generated speech after a provider barge-in event."""
@@ -672,6 +751,8 @@ class RuntimeResponsePlayer:
         if self._format is None:
             return
         self._response_epoch += 1
+        self._last_chunk_at = None
+        self._diagnostics["interruption_flushes"] += 1
         while True:
             try:
                 item = self._queue.get_nowait()
@@ -679,6 +760,7 @@ class RuntimeResponsePlayer:
                 break
             if item is not None:
                 self._pending_bytes -= len(item.data)
+                self._diagnostics["interruption_discarded_bytes"] += len(item.data)
             self._queue.task_done()
         cleanup = None
         writing = self._active_write
@@ -692,7 +774,8 @@ class RuntimeResponsePlayer:
             cleanup.add_done_callback(self._discard_finished)
         await self._enqueue(_QueuedProviderAudio(
             "provider", b"", self._format, interrupt_response=True,
-            epoch=self._response_epoch, cleanup=cleanup))
+            epoch=self._response_epoch, cleanup=cleanup,
+            response_index=self._response_index))
         if cleanup is not None:
             await asyncio.shield(cleanup)
 
@@ -700,6 +783,7 @@ class RuntimeResponsePlayer:
         try:
             if output is not None:
                 await output.aclose(drain=False)
+                self._sample_metrics(output)
         finally:
             await asyncio.gather(writing, return_exceptions=True)
 
@@ -738,6 +822,10 @@ class RuntimeResponsePlayer:
             destination=self._destination,
             format=audio_format,
         )
+        self._diagnostics["output_sessions"] += 1
+        self._metrics_seen = {}
+        if self._metrics_task is None:
+            self._metrics_task = asyncio.create_task(self._poll_output_metrics())
         print(
             f"\nPlaying {provider} responses through "
             f"{self._output.info.destination_id} "
@@ -745,6 +833,7 @@ class RuntimeResponsePlayer:
 
     async def _write_paced(
         self, provider: str, data: bytes, audio_format: AudioFormat, epoch: int,
+        response_index: int = 1,
     ) -> bool:
         if epoch != self._response_epoch:
             return False
@@ -754,12 +843,16 @@ class RuntimeResponsePlayer:
         frame_count = len(data) // frame_size
         duration = frame_count / audio_format.sample_rate
         now = self._clock()
+        if (self._expecting_audio and self._playback_cursor is not None
+                and self._playback_cursor < now):
+            self._diagnostics["estimated_supply_gap_ms"] += (now-self._playback_cursor)*1_000
         if self._playback_cursor is None or self._playback_cursor < now:
             self._playback_cursor = now
         lead = self._playback_cursor - now
         if lead + duration > self._max_playback_lead_seconds:
-            await self._sleep(
-                lead + duration - self._max_playback_lead_seconds)
+            delay = lead + duration - self._max_playback_lead_seconds
+            self._diagnostics["pacing_wait_ms"] += delay * 1_000
+            await self._sleep(delay)
             now = self._clock()
             if self._playback_cursor < now:
                 self._playback_cursor = now
@@ -767,21 +860,26 @@ class RuntimeResponsePlayer:
             return False
         writing = asyncio.create_task(self._output.write(data))
         self._active_write = writing
+        write_started = self._clock()
         try:
             await writing
         except asyncio.CancelledError:
             if epoch != self._response_epoch and not self._closed:
+                self._diagnostics["interrupted_writes"] += 1
                 return False
             raise
         finally:
+            self._diagnostics["max_write_wait_ms"] = max(
+                self._diagnostics["max_write_wait_ms"], (self._clock()-write_started)*1_000)
             if self._active_write is writing:
                 self._active_write = None
         if epoch != self._response_epoch:
             return False
         self._playback_cursor += duration
-        if self._output_started_epoch != epoch:
-            self._output_started_epoch = epoch
-            self._lifecycle("output_started", epoch=epoch)
+        self._expecting_audio = True
+        if self._output_started_epoch != response_index:
+            self._output_started_epoch = response_index
+            self._lifecycle("output_started", epoch=epoch, response_index=response_index)
         return True
 
     async def _flush_audio(
@@ -792,6 +890,7 @@ class RuntimeResponsePlayer:
         epoch: int,
         *,
         final: bool,
+        response_index: int = 1,
     ) -> None:
         frame_size = (audio_format.channels
                       * audio_format.sample_format.bytes_per_sample)
@@ -803,51 +902,79 @@ class RuntimeResponsePlayer:
         chunk_bytes = chunk_frames * frame_size
         while len(pending) >= chunk_bytes:
             if epoch != self._response_epoch:
+                self._diagnostics["interruption_discarded_bytes"] += len(pending)
                 pending.clear()
                 return
             chunk = bytes(pending[:chunk_bytes])
             del pending[:chunk_bytes]
             if not await self._write_paced(
-                    provider, chunk, audio_format, epoch):
+                    provider, chunk, audio_format, epoch, response_index):
+                self._diagnostics["interruption_discarded_bytes"] += len(chunk)+len(pending)
                 pending.clear()
                 return
         if final and pending:
             if epoch != self._response_epoch:
+                self._diagnostics["interruption_discarded_bytes"] += len(pending)
                 pending.clear()
                 return
             if len(pending) < minimum_bytes:
+                self._diagnostics["padded_tail_frames"] += (minimum_bytes-len(pending))//frame_size
                 pending.extend(b"\0" * (minimum_bytes - len(pending)))
             chunk = bytes(pending)
             pending.clear()
-            await self._write_paced(provider, chunk, audio_format, epoch)
+            if not await self._write_paced(provider, chunk, audio_format, epoch, response_index):
+                self._diagnostics["interruption_discarded_bytes"] += len(chunk)
 
     async def _run(self) -> None:
         pending = bytearray()
         pending_provider = "provider"
+        pending_response_index = 1
+        pending_deadline: Optional[float] = None
+        loop = asyncio.get_running_loop()
         try:
             while True:
-                item = await self._queue.get()
+                try:
+                    if pending and self._queue.empty():
+                        remaining = pending_deadline - loop.time()
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError
+                        item = await asyncio.wait_for(self._queue.get(), remaining)
+                    else:
+                        item = await self._queue.get()
+                except asyncio.TimeoutError:
+                    self._diagnostics["coalescer_timeout_flushes"] += 1
+                    await self._flush_audio(pending, pending_provider, self._format,
+                                            self._response_epoch, final=True,
+                                            response_index=pending_response_index)
+                    continue
                 try:
                     if item is None:
                         if self._format is not None:
                             await self._flush_audio(
                                 pending, pending_provider, self._format,
-                                self._response_epoch, final=True)
+                                self._response_epoch, final=True,
+                                response_index=pending_response_index)
                         return
                     if item.interrupt_response:
+                        self._diagnostics["interruption_discarded_bytes"] += len(pending)
                         pending.clear()
                         self._playback_cursor = None
+                        self._expecting_audio = False
                         self._output_started_epoch = None
                         if item.cleanup is not None:
                             await asyncio.shield(item.cleanup)
                         elif self._output is not None:
                             await self._output.flush()
-                        self._lifecycle("output_flushed", epoch=item.epoch)
+                        self._lifecycle("output_flushed", epoch=item.epoch,
+                                        response_index=item.response_index)
                         continue
                     if item.epoch != self._response_epoch:
                         continue
                     if item.data:
                         pending_provider = item.provider
+                        pending_response_index = item.response_index
+                        if not pending:
+                            pending_deadline = loop.time() + self._output_chunk_milliseconds / 1_000
                         pending.extend(item.data)
                     await self._flush_audio(
                         pending,
@@ -855,7 +982,10 @@ class RuntimeResponsePlayer:
                         item.audio_format,
                         item.epoch,
                         final=item.finish_response,
+                        response_index=pending_response_index,
                     )
+                    if item.finish_response:
+                        self._expecting_audio = False
                 finally:
                     if item is not None:
                         self._pending_bytes -= len(item.data)
@@ -872,6 +1002,7 @@ class RuntimeResponsePlayer:
                 if item is not None:
                     self._pending_bytes -= len(item.data)
                 self._queue.task_done()
+            self._lifecycle("playback_failed", error_type=type(error).__name__)
             if self._on_failure is not None:
                 self._on_failure(error)
 
@@ -892,12 +1023,16 @@ class RuntimeResponsePlayer:
                 drain = False
                 self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
+        if self._metrics_task is not None:
+            self._metrics_task.cancel()
+            await asyncio.gather(self._metrics_task, return_exceptions=True)
         output, self._output = self._output, None
         await asyncio.gather(*tuple(self._discard_tasks), return_exceptions=True)
         if output is not None:
             await output.aclose(drain=drain)
+            self._sample_metrics(output)
             if self._debug:
-                print(f"\nOutput debug: {output.metrics!r}")
+                print(f"\nOutput diagnostics: {json.dumps(self.diagnostics, sort_keys=True)}")
 
 
 def add_agent_arguments(
@@ -1068,6 +1203,10 @@ async def print_provider_events(
         async for event in sink.events():
             if validation is not None:
                 validation.provider_event(event)
+            if event.response_started and response_player is not None:
+                begin = getattr(response_player, "_begin_response", None)
+                if begin is not None:
+                    begin()
             if event.response_started and input_forwarder is not None:
                 input_forwarder.pause()
             if event.text:
@@ -1091,11 +1230,13 @@ async def print_provider_events(
     except ProviderError as error:
         if validation is not None:
             validation.lifecycle_warnings.append("provider receive failed")
+        done.set()
         print(f"\nProvider receive failed: {terminal_safe(error.message)} (retryable={error.retryable})")
-        done.set()
     except (OSError, RuntimeError, SonexisError) as error:
-        print(f"\nResponse playback failed: {terminal_safe(error)}")
         done.set()
+        if validation is not None and "response playback failed" not in validation.lifecycle_warnings:
+            validation.lifecycle_warnings.append("response playback failed")
+        print(f"\nResponse playback failed: {terminal_safe(error)}")
 
 
 async def report_stats(stats: StreamStats, done: asyncio.Event) -> None:
@@ -1200,8 +1341,9 @@ async def run_live(
                     detail = f"{error.message} (retryable={error.retryable})"
                 else:
                     detail = str(error)
-                print(f"\nProvider send failed: {terminal_safe(detail)}")
                 done.set()
+                validation.lifecycle_warnings.append("provider send failed")
+                print(f"\nProvider send failed: {terminal_safe(detail)}")
 
             input_forwarder = ProviderInputForwarder(
                 sink, stats, on_failure=provider_input_failed)
@@ -1316,8 +1458,10 @@ async def run_agent(args: argparse.Namespace) -> int:
                 args.socket, client_name="audioplane-agent-output")
             await response_client.connect()
             def response_playback_failed(error: Exception) -> None:
-                print(f"\nResponse playback failed: {terminal_safe(error)}")
                 done.set()
+                if "response playback failed" not in validation.lifecycle_warnings:
+                    validation.lifecycle_warnings.append("response playback failed")
+                print(f"\nResponse playback failed: {terminal_safe(error)}")
 
             response_player = RuntimeResponsePlayer(
                 response_client,

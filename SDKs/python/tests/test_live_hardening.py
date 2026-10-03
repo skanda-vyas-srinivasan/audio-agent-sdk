@@ -94,6 +94,7 @@ class AdapterTimingTests(unittest.IsolatedAsyncioTestCase):
         await sink.aclose()
 
 
+
 class ShutdownTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_setup_failure_still_persists_report(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -113,3 +114,155 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.TimeoutError):
                 await asyncio.wait_for(agent.close_provider_session(Sink(), receive), 0.2)
         self.assertTrue(receive.done())
+
+
+class PlaybackGapTests(unittest.IsolatedAsyncioTestCase):
+    class Output:
+        info=SimpleNamespace(id='output', destination_id='offline')
+        def __init__(self):
+            self.writes=[]
+            self.metrics=SimpleNamespace(underrun_frames=17, underrun_events=1,
+                dropped_frames=0, flushed_frames=0, queue_depth_frames=0,
+                buffered_milliseconds=0, target_buffer_milliseconds=60, route_changes=0)
+        async def write(self, data): self.writes.append(bytes(data))
+        async def flush(self): pass
+        async def refresh(self): return SimpleNamespace(metrics=self.metrics)
+        async def aclose(self, **kw): pass
+    class Client:
+        def __init__(self): self.outputs=[]
+        async def playback(self, **kw):
+            output=PlaybackGapTests.Output();self.outputs.append(output);return output
+
+    async def test_tiny_chunk_is_not_held_through_producer_stall(self):
+        client=self.Client();player=agent.RuntimeResponsePlayer(client,'offline',debug=False)
+        data=b'\1\2'*480
+        try:
+            await player.write(ProviderEvent('gemini','audio',audio=data,
+                                  audio_format=AudioFormat.gemini_live_output()))
+            await player._queue.join()
+            await asyncio.sleep(.09)
+            self.assertTrue(client.outputs, '20 ms PCM still waiting for a future provider event')
+            self.assertEqual(b''.join(client.outputs[0].writes),data)
+        finally: await player.close()
+
+    async def test_continuous_tiny_chunks_do_not_reset_coalescing_deadline(self):
+        client=self.Client();player=agent.RuntimeResponsePlayer(client,'offline',debug=False)
+        async def produce():
+            for _ in range(20):
+                await player.write(ProviderEvent('gemini','audio',audio=b"\1\2"*24,
+                    audio_format=AudioFormat.gemini_live_output()))
+                await asyncio.sleep(.01)
+        producer=asyncio.create_task(produce())
+        try:
+            await asyncio.sleep(.09)
+            self.assertTrue(client.outputs, "tiny arrivals indefinitely extend the coalescing wait")
+            self.assertFalse(producer.done())
+        finally:
+            await producer
+            await player.finish_response()
+            await player.close()
+        self.assertEqual(b"".join(client.outputs[0].writes), b"\1\2"*480)
+
+    async def test_burst_pacing_and_stall_diagnostics_do_not_log_pcm(self):
+        now=[0.0];delays=[];lifecycle=[]
+        async def sleep(delay): delays.append(delay);now[0]+=delay;await asyncio.sleep(0)
+        client=self.Client();player=agent.RuntimeResponsePlayer(client,'offline',debug=False,
+            clock=lambda:now[0],sleep=sleep,lifecycle_callback=lifecycle.append)
+        fmt=AudioFormat.gemini_live_output();data=b'\1\2'*1200
+        try:
+            for _ in range(20): await player.write(ProviderEvent('gemini','audio',audio=data,audio_format=fmt))
+            await player._queue.join()
+            self.assertLessEqual(player._playback_cursor-now[0],.150001)
+            now[0]+=1
+            await player.write(ProviderEvent('gemini','audio',audio=data,audio_format=fmt))
+            await player.finish_response()
+            await player._queue.join()
+        finally: await player.close()
+        self.assertEqual(b''.join(client.outputs[0].writes),data*21)
+        metrics=player.diagnostics
+        self.assertGreater(metrics['max_provider_chunk_interval_ms'],900)
+        self.assertGreater(metrics['estimated_supply_gap_ms'],500)
+        self.assertGreater(metrics['pacing_wait_ms'],500)
+        self.assertEqual(metrics['runtime_underrun_events'],1)
+        self.assertEqual(metrics['output_sessions'],1)
+        self.assertNotIn('audio', json.dumps([dict(e.details) for e in lifecycle]))
+
+    async def test_interruption_of_blocked_short_tail_counts_discard_and_write_wait(self):
+        started=asyncio.Event()
+        class Output(self.Output):
+            async def write(self, data):
+                started.set();await asyncio.Event().wait()
+        class Client:
+            async def playback(self, **kwargs):return Output()
+        player=agent.RuntimeResponsePlayer(Client(),'offline',debug=False)
+        data=b"\1\2"*480
+        try:
+            await player.write(ProviderEvent('gemini','audio',audio=data,
+                audio_format=AudioFormat.gemini_live_output()))
+            await asyncio.wait_for(started.wait(),.3)
+            await asyncio.wait_for(player.interrupt_response(),.2)
+            await asyncio.sleep(0)
+        finally:await player.close()
+        self.assertEqual(player.diagnostics['interrupted_writes'],1)
+        self.assertEqual(player.diagnostics['interruption_discarded_bytes'],len(data))
+        self.assertGreater(player.diagnostics['max_write_wait_ms'],0)
+
+    async def test_worker_failure_after_completed_response_cannot_pass_validation(self):
+        tracker=agent.LiveValidationTracker(enabled=False);done=asyncio.Event()
+        for name in ('activity_started','activity_ended','input_finalized'):
+            tracker.lifecycle(ProviderLifecycleEvent('gemini',name))
+        class Output(self.Output):
+            async def write(self,data):raise RuntimeError('private error content')
+        class Client:
+            async def playback(self,**kw):return Output()
+        class Sink:
+            async def events(self):
+                yield ProviderEvent('gemini','audio',response_started=True,response_completed=True,
+                    audio=b"\1\2"*1200,audio_format=AudioFormat.gemini_live_output())
+        player=agent.RuntimeResponsePlayer(Client(),'offline',debug=False,
+            on_failure=lambda error:done.set(),lifecycle_callback=tracker.response_playback_event)
+        await agent.print_provider_events(Sink(),done,response_player=player,validation=tracker)
+        await player._queue.join();await player.close()
+        report=tracker.final_report()
+        self.assertEqual(report['status'],'warn')
+        self.assertIn('response playback failed',report['warnings'])
+        self.assertNotIn('private error content',json.dumps(report))
+
+    async def test_receive_side_playback_failure_is_scalar_warning(self):
+        tracker=agent.LiveValidationTracker(enabled=False)
+        class Player:
+            async def write(self,event):raise RuntimeError('private error content')
+        class Sink:
+            async def events(self):
+                yield ProviderEvent('gemini','audio',response_started=True,response_completed=True,
+                    audio=b"\1\2"*1200,audio_format=AudioFormat.gemini_live_output())
+        await agent.print_provider_events(Sink(),asyncio.Event(),response_player=Player(),validation=tracker)
+        report=tracker.final_report()
+        self.assertIn('response playback failed',report['warnings'])
+        self.assertNotIn('private error content',json.dumps(report))
+
+    async def test_submillisecond_tail_is_padded_once_and_not_lost(self):
+        client=self.Client();player=agent.RuntimeResponsePlayer(client,'offline',debug=False)
+        data=b'\1\2'*5
+        await player.write(ProviderEvent('gemini','audio',audio=data,
+                              audio_format=AudioFormat.gemini_live_output()))
+        await player.finish_response();await player._queue.join();await player.close()
+        self.assertEqual(client.outputs[0].writes,[data+b'\0'*(48-len(data))])
+
+
+class PlaybackCorrelationTests(unittest.TestCase):
+    def test_delayed_output_is_attached_to_its_response_not_latest_input(self):
+        tracker=agent.LiveValidationTracker(enabled=False)
+        def edge(name, ms): tracker.lifecycle(ProviderLifecycleEvent('gemini',name,timestamp_ns=ms*1_000_000))
+        edge('activity_started',0)
+        first=ProviderEvent('gemini','message',response_started=True,response_completed=True)
+        with mock.patch.object(agent.time,'monotonic_ns',return_value=100_000_000):
+            tracker.provider_event(first);tracker.finish_provider_event(first)
+        edge('activity_ended',200);edge('input_finalized',201)
+        edge('activity_started',300)
+        with mock.patch.object(agent.time,'monotonic_ns',return_value=400_000_000):
+            tracker.provider_event(ProviderEvent('gemini','message',response_started=True))
+        tracker.response_playback_event(ProviderLifecycleEvent('audioplane','output_started',
+            timestamp_ns=500_000_000,details={'response_index':1}))
+        self.assertEqual(tracker.turns[0].output_started_ns,500_000_000)
+        self.assertIsNone(tracker.turns[1].output_started_ns)

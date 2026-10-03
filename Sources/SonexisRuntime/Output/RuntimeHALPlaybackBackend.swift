@@ -201,6 +201,25 @@ final class RuntimePlaybackConverter {
     }
 }
 
+// Worker-side startup/re-prime policy. The HAL callback only sees readEnabled.
+struct RuntimePlaybackPriming {
+    private var pendingSince: UInt64?
+
+    mutating func shouldStart(fill: UInt32, target: UInt32, sampleRate: Double,
+                              now: UInt64) -> Bool {
+        guard fill > 0 else { pendingSince = nil; return false }
+        if pendingSince == nil { pendingSince = now }
+        let wait = UInt64(Double(target) * 1_000_000_000 / sampleRate)
+        if fill >= target || now - pendingSince! >= wait {
+            pendingSince = nil
+            return true
+        }
+        return false
+    }
+
+    mutating func reset() { pendingSince = nil }
+}
+
 public final class RuntimeHALPlaybackBackend: RuntimeOutputBackend, @unchecked Sendable {
     public init() {}
 
@@ -304,6 +323,7 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         let retainedRingOpaque: UnsafeMutableRawPointer
         let targetFillFrames: UInt32
         var primed = false
+        var priming = RuntimePlaybackPriming()
 
         init(deviceID: AudioDeviceID, deviceName: String, deviceSampleRate: Double,
              deviceChannels: UInt32, hardwareLatencyMilliseconds: Double,
@@ -434,7 +454,9 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
                 message: "Playback route changed while accepting audio", retryable: true)
         }
         queueHighWater = max(queueHighWater, fill)
-        if !route.primed, fill >= route.targetFillFrames {
+        if !route.primed, route.priming.shouldStart(fill: fill,
+            target: route.targetFillFrames, sampleRate: route.deviceSampleRate,
+            now: DispatchTime.now().uptimeNanoseconds) {
             route.primed = true
             route.ring.setReadEnabled(true)
         }
@@ -511,6 +533,7 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
         let discarded = route.ring.flush()
         route.converter.reset()
         route.primed = false
+        route.priming.reset()
         lastTimestamp = nil
         flushedFrames &+= UInt64(discarded)
     }
@@ -844,10 +867,18 @@ private final class RuntimeHALPlaybackSession: RuntimeBackendOutputSession, @unc
                 underflowDelta = current - lastUnderflowFrames
                 if route.ring.fillFrames == 0, !finishing {
                     route.primed = false
+                    route.priming.reset()
                     route.ring.setReadEnabled(false)
                 }
             }
             lastUnderflowFrames = current
+            if !route.primed, !finishing,
+               route.priming.shouldStart(fill: route.ring.fillFrames,
+                   target: route.targetFillFrames, sampleRate: route.deviceSampleRate,
+                   now: DispatchTime.now().uptimeNanoseconds) {
+                route.primed = true
+                route.ring.setReadEnabled(true)
+            }
         }
         shouldCheckDrain = finishing
         routeLock.unlock()

@@ -260,7 +260,7 @@ class AgentPlaybackLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await player.close()
         self.assertEqual(client.output.flushes, 1)
         self.assertEqual(
-            [event.type for event in lifecycle],
+            [event.type for event in lifecycle if event.type != "playback_diagnostics"],
             ["output_started", "output_flushed"],
         )
 

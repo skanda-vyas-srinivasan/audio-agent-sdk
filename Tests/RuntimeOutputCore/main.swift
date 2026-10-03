@@ -41,6 +41,27 @@ private func expectDiscoveryError(_ expected: String,
 }
 
 do {
+    var priming = RuntimePlaybackPriming()
+    expect(!priming.shouldStart(fill: 960, target: 2880, sampleRate: 48000, now: 0),
+           "short PCM should use the existing bounded priming window")
+    expect(!priming.shouldStart(fill: 960, target: 2880, sampleRate: 48000, now: 59_000_000),
+           "partial buffer should not prime before its target duration")
+    expect(priming.shouldStart(fill: 960, target: 2880, sampleRate: 48000, now: 60_000_000),
+           "partial PCM must not wait indefinitely below target fill")
+    priming.reset()
+    expect(priming.shouldStart(fill: 2880, target: 2880, sampleRate: 48000, now: 0),
+           "full buffers must prime immediately")
+    priming.reset()
+    expect(!priming.shouldStart(fill: 0, target: 2880, sampleRate: 48000, now: 0),
+           "empty buffers must never prime")
+    expect(!priming.shouldStart(fill: 480, target: 2880, sampleRate: 48000, now: 100_000_000),
+           "an underrun/flush must start a fresh priming deadline")
+    expect(priming.shouldStart(fill: 480, target: 2880, sampleRate: 48000, now: 160_000_000),
+           "short resumed audio must re-prime by its deadline")
+}
+
+
+do {
     let defaultDestination = RuntimeOutputDestinationDTO(id: "default", kind: .playback,
         name: "System Default", isAvailable: true, isDefault: true,
         followsSystemDefault: true)
