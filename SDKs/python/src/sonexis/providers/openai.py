@@ -59,9 +59,16 @@ class OpenAIRealtimeSink:
                 "missing_dependency",
                 "Install the Sonexis 'openai' extra (openai[realtime])",
             ) from error
-        client = AsyncOpenAI(api_key=key)
-        context = client.live.connect()
+        client = None
+        context = None
         try:
+            client = AsyncOpenAI(api_key=key)
+            live = getattr(client, "live", None)
+            if not callable(getattr(live, "connect", None)):
+                raise ProviderError("incompatible_dependency",
+                    "OpenAI GPT-Live requires openai[realtime]>=3.24.0,<4; "
+                    "upgrade the AudioPlane 'openai' extra")
+            context = live.connect()
             connection = await asyncio.wait_for(
                 context.__aenter__(), timeout=handshake_timeout)
             await asyncio.wait_for(connection.session.start(
@@ -86,10 +93,19 @@ class OpenAIRealtimeSink:
             sink._event_iterator = iterator
             return sink
         except BaseException as error:
-            try:
-                await context.__aexit__(None, None, None)
-            finally:
-                await client.close()
+            # Factory/enter failures may have partially constructed resources.
+            # Cleanup must be bounded and must not mask the original failure.
+            if context is not None:
+                try:
+                    await asyncio.wait_for(context.__aexit__(None, None, None),
+                                           timeout=close_timeout)
+                except BaseException:
+                    pass
+            if client is not None:
+                try:
+                    await asyncio.wait_for(client.close(), timeout=close_timeout)
+                except BaseException:
+                    pass
             if isinstance(error, (asyncio.CancelledError, ProviderError)):
                 raise
             raise ProviderError("provider_handshake_failed",

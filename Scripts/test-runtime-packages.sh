@@ -47,6 +47,13 @@ requirements = [Requirement(item) for item in requires("audioplane") or []]
 for extra in ("gemini", "ai"):
     assert any(item.name == "webrtcvad-wheels" and item.marker.evaluate({"extra": extra})
                for item in requirements), "speech VAD dependency missing from " + extra
+for extra in ("openai", "ai"):
+    matches = [item for item in requirements if item.name == "openai"
+               and item.marker.evaluate({"extra": extra, "python_version": "3.10"})]
+    assert matches, "OpenAI dependency missing from " + extra
+    for item in matches:
+        assert "3.24.0" in item.specifier and "2.0.0" not in item.specifier
+        assert "4.0.0" not in item.specifier, "unqualified OpenAI major version accepted"
 PY
 "$TEST_DIR/python-wheel-env/bin/audioplane" version | grep -F "AudioPlane $VERSION" >/dev/null
 "$TEST_DIR/python-wheel-env/bin/audioplane" agent --help >/dev/null
