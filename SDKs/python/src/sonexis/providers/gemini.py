@@ -123,6 +123,8 @@ class GeminiLiveSink:
         self._terminal_send_error = False
         self._response_in_progress = False
         self._last_turn_finalized_at: Optional[int] = None
+        self._segment_responded = False
+        self._ambiguous_turn_timing = False
         self._events_active = False
         self._debug_input_frames = 0
         self._debug_next_level_frame = self.required_format.sample_rate
@@ -249,7 +251,9 @@ class GeminiLiveSink:
         except BaseException:
             self._terminal_send_error = True
             raise
-        self._last_turn_finalized_at = time.monotonic_ns()
+        if not self._segment_responded:
+            self._ambiguous_turn_timing |= self._last_turn_finalized_at is not None
+            self._last_turn_finalized_at = time.monotonic_ns()
         self._debug("audio_stream_end sent")
         self._lifecycle("input_finalized")
         return flushed_bytes
@@ -282,10 +286,11 @@ class GeminiLiveSink:
             pending = self._candidate_frames
             self._candidate_frames = []
             sent_bytes = 0
-            for candidate in pending:
-                sent_bytes += await self._queue_frame(candidate)
+            self._segment_responded = False
             self._debug("local activity start")
             self._lifecycle("activity_started")
+            for candidate in pending:
+                sent_bytes += await self._queue_frame(candidate)
             return sent_bytes
 
         sent_bytes = await self._queue_frame(frame)
@@ -370,13 +375,22 @@ class GeminiLiveSink:
                     response_started = has_response and not self._response_in_progress
                     if response_started:
                         self._response_in_progress = True
-                        timing = ""
-                        if self._last_turn_finalized_at is not None:
+                        timing = " (local timing unknown)"
+                        if self._segment_open or self._activity_detector.active:
+                            self._segment_responded = True
+                            timing = (" (local timing ambiguous)"
+                                      if self._last_turn_finalized_at is not None
+                                      else " (before local finalization; latency unavailable)")
+                        elif (self._last_turn_finalized_at is not None
+                              and not self._ambiguous_turn_timing):
                             latency_ms = ((time.monotonic_ns()
-                                           - self._last_turn_finalized_at)
-                                          / 1_000_000)
-                            timing = f" ({latency_ms:.0f} ms after turn end)"
-                            self._last_turn_finalized_at = None
+                                           - self._last_turn_finalized_at) / 1_000_000)
+                            timing = (f" ({latency_ms:.0f} ms since local finalization; "
+                                      "single segment candidate)")
+                        elif self._ambiguous_turn_timing:
+                            timing = " (local timing ambiguous)"
+                        self._last_turn_finalized_at = None
+                        self._ambiguous_turn_timing = False
                         self._debug(f"Gemini response start{timing}")
                         self._lifecycle("response_started")
                     interrupted = bool(getattr(server, "interrupted", False))

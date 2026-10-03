@@ -52,9 +52,11 @@ class AgentCLIAndDiagnosticsTests(unittest.TestCase):
                 "gemini", "activity_ended", timestamp_ns=2_000_000))
             tracker.lifecycle(ProviderLifecycleEvent(
                 "gemini", "input_finalized", timestamp_ns=3_000_000))
-            tracker.provider_event(ProviderEvent(
-                "gemini", "output_transcription", text="private transcript",
-                response_started=True))
+            with mock.patch.object(__import__("audioplane.agent", fromlist=["time"]).time,
+                                   "monotonic_ns", return_value=4_000_000):
+                tracker.provider_event(ProviderEvent(
+                    "gemini", "output_transcription", text="private transcript",
+                    response_started=True))
             tracker.lifecycle(ProviderLifecycleEvent(
                 "audioplane", "output_started", timestamp_ns=5_000_000))
             tracker.provider_event(ProviderEvent(

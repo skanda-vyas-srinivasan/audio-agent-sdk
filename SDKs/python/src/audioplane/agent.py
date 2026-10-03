@@ -246,10 +246,12 @@ class TurnValidation:
     response_interrupted_ns: Optional[int] = None
     output_flushed_ns: Optional[int] = None
     warnings: List[str] = field(default_factory=list)
+    correlation: str = "unknown"
+    candidate_segments: List[int] = field(default_factory=list)
 
     @staticmethod
     def _milliseconds(start: Optional[int], end: Optional[int]) -> Optional[float]:
-        if start is None or end is None:
+        if start is None or end is None or end < start:
             return None
         return max(0.0, (end - start) / 1_000_000)
 
@@ -257,10 +259,13 @@ class TurnValidation:
         terminal = self.response_completed_ns or self.response_interrupted_ns
         return {
             "turn": self.index,
+            "correlation": self.correlation,
+            "candidate_segments": list(self.candidate_segments),
             "finalize_ms": self._milliseconds(
                 self.activity_ended_ns, self.input_finalized_ns),
             "response_start_ms": self._milliseconds(
-                self.input_finalized_ns, self.response_started_ns),
+                self.input_finalized_ns, self.response_started_ns)
+                if self.correlation == "single_segment_candidate" else None,
             "output_start_ms": self._milliseconds(
                 self.response_started_ns, self.output_started_ns),
             "response_duration_ms": self._milliseconds(
@@ -310,7 +315,9 @@ class LiveValidationTracker:
                 self.lifecycle_warnings.append("duplicate input finalization")
                 return
             self._current_activity.input_finalized_ns = timestamp
-            self._awaiting_response.append(self._current_activity)
+            if (self._current_activity.response_started_ns is None
+                    and self._current_activity.correlation != "ambiguous"):
+                self._awaiting_response.append(self._current_activity)
             self._current_activity = None
         elif event.type == "output_started":
             if self._active_response is not None:
@@ -325,12 +332,27 @@ class LiveValidationTracker:
         if event.response_started:
             if self._active_response is not None:
                 self.lifecycle_warnings.append("response started before prior response ended")
-            if self._awaiting_response:
-                turn = self._awaiting_response.popleft()
+            candidates = list(self._awaiting_response)
+            if (self._current_activity is not None
+                    and self._current_activity.response_started_ns is None
+                    and self._current_activity.correlation != "ambiguous"):
+                candidates.append(self._current_activity)
+            self._awaiting_response.clear()
+            if len(candidates) == 1:
+                turn = candidates[0]
+                turn.correlation = ("early" if turn.input_finalized_ns is None
+                                    else "single_segment_candidate")
             else:
                 turn = TurnValidation(index=len(self.turns) + 1)
-                turn.warnings.append("provider response has no correlated local turn")
+                turn.correlation = "ambiguous" if candidates else "unknown"
+                turn.warnings.append("provider response has " + turn.correlation
+                                     + " local timing correlation")
                 self.turns.append(turn)
+                # Consume the candidate window once. It cannot be assigned to
+                # a later response by FIFO, even if a local end arrives later.
+                for candidate in candidates:
+                    candidate.correlation = "ambiguous"
+            turn.candidate_segments = [candidate.index for candidate in candidates]
             turn.response_started_ns = timestamp
             self._active_response = turn
         if event.response_interrupted:
@@ -356,8 +378,9 @@ class LiveValidationTracker:
         turn = self._active_response
         if turn is None:
             return
-        response_ms = TurnValidation._milliseconds(
+        response_ms = (TurnValidation._milliseconds(
             turn.input_finalized_ns, turn.response_started_ns)
+            if turn.correlation == "single_segment_candidate" else None)
         if isinstance(response_ms, float) and response_ms > 5_000:
             turn.warnings.append("provider response start exceeded 5000 ms")
         summary = turn.summary()
@@ -382,14 +405,15 @@ class LiveValidationTracker:
             warnings.append("session ended during provider response")
         if self._awaiting_response:
             warnings.append(
-                f"{len(self._awaiting_response)} finalized turn(s) received no response")
+                f"{len(self._awaiting_response)} finalized segment(s) received no response; "
+                "a response is not required for every local segment")
         if stats is not None and stats.provider_dropped:
             warnings.append(f"provider input dropped {stats.provider_dropped} frames")
         if capture_latency is not None and capture_latency.p95_ms > 150:
             warnings.append(
                 f"capture p95 latency is {capture_latency.p95_ms:.1f} ms")
         payload: Dict[str, object] = {
-            "status": "warn" if warnings else "pass",
+            "status": "warn" if warnings or any(t.warnings for t in self.turns) else "pass",
             "turns": [turn.summary() for turn in self.turns],
             "warnings": warnings,
         }

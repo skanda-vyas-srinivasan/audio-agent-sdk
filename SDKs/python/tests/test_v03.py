@@ -695,7 +695,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         event = await sink.events().__anext__()
         self.assertEqual(event.type, "output_transcription")
         self.assertEqual(event.text, "A concise English response.")
-        self.assertEqual(debug, ["Gemini response start", "Gemini turn complete"])
+        self.assertEqual(debug, ["Gemini response start (local timing unknown)", "Gemini turn complete"])
         await sink.aclose()
 
     async def test_gemini_input_transcription_is_visible_in_debug(self):
